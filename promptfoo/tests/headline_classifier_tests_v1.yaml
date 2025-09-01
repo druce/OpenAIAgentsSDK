@@ -1,0 +1,33 @@
+- description: "AI moderation headline - should return true"
+  vars:
+    input: "AI Is Replacing Online Moderators, But It's Bad at the Job"
+  assert:
+    - type: is-json
+      value:
+        type: object
+        properties:
+          input:
+            type: string
+          ai_related:
+            type: boolean
+        required: ["input", "ai_related"]
+        additionalProperties: false
+    - type: javascript
+      value: output.ai_related === true
+
+- description: "Non-AI absurd headline - should return false"
+  vars:
+    input: "Baby Trapped in Refrigerator Eats Own Foot"
+  assert:
+    - type: is-json
+      value:
+        type: object
+        properties:
+          input:
+            type: string
+          ai_related:
+            type: boolean
+        required: ["input", "ai_related"]
+        additionalProperties: false
+    - type: javascript
+      value: output.ai_related === false

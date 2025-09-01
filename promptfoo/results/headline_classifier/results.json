@@ -1,0 +1,721 @@
+{
+  "evalId": "eval-Wmp-2025-08-30T02:19:00",
+  "results": {
+    "version": 3,
+    "timestamp": "2025-08-30T02:19:00.331Z",
+    "prompts": [
+      {
+        "raw": "[{\"role\":\"system\",\"content\":\"You are a content-classification assistant that labels news headlines as AI-related or not.\\nReturn JSON that matches the provided schema\\n\\nA headline is AI-related if it mentions (explicitly or implicitly):\\n- Core AI models: machine learning, neural / deep / transformer networks\\n- AI Applications: computer vision, NLP, robotics, autonomous driving, generative media\\n- AI hardware, GPU chip supply, AI data centers and infrastructure\\n- Companies or labs known for AI: OpenAI, DeepMind, Anthropic, xAI, NVIDIA, etc.\\n- AI models & products: GPT-5, Gemini, Claude, Midjourney, DeepSeek, etc.\\n- New AI products and AI integration into existing products/services\\n- AI policy / ethics / safety / regulation / analysis\\n- Research results related to AI\\n- AI industry figures (Sam Altman, Demis Hassabis, Dario Amodei, etc.)\\n- AI market and business developments, funding rounds, partnerships centered on AI\\n- Any other news with a significant AI component\\n\\nNot AI-related: business software, crypto, non-AI tech, non-AI medical devices, and anything else.\\n\\nNo markdown, no explanations, just the JSON.\"},{\"role\":\"user\",\"content\":\"Classify this headline: \\n{{input}}\"}]",
+        "label": "prompts/headline_classifier_v1.json: [{\"role\":\"system\",\"content\":\"You are a content-classification assistant that labels news headlines as AI-related or not.\\nReturn JSON that matches the provided schema\\n\\nA headline is AI-related if it mentions (explicitly or implicitly):\\n- Core AI models: machine learning, neural / deep / transformer networks\\n- AI Applications: computer vision, NLP, robotics, autonomous driving, generative media\\n- AI hardware, GPU chip supply, AI data centers and infrastructure\\n- Companies or labs known for AI: OpenAI, DeepMind, Anthropic, xAI, NVIDIA, etc.\\n- AI models & products: GPT-5, Gemini, Claude, Midjourney, DeepSeek, etc.\\n- New AI products and AI integration into existing products/services\\n- AI policy / ethics / safety / regulation / analysis\\n- Research results related to AI\\n- AI industry figures (Sam Altman, Demis Hassabis, Dario Amodei, etc.)\\n- AI market and business developments, funding rounds, partnerships centered on AI\\n- Any other news with a significant AI component\\n\\nNot AI-related: business software, crypto, non-AI tech, non-AI medical devices, and anything else.\\n\\nNo markdown, no explanations, just the JSON.\"},{\"role\":\"user\",\"content\":\"Classify this headline: \\n{{input}}\"}]",
+        "id": "6324b5cda96a2c227e7827ab090596ce71242c571dcc1ae946fbe328798e8368",
+        "provider": "openai:gpt-4o-mini",
+        "metrics": {
+          "score": 2,
+          "testPassCount": 2,
+          "testFailCount": 0,
+          "testErrorCount": 0,
+          "assertPassCount": 4,
+          "assertFailCount": 0,
+          "totalLatencyMs": 28,
+          "tokenUsage": {
+            "prompt": 0,
+            "completion": 0,
+            "cached": 686,
+            "total": 686,
+            "numRequests": 2,
+            "completionDetails": {
+              "reasoning": 0,
+              "acceptedPrediction": 0,
+              "rejectedPrediction": 0
+            },
+            "assertions": {
+              "total": 0,
+              "prompt": 0,
+              "completion": 0,
+              "cached": 0,
+              "numRequests": 0,
+              "completionDetails": {
+                "reasoning": 0,
+                "acceptedPrediction": 0,
+                "rejectedPrediction": 0
+              }
+            }
+          },
+          "namedScores": {},
+          "namedScoresCount": {},
+          "cost": 0.00012089999999999998
+        }
+      },
+      {
+        "raw": "[{\"role\":\"system\",\"content\":\"You are a content-classification assistant that labels news headlines as AI-related or not.\\nReturn JSON that matches the provided schema\\n\\nA headline is AI-related if it mentions (explicitly or implicitly):\\n- Core AI models: machine learning, neural / deep / transformer networks\\n- AI Applications: computer vision, NLP, robotics, autonomous driving, generative media\\n- AI hardware, GPU chip supply, AI data centers and infrastructure\\n- Companies or labs known for AI: OpenAI, DeepMind, Anthropic, xAI, NVIDIA, etc.\\n- AI models & products: GPT-5, Gemini, Claude, Midjourney, DeepSeek, etc.\\n- New AI products and AI integration into existing products/services\\n- AI policy / ethics / safety / regulation / analysis\\n- Research results related to AI\\n- AI industry figures (Sam Altman, Demis Hassabis, Dario Amodei, etc.)\\n- AI market and business developments, funding rounds, partnerships centered on AI\\n- Any other news with a significant AI component\\n\\nNot AI-related: business software, crypto, non-AI tech, non-AI medical devices, and anything else.\\n\\nNo markdown, no explanations, just the JSON.\"},{\"role\":\"user\",\"content\":\"Classify this headline: \\n{{input}}\"}]",
+        "label": "prompts/headline_classifier_v1.json: [{\"role\":\"system\",\"content\":\"You are a content-classification assistant that labels news headlines as AI-related or not.\\nReturn JSON that matches the provided schema\\n\\nA headline is AI-related if it mentions (explicitly or implicitly):\\n- Core AI models: machine learning, neural / deep / transformer networks\\n- AI Applications: computer vision, NLP, robotics, autonomous driving, generative media\\n- AI hardware, GPU chip supply, AI data centers and infrastructure\\n- Companies or labs known for AI: OpenAI, DeepMind, Anthropic, xAI, NVIDIA, etc.\\n- AI models & products: GPT-5, Gemini, Claude, Midjourney, DeepSeek, etc.\\n- New AI products and AI integration into existing products/services\\n- AI policy / ethics / safety / regulation / analysis\\n- Research results related to AI\\n- AI industry figures (Sam Altman, Demis Hassabis, Dario Amodei, etc.)\\n- AI market and business developments, funding rounds, partnerships centered on AI\\n- Any other news with a significant AI component\\n\\nNot AI-related: business software, crypto, non-AI tech, non-AI medical devices, and anything else.\\n\\nNo markdown, no explanations, just the JSON.\"},{\"role\":\"user\",\"content\":\"Classify this headline: \\n{{input}}\"}]",
+        "id": "6324b5cda96a2c227e7827ab090596ce71242c571dcc1ae946fbe328798e8368",
+        "provider": "openai:gpt-5-mini",
+        "metrics": {
+          "score": 2,
+          "testPassCount": 2,
+          "testFailCount": 0,
+          "testErrorCount": 0,
+          "assertPassCount": 4,
+          "assertFailCount": 0,
+          "totalLatencyMs": 44,
+          "tokenUsage": {
+            "prompt": 0,
+            "completion": 0,
+            "cached": 836,
+            "total": 836,
+            "numRequests": 2,
+            "completionDetails": {
+              "reasoning": 0,
+              "acceptedPrediction": 0,
+              "rejectedPrediction": 0
+            },
+            "assertions": {
+              "total": 0,
+              "prompt": 0,
+              "completion": 0,
+              "cached": 0,
+              "numRequests": 0,
+              "completionDetails": {
+                "reasoning": 0,
+                "acceptedPrediction": 0,
+                "rejectedPrediction": 0
+              }
+            }
+          },
+          "namedScores": {},
+          "namedScoresCount": {},
+          "cost": 0.0005484999999999999
+        }
+      }
+    ],
+    "results": [
+      {
+        "cost": 0.000281,
+        "gradingResult": {
+          "pass": true,
+          "score": 1,
+          "reason": "All assertions passed",
+          "namedScores": {},
+          "tokensUsed": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0
+          },
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "is-json",
+                "value": {
+                  "type": "object",
+                  "properties": {
+                    "input": {
+                      "type": "string"
+                    },
+                    "ai_related": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "input",
+                    "ai_related"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "javascript",
+                "value": "output.ai_related === true"
+              }
+            }
+          ],
+          "assertion": null
+        },
+        "id": "44f8cf38-3fa5-4898-b873-2623bc5dafcb",
+        "latencyMs": 20,
+        "namedScores": {},
+        "prompt": {
+          "raw": "[\n  {\n    \"role\": \"system\",\n    \"content\": \"You are a content-classification assistant that labels news headlines as AI-related or not.\\nReturn JSON that matches the provided schema\\n\\nA headline is AI-related if it mentions (explicitly or implicitly):\\n- Core AI models: machine learning, neural / deep / transformer networks\\n- AI Applications: computer vision, NLP, robotics, autonomous driving, generative media\\n- AI hardware, GPU chip supply, AI data centers and infrastructure\\n- Companies or labs known for AI: OpenAI, DeepMind, Anthropic, xAI, NVIDIA, etc.\\n- AI models & products: GPT-5, Gemini, Claude, Midjourney, DeepSeek, etc.\\n- New AI products and AI integration into existing products/services\\n- AI policy / ethics / safety / regulation / analysis\\n- Research results related to AI\\n- AI industry figures (Sam Altman, Demis Hassabis, Dario Amodei, etc.)\\n- AI market and business developments, funding rounds, partnerships centered on AI\\n- Any other news with a significant AI component\\n\\nNot AI-related: business software, crypto, non-AI tech, non-AI medical devices, and anything else.\\n\\nNo markdown, no explanations, just the JSON.\"\n  },\n  {\n    \"role\": \"user\",\n    \"content\": \"Classify this headline: \\nAI Is Replacing Online Moderators, But It's Bad at the Job\"\n  }\n]",
+          "label": "prompts/headline_classifier_v1.json: [{\"role\":\"system\",\"content\":\"You are a content-classification assistant that labels news headlines as AI-related or not.\\nReturn JSON that matches the provided schema\\n\\nA headline is AI-related if it mentions (explicitly or implicitly):\\n- Core AI models: machine learning, neural / deep / transformer networks\\n- AI Applications: computer vision, NLP, robotics, autonomous driving, generative media\\n- AI hardware, GPU chip supply, AI data centers and infrastructure\\n- Companies or labs known for AI: OpenAI, DeepMind, Anthropic, xAI, NVIDIA, etc.\\n- AI models & products: GPT-5, Gemini, Claude, Midjourney, DeepSeek, etc.\\n- New AI products and AI integration into existing products/services\\n- AI policy / ethics / safety / regulation / analysis\\n- Research results related to AI\\n- AI industry figures (Sam Altman, Demis Hassabis, Dario Amodei, etc.)\\n- AI market and business developments, funding rounds, partnerships centered on AI\\n- Any other news with a significant AI component\\n\\nNot AI-related: business software, crypto, non-AI tech, non-AI medical devices, and anything else.\\n\\nNo markdown, no explanations, just the JSON.\"},{\"role\":\"user\",\"content\":\"Classify this headline: \\n{{input}}\"}]"
+        },
+        "promptId": "6324b5cda96a2c227e7827ab090596ce71242c571dcc1ae946fbe328798e8368",
+        "promptIdx": 1,
+        "provider": {
+          "id": "openai:gpt-5-mini",
+          "label": ""
+        },
+        "response": {
+          "output": {
+            "input": "AI Is Replacing Online Moderators, But It's Bad at the Job",
+            "ai_related": true
+          },
+          "tokenUsage": {
+            "cached": 424,
+            "total": 424
+          },
+          "cached": true,
+          "finishReason": "stop",
+          "cost": 0.000281
+        },
+        "score": 1,
+        "success": true,
+        "testCase": {
+          "description": "AI moderation headline - should return true",
+          "vars": {
+            "input": "AI Is Replacing Online Moderators, But It's Bad at the Job"
+          },
+          "assert": [
+            {
+              "type": "is-json",
+              "value": {
+                "type": "object",
+                "properties": {
+                  "input": {
+                    "type": "string"
+                  },
+                  "ai_related": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "input",
+                  "ai_related"
+                ],
+                "additionalProperties": false
+              }
+            },
+            {
+              "type": "javascript",
+              "value": "output.ai_related === true"
+            }
+          ],
+          "options": {
+            "temperature": 0,
+            "max_tokens": 1000
+          },
+          "metadata": {}
+        },
+        "testIdx": 0,
+        "vars": {
+          "input": "AI Is Replacing Online Moderators, But It's Bad at the Job"
+        },
+        "metadata": {
+          "_promptfooFileMetadata": {}
+        },
+        "failureReason": 0
+      },
+      {
+        "cost": 0.00006269999999999999,
+        "gradingResult": {
+          "pass": true,
+          "score": 1,
+          "reason": "All assertions passed",
+          "namedScores": {},
+          "tokensUsed": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0
+          },
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "is-json",
+                "value": {
+                  "type": "object",
+                  "properties": {
+                    "input": {
+                      "type": "string"
+                    },
+                    "ai_related": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "input",
+                    "ai_related"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "javascript",
+                "value": "output.ai_related === true"
+              }
+            }
+          ],
+          "assertion": null
+        },
+        "id": "2efec12e-e12e-417c-a100-63f737c690e9",
+        "latencyMs": 22,
+        "namedScores": {},
+        "prompt": {
+          "raw": "[\n  {\n    \"role\": \"system\",\n    \"content\": \"You are a content-classification assistant that labels news headlines as AI-related or not.\\nReturn JSON that matches the provided schema\\n\\nA headline is AI-related if it mentions (explicitly or implicitly):\\n- Core AI models: machine learning, neural / deep / transformer networks\\n- AI Applications: computer vision, NLP, robotics, autonomous driving, generative media\\n- AI hardware, GPU chip supply, AI data centers and infrastructure\\n- Companies or labs known for AI: OpenAI, DeepMind, Anthropic, xAI, NVIDIA, etc.\\n- AI models & products: GPT-5, Gemini, Claude, Midjourney, DeepSeek, etc.\\n- New AI products and AI integration into existing products/services\\n- AI policy / ethics / safety / regulation / analysis\\n- Research results related to AI\\n- AI industry figures (Sam Altman, Demis Hassabis, Dario Amodei, etc.)\\n- AI market and business developments, funding rounds, partnerships centered on AI\\n- Any other news with a significant AI component\\n\\nNot AI-related: business software, crypto, non-AI tech, non-AI medical devices, and anything else.\\n\\nNo markdown, no explanations, just the JSON.\"\n  },\n  {\n    \"role\": \"user\",\n    \"content\": \"Classify this headline: \\nAI Is Replacing Online Moderators, But It's Bad at the Job\"\n  }\n]",
+          "label": "prompts/headline_classifier_v1.json: [{\"role\":\"system\",\"content\":\"You are a content-classification assistant that labels news headlines as AI-related or not.\\nReturn JSON that matches the provided schema\\n\\nA headline is AI-related if it mentions (explicitly or implicitly):\\n- Core AI models: machine learning, neural / deep / transformer networks\\n- AI Applications: computer vision, NLP, robotics, autonomous driving, generative media\\n- AI hardware, GPU chip supply, AI data centers and infrastructure\\n- Companies or labs known for AI: OpenAI, DeepMind, Anthropic, xAI, NVIDIA, etc.\\n- AI models & products: GPT-5, Gemini, Claude, Midjourney, DeepSeek, etc.\\n- New AI products and AI integration into existing products/services\\n- AI policy / ethics / safety / regulation / analysis\\n- Research results related to AI\\n- AI industry figures (Sam Altman, Demis Hassabis, Dario Amodei, etc.)\\n- AI market and business developments, funding rounds, partnerships centered on AI\\n- Any other news with a significant AI component\\n\\nNot AI-related: business software, crypto, non-AI tech, non-AI medical devices, and anything else.\\n\\nNo markdown, no explanations, just the JSON.\"},{\"role\":\"user\",\"content\":\"Classify this headline: \\n{{input}}\"}]"
+        },
+        "promptId": "6324b5cda96a2c227e7827ab090596ce71242c571dcc1ae946fbe328798e8368",
+        "promptIdx": 0,
+        "provider": {
+          "id": "openai:gpt-4o-mini",
+          "label": ""
+        },
+        "response": {
+          "output": {
+            "input": "AI Is Replacing Online Moderators, But It's Bad at the Job",
+            "ai_related": true
+          },
+          "tokenUsage": {
+            "cached": 349,
+            "total": 349
+          },
+          "cached": true,
+          "finishReason": "stop",
+          "cost": 0.00006269999999999999
+        },
+        "score": 1,
+        "success": true,
+        "testCase": {
+          "description": "AI moderation headline - should return true",
+          "vars": {
+            "input": "AI Is Replacing Online Moderators, But It's Bad at the Job"
+          },
+          "assert": [
+            {
+              "type": "is-json",
+              "value": {
+                "type": "object",
+                "properties": {
+                  "input": {
+                    "type": "string"
+                  },
+                  "ai_related": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "input",
+                  "ai_related"
+                ],
+                "additionalProperties": false
+              }
+            },
+            {
+              "type": "javascript",
+              "value": "output.ai_related === true"
+            }
+          ],
+          "options": {
+            "temperature": 0,
+            "max_tokens": 1000
+          },
+          "metadata": {}
+        },
+        "testIdx": 0,
+        "vars": {
+          "input": "AI Is Replacing Online Moderators, But It's Bad at the Job"
+        },
+        "metadata": {
+          "_promptfooFileMetadata": {}
+        },
+        "failureReason": 0
+      },
+      {
+        "cost": 0.0000582,
+        "gradingResult": {
+          "pass": true,
+          "score": 1,
+          "reason": "All assertions passed",
+          "namedScores": {},
+          "tokensUsed": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0
+          },
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "is-json",
+                "value": {
+                  "type": "object",
+                  "properties": {
+                    "input": {
+                      "type": "string"
+                    },
+                    "ai_related": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "input",
+                    "ai_related"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "javascript",
+                "value": "output.ai_related === false"
+              }
+            }
+          ],
+          "assertion": null
+        },
+        "id": "a255a211-7591-412d-b6f8-169efeba4d1f",
+        "latencyMs": 6,
+        "namedScores": {},
+        "prompt": {
+          "raw": "[\n  {\n    \"role\": \"system\",\n    \"content\": \"You are a content-classification assistant that labels news headlines as AI-related or not.\\nReturn JSON that matches the provided schema\\n\\nA headline is AI-related if it mentions (explicitly or implicitly):\\n- Core AI models: machine learning, neural / deep / transformer networks\\n- AI Applications: computer vision, NLP, robotics, autonomous driving, generative media\\n- AI hardware, GPU chip supply, AI data centers and infrastructure\\n- Companies or labs known for AI: OpenAI, DeepMind, Anthropic, xAI, NVIDIA, etc.\\n- AI models & products: GPT-5, Gemini, Claude, Midjourney, DeepSeek, etc.\\n- New AI products and AI integration into existing products/services\\n- AI policy / ethics / safety / regulation / analysis\\n- Research results related to AI\\n- AI industry figures (Sam Altman, Demis Hassabis, Dario Amodei, etc.)\\n- AI market and business developments, funding rounds, partnerships centered on AI\\n- Any other news with a significant AI component\\n\\nNot AI-related: business software, crypto, non-AI tech, non-AI medical devices, and anything else.\\n\\nNo markdown, no explanations, just the JSON.\"\n  },\n  {\n    \"role\": \"user\",\n    \"content\": \"Classify this headline: \\nBaby Trapped in Refrigerator Eats Own Foot\"\n  }\n]",
+          "label": "prompts/headline_classifier_v1.json: [{\"role\":\"system\",\"content\":\"You are a content-classification assistant that labels news headlines as AI-related or not.\\nReturn JSON that matches the provided schema\\n\\nA headline is AI-related if it mentions (explicitly or implicitly):\\n- Core AI models: machine learning, neural / deep / transformer networks\\n- AI Applications: computer vision, NLP, robotics, autonomous driving, generative media\\n- AI hardware, GPU chip supply, AI data centers and infrastructure\\n- Companies or labs known for AI: OpenAI, DeepMind, Anthropic, xAI, NVIDIA, etc.\\n- AI models & products: GPT-5, Gemini, Claude, Midjourney, DeepSeek, etc.\\n- New AI products and AI integration into existing products/services\\n- AI policy / ethics / safety / regulation / analysis\\n- Research results related to AI\\n- AI industry figures (Sam Altman, Demis Hassabis, Dario Amodei, etc.)\\n- AI market and business developments, funding rounds, partnerships centered on AI\\n- Any other news with a significant AI component\\n\\nNot AI-related: business software, crypto, non-AI tech, non-AI medical devices, and anything else.\\n\\nNo markdown, no explanations, just the JSON.\"},{\"role\":\"user\",\"content\":\"Classify this headline: \\n{{input}}\"}]"
+        },
+        "promptId": "6324b5cda96a2c227e7827ab090596ce71242c571dcc1ae946fbe328798e8368",
+        "promptIdx": 0,
+        "provider": {
+          "id": "openai:gpt-4o-mini",
+          "label": ""
+        },
+        "response": {
+          "output": {
+            "input": "Baby Trapped in Refrigerator Eats Own Foot",
+            "ai_related": false
+          },
+          "tokenUsage": {
+            "cached": 337,
+            "total": 337
+          },
+          "cached": true,
+          "finishReason": "stop",
+          "cost": 0.0000582
+        },
+        "score": 1,
+        "success": true,
+        "testCase": {
+          "description": "Non-AI absurd headline - should return false",
+          "vars": {
+            "input": "Baby Trapped in Refrigerator Eats Own Foot"
+          },
+          "assert": [
+            {
+              "type": "is-json",
+              "value": {
+                "type": "object",
+                "properties": {
+                  "input": {
+                    "type": "string"
+                  },
+                  "ai_related": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "input",
+                  "ai_related"
+                ],
+                "additionalProperties": false
+              }
+            },
+            {
+              "type": "javascript",
+              "value": "output.ai_related === false"
+            }
+          ],
+          "options": {
+            "temperature": 0,
+            "max_tokens": 1000
+          },
+          "metadata": {}
+        },
+        "testIdx": 1,
+        "vars": {
+          "input": "Baby Trapped in Refrigerator Eats Own Foot"
+        },
+        "metadata": {
+          "_promptfooFileMetadata": {}
+        },
+        "failureReason": 0
+      },
+      {
+        "cost": 0.0002675,
+        "gradingResult": {
+          "pass": true,
+          "score": 1,
+          "reason": "All assertions passed",
+          "namedScores": {},
+          "tokensUsed": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0
+          },
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "is-json",
+                "value": {
+                  "type": "object",
+                  "properties": {
+                    "input": {
+                      "type": "string"
+                    },
+                    "ai_related": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "input",
+                    "ai_related"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "javascript",
+                "value": "output.ai_related === false"
+              }
+            }
+          ],
+          "assertion": null
+        },
+        "id": "018fc374-fe2e-47d6-b2e2-a5ffb6a8f9b1",
+        "latencyMs": 24,
+        "namedScores": {},
+        "prompt": {
+          "raw": "[\n  {\n    \"role\": \"system\",\n    \"content\": \"You are a content-classification assistant that labels news headlines as AI-related or not.\\nReturn JSON that matches the provided schema\\n\\nA headline is AI-related if it mentions (explicitly or implicitly):\\n- Core AI models: machine learning, neural / deep / transformer networks\\n- AI Applications: computer vision, NLP, robotics, autonomous driving, generative media\\n- AI hardware, GPU chip supply, AI data centers and infrastructure\\n- Companies or labs known for AI: OpenAI, DeepMind, Anthropic, xAI, NVIDIA, etc.\\n- AI models & products: GPT-5, Gemini, Claude, Midjourney, DeepSeek, etc.\\n- New AI products and AI integration into existing products/services\\n- AI policy / ethics / safety / regulation / analysis\\n- Research results related to AI\\n- AI industry figures (Sam Altman, Demis Hassabis, Dario Amodei, etc.)\\n- AI market and business developments, funding rounds, partnerships centered on AI\\n- Any other news with a significant AI component\\n\\nNot AI-related: business software, crypto, non-AI tech, non-AI medical devices, and anything else.\\n\\nNo markdown, no explanations, just the JSON.\"\n  },\n  {\n    \"role\": \"user\",\n    \"content\": \"Classify this headline: \\nBaby Trapped in Refrigerator Eats Own Foot\"\n  }\n]",
+          "label": "prompts/headline_classifier_v1.json: [{\"role\":\"system\",\"content\":\"You are a content-classification assistant that labels news headlines as AI-related or not.\\nReturn JSON that matches the provided schema\\n\\nA headline is AI-related if it mentions (explicitly or implicitly):\\n- Core AI models: machine learning, neural / deep / transformer networks\\n- AI Applications: computer vision, NLP, robotics, autonomous driving, generative media\\n- AI hardware, GPU chip supply, AI data centers and infrastructure\\n- Companies or labs known for AI: OpenAI, DeepMind, Anthropic, xAI, NVIDIA, etc.\\n- AI models & products: GPT-5, Gemini, Claude, Midjourney, DeepSeek, etc.\\n- New AI products and AI integration into existing products/services\\n- AI policy / ethics / safety / regulation / analysis\\n- Research results related to AI\\n- AI industry figures (Sam Altman, Demis Hassabis, Dario Amodei, etc.)\\n- AI market and business developments, funding rounds, partnerships centered on AI\\n- Any other news with a significant AI component\\n\\nNot AI-related: business software, crypto, non-AI tech, non-AI medical devices, and anything else.\\n\\nNo markdown, no explanations, just the JSON.\"},{\"role\":\"user\",\"content\":\"Classify this headline: \\n{{input}}\"}]"
+        },
+        "promptId": "6324b5cda96a2c227e7827ab090596ce71242c571dcc1ae946fbe328798e8368",
+        "promptIdx": 1,
+        "provider": {
+          "id": "openai:gpt-5-mini",
+          "label": ""
+        },
+        "response": {
+          "output": {
+            "input": "Baby Trapped in Refrigerator Eats Own Foot",
+            "ai_related": false
+          },
+          "tokenUsage": {
+            "cached": 412,
+            "total": 412
+          },
+          "cached": true,
+          "finishReason": "stop",
+          "cost": 0.0002675
+        },
+        "score": 1,
+        "success": true,
+        "testCase": {
+          "description": "Non-AI absurd headline - should return false",
+          "vars": {
+            "input": "Baby Trapped in Refrigerator Eats Own Foot"
+          },
+          "assert": [
+            {
+              "type": "is-json",
+              "value": {
+                "type": "object",
+                "properties": {
+                  "input": {
+                    "type": "string"
+                  },
+                  "ai_related": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "input",
+                  "ai_related"
+                ],
+                "additionalProperties": false
+              }
+            },
+            {
+              "type": "javascript",
+              "value": "output.ai_related === false"
+            }
+          ],
+          "options": {
+            "temperature": 0,
+            "max_tokens": 1000
+          },
+          "metadata": {}
+        },
+        "testIdx": 1,
+        "vars": {
+          "input": "Baby Trapped in Refrigerator Eats Own Foot"
+        },
+        "metadata": {
+          "_promptfooFileMetadata": {}
+        },
+        "failureReason": 0
+      }
+    ],
+    "stats": {
+      "successes": 4,
+      "failures": 0,
+      "errors": 0,
+      "tokenUsage": {
+        "prompt": 0,
+        "completion": 0,
+        "cached": 1522,
+        "total": 1522,
+        "numRequests": 4,
+        "completionDetails": {
+          "reasoning": 0,
+          "acceptedPrediction": 0,
+          "rejectedPrediction": 0
+        },
+        "assertions": {
+          "total": 0,
+          "prompt": 0,
+          "completion": 0,
+          "cached": 0,
+          "numRequests": 0,
+          "completionDetails": {
+            "reasoning": 0,
+            "acceptedPrediction": 0,
+            "rejectedPrediction": 0
+          }
+        }
+      }
+    }
+  },
+  "config": {
+    "tags": {},
+    "description": "AI Headline Classification",
+    "prompts": [
+      "file:///Users/drucev/projects/windsurf/ASDK/promptfoo/prompts/headline_classifier_v1.json"
+    ],
+    "providers": [
+      {
+        "id": "openai:gpt-4o-mini",
+        "config": {
+          "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+              "name": "ClassificationResult",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "input": {
+                    "type": "string",
+                    "description": "The original input text"
+                  },
+                  "ai_related": {
+                    "type": "boolean",
+                    "description": "Whether the input is AI-related"
+                  }
+                },
+                "required": [
+                  "input",
+                  "ai_related"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": "openai:gpt-5-mini",
+        "config": {
+          "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+              "name": "ClassificationResult",
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "input": {
+                    "type": "string",
+                    "description": "The original input text"
+                  },
+                  "ai_related": {
+                    "type": "boolean",
+                    "description": "Whether the input is AI-related"
+                  }
+                },
+                "required": [
+                  "input",
+                  "ai_related"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    ],
+    "tests": [
+      "file://tests/headline_classifier_tests_v1.yaml"
+    ],
+    "scenarios": [],
+    "env": {},
+    "sharing": true,
+    "defaultTest": {
+      "options": {
+        "temperature": 0,
+        "max_tokens": 1000
+      },
+      "vars": {},
+      "assert": [],
+      "metadata": {}
+    },
+    "outputPath": [
+      "./results/headline_classifier/results.json"
+    ],
+    "extensions": [],
+    "metadata": {
+      "model_recommendations": [
+        "gpt-4o-mini"
+      ],
+      "use_case": "AI headline classification for news aggregation"
+    }
+  },
+  "shareableUrl": null,
+  "metadata": {
+    "promptfooVersion": "0.117.10",
+    "nodeVersion": "v24.6.0",
+    "platform": "darwin",
+    "arch": "arm64",
+    "exportedAt": "2025-08-30T02:19:00.372Z",
+    "evaluationCreatedAt": "2025-08-30T02:19:00.331Z"
+  }
+}

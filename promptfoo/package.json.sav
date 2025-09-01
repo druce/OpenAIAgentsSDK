@@ -1,0 +1,13 @@
+{
+    "name": "asdk-promptfoo",
+    "version": "1.0.0",
+    "description": "Prompt testing and management for ASDK",
+    "scripts": {
+        "test": "promptfoo eval",
+        "test:watch": "promptfoo eval --watch",
+        "view": "promptfoo view"
+    },
+    "devDependencies": {
+        "promptfoo": "^0.87.0"
+    }
+}
