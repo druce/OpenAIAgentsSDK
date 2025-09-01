@@ -25,6 +25,48 @@ from pydantic import BaseModel, Field
 from agents import Agent, Runner, set_default_openai_client, FunctionTool, Tool, SQLiteSession
 from openai import AsyncOpenAI
 from utilities import WorkflowStatus, StepStatus, get_workflow_status_report, print_workflow_summary
+from log_handler import SQLiteLogHandler
+
+# Global constants
+LOGDB = 'newsagent_logs.db'
+
+
+def setup_logging(session_id: str = "default", db_path: str = LOGDB) -> logging.Logger:
+    """Set up logging to console and SQLite database."""
+
+    # Create logger
+    logging.basicConfig(level=logging.INFO)
+
+    logger = logging.getLogger(f"NewsletterAgent.{session_id}")
+    logger.setLevel(logging.INFO)
+
+    # Clear any existing handlers
+    logger.handlers.clear()
+
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_formatter = logging.Formatter(
+        '%(asctime)s | %(name)s | %(levelname)s | %(message)s',
+        datefmt='%H:%M:%S'
+    )
+    console_handler.setFormatter(console_formatter)
+
+    # SQLite handler
+    sqlite_handler = SQLiteLogHandler(db_path)
+    sqlite_handler.setLevel(logging.INFO)
+    sqlite_formatter = logging.Formatter('%(message)s')
+    sqlite_handler.setFormatter(sqlite_formatter)
+
+    # Add handlers to logger
+    logger.addHandler(console_handler)
+    logger.addHandler(sqlite_handler)
+
+    # Prevent propagation to root logger
+    logger.propagate = False
+
+    return logger
+
 
 class NewsletterAgentState(BaseModel):
     """Persistent state for the newsletter agent workflow"""
@@ -279,57 +321,72 @@ async def gather_urls(sources_file: str = "sources.yaml", max_concurrent: int = 
         return valid_results
 
 
+# tools
+
 class WorkflowStatusTool:
     """Tool to check current workflow status"""
 
-    def __init__(self, workflow_status: WorkflowStatus):
+    def __init__(self, workflow_status: WorkflowStatus, logger: logging.Logger):
         self.workflow_status = workflow_status
+        self.logger = logger
 
     async def _check_workflow_status(self, ctx, args: str) -> str:
         """Get current workflow status report based on persistent state"""
-        # Access the persistent state
-        state: NewsletterAgentState = ctx.context
+        if self.logger:
+            self.logger.info("Starting check_workflow_status")
 
-        # Create a status report based on persistent state
-        step_names = [
-            "step_01_gather_urls", "step_02_filter_urls", "step_03_download_articles",
-            "step_04_extract_summaries", "step_05_cluster_by_topic", "step_06_rate_articles",
-            "step_07_select_sections", "step_08_draft_sections", "step_09_finalize_newsletter"
-        ]
+        try:
+            # Access the persistent state
+            state: NewsletterAgentState = ctx.context
 
-        lines = [
-            "WORKFLOW STATUS (FROM PERSISTENT STATE)",
-            f"Current Step: {state.current_step}/9",
-            f"Workflow Complete: {state.workflow_complete}",
-            f"Progress: {(state.current_step/9)*100:.1f}%",
-            "",
-            "Step Details:"
-        ]
+            # Create a status report based on persistent state
+            step_names = [
+                "step_01_gather_urls", "step_02_filter_urls", "step_03_download_articles",
+                "step_04_extract_summaries", "step_05_cluster_by_topic", "step_06_rate_articles",
+                "step_07_select_sections", "step_08_draft_sections", "step_09_finalize_newsletter"
+            ]
 
-        for i, step_name in enumerate(step_names, 1):
-            if i <= state.current_step:
-                status = "✅ completed"
-            elif i == state.current_step + 1:
-                status = "➡️ next to execute"
-            else:
-                status = "⭕ not started"
-
-            formatted_name = step_name.replace('step_', 'Step ').replace('_', ' ').title()
-            formatted_name = formatted_name.replace('0', '').replace('  ', ' ')  # Clean up numbering
-            lines.append(f"  {formatted_name}: {status}")
-
-        if state.headline_data:
-            lines.extend([
+            lines = [
+                "WORKFLOW STATUS (FROM PERSISTENT STATE)",
+                f"Current Step: {state.current_step}/9",
+                f"Workflow Complete: {state.workflow_complete}",
+                f"Progress: {(state.current_step/9)*100:.1f}%",
                 "",
-                "Data Summary:",
-                f"  Total articles: {len(state.headline_data)}",
-                f"  AI-related: {sum(1 for a in state.headline_data if a.get('ai_related') is True)}",
-                f"  Summaries: {len(state.article_summaries)}",
-                f"  Clusters: {len(state.topic_clusters)}",
-                f"  Sections: {len(state.newsletter_sections)}",
-            ])
+                "Step Details:"
+            ]
 
-        return "\n".join(lines)
+            for i, step_name in enumerate(step_names, 1):
+                if i <= state.current_step:
+                    status = "✅ completed"
+                elif i == state.current_step + 1:
+                    status = "➡️ next to execute"
+                else:
+                    status = "⭕ not started"
+
+                formatted_name = step_name.replace('step_', 'Step ').replace('_', ' ').title()
+                formatted_name = formatted_name.replace('0', '').replace('  ', ' ')  # Clean up numbering
+                lines.append(f"  {formatted_name}: {status}")
+
+            if state.headline_data:
+                lines.extend([
+                    "",
+                    "Data Summary:",
+                    f"  Total articles: {len(state.headline_data)}",
+                    f"  AI-related: {sum(1 for a in state.headline_data if a.get('ai_related') is True)}",
+                    f"  Summaries: {len(state.article_summaries)}",
+                    f"  Clusters: {len(state.topic_clusters)}",
+                    f"  Sections: {len(state.newsletter_sections)}",
+                ])
+
+                result = "\n".join(lines)
+                if self.logger:
+                    self.logger.info("Completed check_workflow_status")
+                return result
+
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"check_workflow_status failed: {str(e)}")
+            raise
 
     def create_tool(self) -> FunctionTool:
         """Create a FunctionTool instance following OpenAI Agents SDK conventions"""
@@ -348,8 +405,9 @@ class WorkflowStatusTool:
 class StateInspectionTool:
     """Tool to inspect detailed persistent state data"""
 
-    def __init__(self, verbose: bool = False):
+    def __init__(self, verbose: bool = False, logger: logging.Logger = None):
         self.verbose = verbose
+        self.logger = logger
 
     async def _inspect_state(self, ctx, args: str) -> str:
         """Inspect detailed state data for debugging and monitoring"""
@@ -438,12 +496,16 @@ class StateInspectionTool:
 class GatherUrlsTool:
     """Tool for Step 1: Gather URLs from various news sources"""
 
-    def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False):
+    def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False, logger: logging.Logger = None):
         self.workflow_status = workflow_status  # Keep for UI progress tracking
         self.verbose = verbose
+        self.logger = logger
 
     async def _gather_urls(self, ctx, args: str) -> str:
         """Execute Step 1: Gather URLs using persistent state"""
+        if self.logger:
+            self.logger.info("Starting Step 1: Gather URLs")
+
         step_name = "step_01_gather_urls"
 
         # Access the persistent state
@@ -452,6 +514,8 @@ class GatherUrlsTool:
         # Check if step already completed via persistent state
         if state.current_step >= 1:
             total_articles = len(state.headline_data)
+            if self.logger:
+                self.logger.info(f"Step 1 already completed with {total_articles} articles")
             return f"Step 1 already completed! Found {total_articles} articles in persistent state."
 
         try:
@@ -497,9 +561,13 @@ class GatherUrlsTool:
                 status_msg += f" {len(failed_sources)} sources failed or not implemented."
 
             status_msg += f"\n\n📊 Articles stored in persistent state: {len(state.headline_data)}"
+            if self.logger:
+                self.logger.info(f"Completed Step 1: Gathered {len(all_articles)} articles")
             return status_msg
 
         except Exception as e:
+            if self.logger:
+                self.logger.error(f"Step 1 failed: {str(e)}")
             self.workflow_status.error_step(step_name, str(e))
             return f"❌ Step 1 failed: {str(e)}"
 
@@ -520,12 +588,16 @@ class GatherUrlsTool:
 class FilterUrlsTool:
     """Tool for Step 2: Filter URLs to AI-related content"""
 
-    def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False):
+    def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False, logger: logging.Logger = None):
         self.workflow_status = workflow_status
         self.verbose = verbose
+        self.logger = logger
 
     async def _filter_urls(self, ctx, args: str) -> str:
         """Execute Step 2: Filter URLs using persistent state"""
+        if self.logger:
+            self.logger.info("Starting Step 2: Filter URLs")
+
         step_name = "step_02_filter_urls"
 
         # Access the persistent state
@@ -584,9 +656,13 @@ class FilterUrlsTool:
 
             status_msg = f"✅ Step 2 completed successfully! Filtered {total_articles} headlines to {ai_related_count} AI-related articles (accuracy: {filter_accuracy:.1%})."
             status_msg += f"\n\n📊 Results stored in persistent state. Current step: {state.current_step}"
+            if self.logger:
+                self.logger.info(f"Completed Step 2: Filtered to {ai_related_count} AI-related articles")
             return status_msg
 
         except Exception as e:
+            if self.logger:
+                self.logger.error(f"Step 2 failed: {str(e)}")
             self.workflow_status.error_step(step_name, str(e))
             return f"❌ Step 2 failed: {str(e)}"
 
@@ -607,12 +683,16 @@ class FilterUrlsTool:
 class DownloadArticlesTool:
     """Tool for Step 3: Download article content"""
 
-    def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False):
+    def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False, logger: logging.Logger = None):
         self.workflow_status = workflow_status
         self.verbose = verbose
+        self.logger = logger
 
     async def _download_articles(self, ctx, args: str) -> str:
         """Execute Step 3: Download Articles using persistent state"""
+        if self.logger:
+            self.logger.info("Starting Step 3: Download Articles")
+
         step_name = "step_03_download_articles"
 
         # Access the persistent state
@@ -675,9 +755,13 @@ class DownloadArticlesTool:
             status_msg = f"✅ Step 3 completed successfully! Downloaded {successful_downloads} AI-related articles with {download_success_rate:.0%} success rate."
             status_msg += f"\n📊 Average article length: {avg_article_length:.0f} characters"
             status_msg += f"\n🔗 Content stored in persistent state. Current step: {state.current_step}"
+            if self.logger:
+                self.logger.info(f"Completed Step 3: Downloaded {successful_downloads} articles")
             return status_msg
 
         except Exception as e:
+            if self.logger:
+                self.logger.error(f"Step 3 failed: {str(e)}")
             self.workflow_status.error_step(step_name, str(e))
             return f"❌ Step 3 failed: {str(e)}"
 
@@ -698,9 +782,10 @@ class DownloadArticlesTool:
 class ExtractSummariesTool:
     """Tool for Step 4: Extract article summaries"""
 
-    def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False):
+    def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False, logger: logging.Logger = None):
         self.workflow_status = workflow_status
         self.verbose = verbose
+        self.logger = logger
 
     async def _extract_summaries(self, ctx, args: str) -> str:
         """Execute Step 4: Extract Summaries using persistent state"""
@@ -799,9 +884,10 @@ class ExtractSummariesTool:
 class ClusterByTopicTool:
     """Tool for Step 5: Cluster articles by topic"""
 
-    def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False):
+    def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False, logger: logging.Logger = None):
         self.workflow_status = workflow_status
         self.verbose = verbose
+        self.logger = logger
 
     async def _cluster_by_topic(self, ctx, args: str) -> str:
         """Execute Step 5: Cluster By Topic using persistent state"""
@@ -932,9 +1018,10 @@ class ClusterByTopicTool:
 class RateArticlesTool:
     """Tool for Step 6: Rate article quality and importance"""
 
-    def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False):
+    def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False, logger: logging.Logger = None):
         self.workflow_status = workflow_status
         self.verbose = verbose
+        self.logger = logger
 
     async def _rate_articles(self, ctx, args: str) -> str:
         """Execute Step 6: Rate Articles using persistent state"""
@@ -1040,9 +1127,10 @@ class RateArticlesTool:
 class SelectSectionsTool:
     """Tool for Step 7: Select newsletter sections"""
 
-    def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False):
+    def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False, logger: logging.Logger = None):
         self.workflow_status = workflow_status
         self.verbose = verbose
+        self.logger = logger
 
     async def _select_sections(self, ctx, args: str) -> str:
         """Execute Step 7: Select Sections using persistent state"""
@@ -1151,9 +1239,10 @@ class SelectSectionsTool:
 class DraftSectionsTool:
     """Tool for Step 8: Draft section content"""
 
-    def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False):
+    def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False, logger: logging.Logger = None):
         self.workflow_status = workflow_status
         self.verbose = verbose
+        self.logger = logger
 
     async def _draft_sections(self, ctx, args: str) -> str:
         """Execute Step 8: Draft Sections using persistent state"""
@@ -1276,9 +1365,10 @@ class DraftSectionsTool:
 class FinalizeNewsletterTool:
     """Tool for Step 9: Finalize complete newsletter"""
 
-    def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False):
+    def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False, logger: logging.Logger = None):
         self.workflow_status = workflow_status
         self.verbose = verbose
+        self.logger = logger
 
     async def _finalize_newsletter(self, ctx, args: str) -> str:
         """Execute Step 9: Finalize Newsletter using persistent state"""
@@ -1399,6 +1489,9 @@ class NewsletterAgent(Agent[NewsletterAgentState]):
         self.workflow_status = WorkflowStatus()  # Keep for progress tracking UI
         self.verbose = verbose
 
+        # Initialize logger
+        self.logger = setup_logging(session_id, LOGDB)
+
         # System prompt that guides tool selection based on workflow status
         system_prompt = """
 You are an AI newsletter writing agent that executes a 9-step workflow process using tools with persistent state.
@@ -1447,14 +1540,23 @@ RESUME EXAMPLES:
 Remember: Your state is persistent. You can safely resume from any point. Never skip steps or execute them out of order.
 """
 
-        # Create all workflow tools
-        tools = self._create_workflow_tools()
-
         super().__init__(
             name="NewsletterAgent",
             instructions=system_prompt,
             model="gpt-4o-mini",
-            tools=tools
+            tools=[
+                WorkflowStatusTool(self.workflow_status, self.logger).create_tool(),
+                StateInspectionTool(self.verbose, self.logger).create_tool(),
+                GatherUrlsTool(self.workflow_status, self.verbose, self.logger).create_tool(),
+                FilterUrlsTool(self.workflow_status, self.verbose, self.logger).create_tool(),
+                DownloadArticlesTool(self.workflow_status, self.verbose, self.logger).create_tool(),
+                ExtractSummariesTool(self.workflow_status, self.verbose, self.logger).create_tool(),
+                ClusterByTopicTool(self.workflow_status, self.verbose, self.logger).create_tool(),
+                RateArticlesTool(self.workflow_status, self.verbose, self.logger).create_tool(),
+                SelectSectionsTool(self.workflow_status, self.verbose, self.logger).create_tool(),
+                DraftSectionsTool(self.workflow_status, self.verbose, self.logger).create_tool(),
+                FinalizeNewsletterTool(self.workflow_status, self.verbose, self.logger).create_tool(),
+            ]
         )
 
         # Initialize default state
@@ -1474,47 +1576,6 @@ Remember: Your state is persistent. You can safely resume from any point. Never 
             max_turns=50  # Increased for complete 9-step workflow
         )
         return result.final_output
-
-    def _create_workflow_tools(self):
-        """Create all workflow tools for the agent"""
-        tools = []
-
-        # Status checking and inspection tools
-        workflow_status_tool = WorkflowStatusTool(self.workflow_status)
-        tools.append(workflow_status_tool.create_tool())
-
-        state_inspection_tool = StateInspectionTool(self.verbose)
-        tools.append(state_inspection_tool.create_tool())
-
-        # Workflow step tools - create FunctionTool instances
-        gather_tool = GatherUrlsTool(self.workflow_status, self.verbose)
-        tools.append(gather_tool.create_tool())
-
-        filter_tool = FilterUrlsTool(self.workflow_status, self.verbose)
-        tools.append(filter_tool.create_tool())
-
-        download_tool = DownloadArticlesTool(self.workflow_status, self.verbose)
-        tools.append(download_tool.create_tool())
-
-        extract_tool = ExtractSummariesTool(self.workflow_status, self.verbose)
-        tools.append(extract_tool.create_tool())
-
-        cluster_tool = ClusterByTopicTool(self.workflow_status, self.verbose)
-        tools.append(cluster_tool.create_tool())
-
-        rate_tool = RateArticlesTool(self.workflow_status, self.verbose)
-        tools.append(rate_tool.create_tool())
-
-        sections_tool = SelectSectionsTool(self.workflow_status, self.verbose)
-        tools.append(sections_tool.create_tool())
-
-        draft_tool = DraftSectionsTool(self.workflow_status, self.verbose)
-        tools.append(draft_tool.create_tool())
-
-        finalize_tool = FinalizeNewsletterTool(self.workflow_status, self.verbose)
-        tools.append(finalize_tool.create_tool())
-
-        return tools
 
 
 async def main():
