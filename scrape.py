@@ -579,9 +579,10 @@ async def fetch_url(url: str, title: str, browser_context: Optional[BrowserConte
 
     # should add retry functionality, re-enable screenshots
     """
-    log(f"fetch_url({url})")
+    print(f"fetch_url({url})")
     try:
         # make output directories
+        print(f"Fetching {url} to {destination}")
         if not os.path.exists(destination):
             os.makedirs(destination)
 
@@ -589,22 +590,29 @@ async def fetch_url(url: str, title: str, browser_context: Optional[BrowserConte
         html_path = os.path.join(destination, f'{title}.html')
         # check if file already exists, don't re-download
         if os.path.exists(html_path):
-            log(f"File already exists: {html_path}")
+            print(f"File already exists: {html_path}")
             return html_path, None, url
 
         # if file does not exist, download
         page = await browser_context.new_page()
         response = await page.goto(url, timeout=60000, wait_until='domcontentloaded')
-        await asyncio.sleep(initial_sleep+random.uniform(2, 5))
+        print(f"Response: {response.status}")
+        if initial_sleep is None:
+            initial_sleep = SLEEP_TIME if SLEEP_TIME is not None else 5
+        print(initial_sleep)
+        print(SLEEP_TIME)
+        sleep_time = initial_sleep+random.uniform(2, 5)
+        await asyncio.sleep(sleep_time)
         await perform_human_like_actions(page)
+        print("performed human like actions")
         if click_xpath:
             await asyncio.sleep(initial_sleep+random.uniform(2, 5))
-            log(f"Attempting to click on {click_xpath}")
+            print(f"Attempting to click on {click_xpath}")
             # click_xpath == '//*[@aria-label="Artificial intelligence"]'
             await page.wait_for_selector(f'xpath={click_xpath}')
             await page.click(f'xpath={click_xpath}')
         for i in range(scrolls):
-            log(f"Scrolling {title} ({i+1}/{scrolls})")
+            print(f"Scrolling {title} ({i+1}/{scrolls})")
             await asyncio.sleep(random.uniform(2, 5))  # Stealth delay
             if scroll_div:
                 await page.evaluate("""
@@ -620,10 +628,7 @@ async def fetch_url(url: str, title: str, browser_context: Optional[BrowserConte
 
         html_source = await page.content()
         if page.url != url:
-            log(f"Page URL redirected from {url} to {page.url}")
-        # break if page.url domain is google.com
-        if urlparse(url).netloc == "news.google.com":
-            log(f"Google News page: {page.url}")
+            print(f"Page URL redirected from {url} to {page.url}")
         # Determine last updated time, first try meta tags
         last_updated = None
         soup_meta = BeautifulSoup(html_source, "html.parser")
@@ -641,7 +646,7 @@ async def fetch_url(url: str, title: str, browser_context: Optional[BrowserConte
             tag = soup_meta.find("meta", attrs={attr: val})
             if tag and tag.get("content"):
                 last_updated = tag["content"]
-                log(
+                print(
                     f"Found last updated time from meta tag {attr}={val}: {last_updated}")
                 break
 
@@ -658,7 +663,7 @@ async def fetch_url(url: str, title: str, browser_context: Optional[BrowserConte
                 data = json.loads(script.string)
                 if data.get('@type') == 'NewsArticle':
                     last_updated = data.get('datePublished')
-                    log(
+                    print(
                         f"Found script last updated time from script datePublished: {last_updated}")
                     break
             except Exception:
@@ -668,14 +673,14 @@ async def fetch_url(url: str, title: str, browser_context: Optional[BrowserConte
         if not last_updated:
             if response and response.headers.get("last-modified"):
                 last_updated = response.headers.get("last-modified")
-                log(
+                print(
                     f"Found last updated time from HTTP header: {last_updated}")
 
         # Fallback to document.lastModified
         if not last_updated:
             try:
                 last_updated = await page.evaluate("document.lastModified")
-                log(
+                print(
                     f"Found last updated time from document.lastModified: {last_updated}")
             except Exception:
                 last_updated = None
@@ -689,13 +694,13 @@ async def fetch_url(url: str, title: str, browser_context: Optional[BrowserConte
                 dt_utc = dt.astimezone(datetime.timezone.utc)
                 last_updated = dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
             except (ValueError, TypeError) as e:
-                log(f"Could not parse last_updated '{last_updated}': {e}")
+                print(f"Could not parse last_updated '{last_updated}': {e}")
                 # set to 1 day ago
                 last_updated = (datetime.datetime.now(
                     datetime.timezone.utc) - datetime.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         # Save HTML
-        log(f"Saving HTML to {html_path}")
+        print(f"Saving HTML to {html_path}")
         # if the file already exists, delete it
         with open(html_path, 'w', encoding='utf-8') as file:
             file.write(html_source)
@@ -715,17 +720,17 @@ async def fetch_url(url: str, title: str, browser_context: Optional[BrowserConte
 
         return html_path, last_updated, final_url
     except asyncio.TimeoutError as exc:
-        log(f"Timeout error fetching {url}: {exc}")
+        print(f"Timeout error fetching {url}: {exc}")
         if 'page' in locals():
             await page.close()
         return None, None, None
     except (ConnectionError, OSError) as exc:
-        log(f"Network error fetching {url}: {exc}")
+        print(f"Network error fetching {url}: {exc}")
         if 'page' in locals():
             await page.close()
         return None, None, None
     except Exception as exc:
-        log(f"Unexpected error fetching {url}: {exc}")
+        print(f"Unexpected error fetching {url}: {exc}")
         if 'page' in locals():
             await page.close()
         return None, None, None
@@ -756,7 +761,7 @@ async def fetch_source(source_dict: Dict[str, Any], browser_context: Optional[Br
     scroll_div = source_dict.get("scroll_div", "")
     initial_sleep = source_dict.get("initial_sleep", SLEEP_TIME)
 
-    log(f"Starting fetch_source {url}, {title}")
+    print(f"Starting fetch_source {url}, {title}")
 
     # Open the page and fetch the HTML
     file_path, _, _ = await fetch_url(url, title, browser_context,

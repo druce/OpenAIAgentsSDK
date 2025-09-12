@@ -71,8 +71,8 @@ class Fetcher:
                     self.sources = yaml.safe_load(file) or {}
 
                 # Log source breakdown
-                rss_sources = [k for k, v in self.sources.items() if v.get('rss')]
-                html_sources = [k for k, v in self.sources.items() if v.get('type') == 'html' and not v.get('rss')]
+                rss_sources = [k for k, v in self.sources.items() if v.get('type') == 'rss']
+                html_sources = [k for k, v in self.sources.items() if v.get('type') == 'html']
                 api_sources = [k for k, v in self.sources.items() if v.get('type') == 'rest']
 
                 self._log(f"Loaded {len(self.sources)} sources: {len(rss_sources)} RSS, {len(html_sources)} HTML, {len(api_sources)} API", "fetcher_init", "INFO")
@@ -147,14 +147,14 @@ class Fetcher:
             "ERROR": self.logger.error,
             "CRITICAL": self.logger.critical
         }
-        
+
         log_func = level_map.get(level.upper(), self.logger.info)
-        
+
         if context:
             formatted_message = f"[{context}] {message}"
         else:
             formatted_message = message
-            
+
         log_func(formatted_message)
 
     async def _get_browser_context(self):
@@ -180,6 +180,15 @@ class Fetcher:
         Returns:
             Dict with source, results, status, metadata
         """
+        # Check if session is initialized
+        if not self.session:
+            return {
+                'source': source,
+                'results': [],
+                'status': 'error',
+                'metadata': {'error': 'Fetcher must be used as async context manager: async with Fetcher() as f:'}
+            }
+
         source_record = self.sources.get(source, {})
         rss_url = source_record.get('rss')
         if not rss_url:
@@ -191,7 +200,7 @@ class Fetcher:
             }
 
         try:
-            self._log(f"Fetching RSS from {source}: {rss_url}", "fetch_rss", "DEBUG")
+            self._log(f"Fetching RSS from {source}: {rss_url}", "fetch_rss", "INFO")
             async with self.semaphore:
                 timeout = aiohttp.ClientTimeout(total=10)
                 async with self.session.get(rss_url, timeout=timeout) as response:
@@ -255,6 +264,15 @@ class Fetcher:
         Returns:
             Dict with source_key, results, status, metadata
         """
+        # Check if session is initialized (needed for browser context)
+        if not self.session:
+            return {
+                'source': source_key,
+                'results': [],
+                'status': 'error',
+                'metadata': {'error': 'Fetcher must be used as async context manager: async with Fetcher() as f:'}
+            }
+
         source_record = self.sources.get(source_key, {})
         url = source_record.get('url')
         if not url:
@@ -266,12 +284,21 @@ class Fetcher:
             }
 
         try:
+            self._log(f"Fetching HTML from {source_key}: {url}", "fetch_html", "INFO")
             async with self.semaphore:
                 # Import here to avoid circular imports
                 from scrape import fetch_source, parse_file
 
                 # Get browser context
                 browser_context = await self._get_browser_context()
+                # Check if browser context is valid
+                if not browser_context:
+                    return {
+                        'source': source_key,
+                        'results': [],
+                        'status': 'error',
+                        'metadata': {'error': 'Browser context is not available or has been closed'}
+                    }
 
                 # Prepare source dict for fetch_source function
                 source_dict = {
@@ -286,11 +313,13 @@ class Fetcher:
                     'exclude': source_record.get('exclude'),
                     'minlength': source_record.get('minlength')
                 }
+                self._log(f"Source dict for {source_key}: {source_dict}", "fetch_html", "INFO")
 
                 # Fetch the landing page HTML
                 sourcename, file_path = await fetch_source(source_dict, browser_context)
 
                 if not file_path:
+                    self._log(f"Failed to download HTML page from {source_key}: {url}", "fetch_html", "ERROR")
                     return {
                         'source': source_key,
                         'results': [],
@@ -313,6 +342,7 @@ class Fetcher:
                     }
                     articles.append(article)
 
+                self._log(f"HTML fetch successful for {source_key}: {len(articles)} articles", "fetch_html", "INFO")
                 return {
                     'source': source_key,
                     'results': articles,
@@ -325,6 +355,7 @@ class Fetcher:
                 }
 
         except Exception as e:
+            self._log(f"HTML fetch failed for {source_key}: {str(e)}", "fetch_html", "ERROR")
             return {
                 'source': source_key,
                 'results': [],
@@ -355,9 +386,9 @@ class Fetcher:
 
         try:
             async with self.semaphore:
-                # Map function names to actual functions
+                # Map function names to actual class methods
                 function_map = {
-                    'fn_extract_newsapi': fn_extract_newsapi,
+                    'fn_extract_newsapi': self.extract_newsapi,
                     # Add more API functions here as needed
                 }
 
@@ -370,8 +401,8 @@ class Fetcher:
                         'metadata': {'error': f'Unknown function: {function_name}'}
                     }
 
-                # Call the function and return its result
-                # Note: Most API functions are synchronous, so we call them directly
+                # Call the method and return its result
+                # Note: Most API methods are synchronous, so we call them directly
                 if asyncio.iscoroutinefunction(func):
                     result = await func()
                 else:
@@ -444,7 +475,79 @@ class Fetcher:
 
         return valid_results
 
-# Legacy standalone functions removed - now implemented as Fetcher class methods
+    def extract_newsapi(self) -> Dict[str, Any]:
+        """
+        Get AI news via newsapi - updated to return standard fetch format
+        https://newsapi.org/docs/get-started
+        """
+        try:
+            news_api_key = os.environ.get('NEWSAPI_API_KEY')
+            if not news_api_key:
+                return {
+                    'source': 'NewsAPI',
+                    'results': [],
+                    'status': 'error',
+                    'metadata': {'error': 'NEWSAPI_API_KEY environment variable not set'}
+                }
+
+            page_size = 100
+            q = 'artificial intelligence'
+            date_24h_ago = datetime.now() - timedelta(hours=24)
+            formatted_date = date_24h_ago.strftime("%Y-%m-%dT%H:%M:%S")
+
+            self._log(f"Fetching top {page_size} stories matching {q} since {formatted_date} from NewsAPI", "newsapi", "INFO")
+
+            baseurl = 'https://newsapi.org/v2/everything'
+            params = {
+                'q': q,
+                'from': formatted_date,
+                'language': 'en',
+                'sortBy': 'relevancy',
+                'apiKey': news_api_key,
+                'pageSize': page_size
+            }
+
+            response = requests.get(baseurl, params=params, timeout=60)
+            if response.status_code != 200:
+                return {
+                    'source': 'NewsAPI',
+                    'results': [],
+                    'status': 'error',
+                    'metadata': {'error': f'API call failed with status {response.status_code}: {response.text}'}
+                }
+
+            data = response.json()
+            articles = []
+
+            for article in data.get('articles', []):
+                formatted_article = {
+                    'source': 'NewsAPI',
+                    'title': article.get('title', ''),
+                    'url': article.get('url', ''),
+                    'published': article.get('publishedAt', '')
+                }
+                articles.append(formatted_article)
+
+            return {
+                'source': 'NewsAPI',
+                'results': articles,
+                'status': 'success',
+                'metadata': {
+                    'total_results': data.get('totalResults', 0),
+                    'articles_returned': len(articles),
+                    'query': q,
+                    'date_from': formatted_date
+                }
+            }
+
+        except Exception as e:
+            self._log(f"Failed to fetch from NewsAPI: {str(e)}", "newsapi", "ERROR")
+            return {
+                'source': 'NewsAPI',
+                'results': [],
+                'status': 'error',
+                'metadata': {'error': f'Failed to fetch from NewsAPI: {str(e)}'}
+            }
 
 
 async def gather_urls(sources_file: str = "sources.yaml", max_concurrent: int = 8) -> List[Dict[str, Any]]:
@@ -481,75 +584,3 @@ async def gather_urls(sources_file: str = "sources.yaml", max_concurrent: int = 
     async with Fetcher(sources, max_concurrent) as fetcher:
         return await fetcher.gather_all()
 
-def fn_extract_newsapi() -> Dict[str, Any]:
-    """
-    Get AI news via newsapi - updated to return standard fetch format
-    https://newsapi.org/docs/get-started
-    """
-    try:
-        news_api_key = os.environ.get('NEWSAPI_API_KEY')
-        if not news_api_key:
-            return {
-                'source': 'NewsAPI',
-                'results': [],
-                'status': 'error',
-                'metadata': {'error': 'NEWSAPI_API_KEY environment variable not set'}
-            }
-
-        page_size = 100
-        q = 'artificial intelligence'
-        date_24h_ago = datetime.now() - timedelta(hours=24)
-        formatted_date = date_24h_ago.strftime("%Y-%m-%dT%H:%M:%S")
-
-        log(f"Fetching top {page_size} stories matching {q} since {formatted_date} from NewsAPI", "newsapi", "INFO")
-
-        baseurl = 'https://newsapi.org/v2/everything'
-        params = {
-            'q': q,
-            'from': formatted_date,
-            'language': 'en',
-            'sortBy': 'relevancy',
-            'apiKey': news_api_key,
-            'pageSize': page_size
-        }
-
-        response = requests.get(baseurl, params=params, timeout=60)
-        if response.status_code != 200:
-            return {
-                'source': 'NewsAPI',
-                'results': [],
-                'status': 'error',
-                'metadata': {'error': f'API call failed with status {response.status_code}: {response.text}'}
-            }
-
-        data = response.json()
-        articles = []
-
-        for article in data.get('articles', []):
-            formatted_article = {
-                'source': 'NewsAPI',
-                'title': article.get('title', ''),
-                'url': article.get('url', ''),
-                'published': article.get('publishedAt', '')
-            }
-            articles.append(formatted_article)
-
-        return {
-            'source': 'NewsAPI',
-            'results': articles,
-            'status': 'success',
-            'metadata': {
-                'total_results': data.get('totalResults', 0),
-                'articles_returned': len(articles),
-                'query': q,
-                'date_from': formatted_date
-            }
-        }
-
-    except Exception as e:
-        return {
-            'source': 'NewsAPI',
-            'results': [],
-            'status': 'error',
-            'metadata': {'error': f'Failed to fetch from NewsAPI: {str(e)}'}
-        }
