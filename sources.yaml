@@ -1,8 +1,9 @@
 Ars Technica:
-  type: html
+  type: rss
   url: https://arstechnica.com/ai/
   filename: Ars_Technica
   rss: https://arstechnica.com/ai/feed/
+  # filter_24h: true   # Filter RSS articles to last 24 hours (default: true)
   include:
   - ^https://arstechnica.com/(\w+)/(\d+)/(\d+)/
 
@@ -40,6 +41,7 @@ Feedly AI:
   - ^https://blog.feedly.com
   scroll: 3   # page down times for infinite scroll
   initial_sleep: 20
+  scroll_div: "#feedlyFrame"
 
 # Google News:  # started blocking more effectively
 # # could try to search news for 'artificial intelligence' with the google API https://proxiesapi.com/articles/fetching-news-articles-with-the-google-news-api-and-python
@@ -53,8 +55,8 @@ Feedly AI:
 #   url: https://news.google.com/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRGRqTVhZU0FtVnVHZ0pWVXlnQVAB?hl=en-US&gl=US&ceid=US%3Aen
 #   rss: https://news.google.com/rss/topics/CAAqJggKIiBDQkFTRWdvSUwyMHZNRGRqTVhZU0FtVnVHZ0pWVXlnQVAB?hl=en-US&gl=US&ceid=US:en
 
-Hacker News 1:
-  type: html
+Hacker News:
+  type: rss
   url: https://news.ycombinator.com/
   filename: Hacker_News_1
   exclude:
@@ -63,16 +65,16 @@ Hacker News 1:
   rss: https://news.ycombinator.com/rss
   minlength: 5
 
-Hacker News 2:
-  type: html
-  url: https://news.ycombinator.com/?p=2
-  filename: Hacker_News_2
-  exclude:
-  - https://news.ycombinator.com
-  - https://www.ycombinator.com
+# Hacker News 2:
+#   type: html
+#   url: https://news.ycombinator.com/?p=2
+#   filename: Hacker_News_2
+#   exclude:
+#   - https://news.ycombinator.com
+#   - https://www.ycombinator.com
 
 HackerNoon:
-  type: html
+  type: rss
   url: https://hackernoon.com/tagged/ai
   filename: HackerNoon
   exclude:
@@ -92,7 +94,7 @@ HackerNoon:
   rss: https://hackernoon.com/tagged/ai/feed
 
 New York Times:
-  type: html
+  type: rss
   url: https://www.nytimes.com/section/technology
   filename: New_York_Times
   include:
@@ -100,6 +102,7 @@ New York Times:
   rss: https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml
   initial_sleep: 20
 
+# html because otherwise text posts don't have proper title
 Reddit:
   type: html
   url: https://www.reddit.com/r/AI_Agents+ArtificialInteligence+Automate+ChatGPT+ChatGPTCoding+Futurology+MachineLearning+OpenAI+ProgrammerHumor+accelerate+aiArt+aivideo+artificial+deeplearning+learnmachinelearning+programming+singularity+tech+technews+technology/top/?sort=top&t=day
@@ -123,7 +126,7 @@ Reddit:
   rss: https://www.reddit.com/r/AI_Agents+ArtificialInteligence+Automate+ChatGPT+ChatGPTCoding+Futurology+MachineLearning+OpenAI+ProgrammerHumor+accelerate+aiArt+aivideo+artificial+deeplearning+learnmachinelearning+programming+singularity+tech+technews+technology/top/.rss?sort=top&t=day
 
 Techmeme:
-  type: html
+  type: rss
   url: https://www.techmeme.com/river
   filename: Techmeme
   exclude:
@@ -136,13 +139,14 @@ Techmeme:
   rss: https://www.techmeme.com/feed.xml
 
 The Register:
-  type: html
+  type: rss
   url: https://www.theregister.com/software/ai_ml/
   filename: The_Register
   include:
   - ^https://www.theregister.com/(\d+)/(\d+)/(\d+)/
   rss: https://www.theregister.com/software/ai_ml/headlines.atom
 
+# 400 error for rss from feedparser
 The Verge:
   type: html
   url: https://www.theverge.com/ai-artificial-intelligence
@@ -151,6 +155,7 @@ The Verge:
   - ^https://www.theverge.com/news
   rss: https://www.theverge.com/rss/ai-artificial-intelligence/index.xml
 
+# 400 error for rss from feedparser
 VentureBeat:
   type: html
   url: https://venturebeat.com/category/ai/
@@ -172,7 +177,7 @@ Washington Post:
   rss: https://feeds.washingtonpost.com/rss/business/technology
 
 The Guardian:
-  type: html
+  type: rss
   url: https://www.theguardian.com/uk/technology
   filename: The_Guardian
   include:

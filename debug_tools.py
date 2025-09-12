@@ -7,8 +7,8 @@ import asyncio
 import os
 import json
 import dotenv
-from mock_agent import (NewsletterAgentState, GatherUrlsTool, FilterUrlsTool, 
-                       DownloadArticlesTool, ExtractSummariesTool, gather_urls)
+from newsletter_state import NewsletterAgentState
+from news_agent import GatherUrlsTool, FilterUrlsTool, DownloadArticlesTool, ExtractSummariesTool, gather_urls
 from agents import set_default_openai_client
 from openai import AsyncOpenAI
 from utilities import WorkflowStatus

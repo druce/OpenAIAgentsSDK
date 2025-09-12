@@ -11,11 +11,11 @@ from utilities import (
     StepStatus,
     WorkflowStatus,
     get_workflow_status_report,
-    create_news_dataframe,
     print_workflow_summary,
     format_step_name,
     get_step_icon
 )
+from newsletter_state import NewsletterAgentState
 
 
 def get_workflow_status_tool(workflow_status: WorkflowStatus) -> Dict[str, Any]:

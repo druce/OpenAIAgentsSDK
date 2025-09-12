@@ -182,11 +182,6 @@ class WorkflowStatus:
         return icons.get(status, "❓")
 
 
-def create_news_dataframe() -> pd.DataFrame:
-    """Create an empty DataFrame with proper columns for news headlines."""
-    return pd.DataFrame(columns=[
-        'headline', 'url', 'source', 'timestamp', 'ai_related', 'cluster_topic'
-    ])
 
 
 def get_workflow_status_report(workflow_status: WorkflowStatus, title: str = "Workflow Status") -> str:
@@ -281,8 +276,9 @@ if __name__ == "__main__":
     print(f"➡️  Current step: {workflow.get_current_step()}")
     print(f"🏁 All complete: {workflow.all_complete()}")
 
-    # Test DataFrame creation
-    df = create_news_dataframe()
+    # Test DataFrame creation (now moved to NewsletterAgentState)
+    from newsletter_state import NewsletterAgentState
+    df = NewsletterAgentState.create_headline_df()
     print(f"📰 Created DataFrame with columns: {list(df.columns)}")
 
     print("✅ WorkflowStatus utilities test completed!")

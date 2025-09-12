@@ -1,6 +1,12 @@
 python-dotenv
 jupyter
 ipykernel
+pytest
+pytest-asyncio
+pytest-mock
+pytest-cov
+pytest-xdist
+pytest-timeout
 markdown
 ratelimit
 yapf

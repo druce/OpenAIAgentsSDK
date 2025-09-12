@@ -306,6 +306,40 @@ def setup_sqlite_logging(logger_name: str,
     return logger
 
 
+# Global logger instance for convenience
+_global_logger = None
+
+def log(message: str, context: str = None, level: str = "INFO"):
+    """
+    Convenience logging function that creates a global logger if needed.
+    
+    Args:
+        message: The message to log
+        context: Optional context/step name
+        level: Log level (INFO, WARNING, ERROR, DEBUG)
+    """
+    global _global_logger
+    
+    if _global_logger is None:
+        _global_logger = setup_sqlite_logging("scrape", "scrape_logs.db")
+    
+    level_map = {
+        "DEBUG": _global_logger.debug,
+        "INFO": _global_logger.info,
+        "WARNING": _global_logger.warning,
+        "ERROR": _global_logger.error,
+        "CRITICAL": _global_logger.critical
+    }
+    
+    log_func = level_map.get(level.upper(), _global_logger.info)
+    
+    extra = {}
+    if context:
+        extra['step_name'] = context
+    
+    log_func(message, extra=extra)
+
+
 if __name__ == "__main__":
     # Demo usage
     print("🧪 Testing SQLiteLogHandler...")

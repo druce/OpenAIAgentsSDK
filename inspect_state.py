@@ -7,7 +7,8 @@ import asyncio
 import os
 import json
 import dotenv
-from mock_agent import NewsletterAgent, NewsletterAgentState
+from newsletter_state import NewsletterAgentState
+from news_agent import NewsletterAgent
 from agents import set_default_openai_client, SQLiteSession
 from openai import AsyncOpenAI
 

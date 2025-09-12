@@ -21,11 +21,13 @@ import pandas as pd
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List
 from pydantic import BaseModel, Field
+from email.utils import parsedate_to_datetime
 
 from agents import Agent, Runner, set_default_openai_client, FunctionTool, Tool, SQLiteSession
 from openai import AsyncOpenAI
 from utilities import WorkflowStatus, StepStatus, get_workflow_status_report, print_workflow_summary
 from log_handler import SQLiteLogHandler
+from newsletter_state import NewsletterAgentState
 
 # Global constants
 LOGDB = 'newsagent_logs.db'
@@ -68,67 +70,10 @@ def setup_logging(session_id: str = "default", db_path: str = LOGDB) -> logging.
     return logger
 
 
-class NewsletterAgentState(BaseModel):
-    """Persistent state for the newsletter agent workflow"""
-
-    # Serializable data storage (DataFrame as list of dicts)
-    headline_data: List[Dict[str, Any]] = Field(
-        default_factory=list,
-        description="List of headline dictionaries with columns: title, url, source, timestamp, ai_related, etc."
-    )
-
-    # Source management
-    sources: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="Dictionary of source configurations loaded from YAML"
-    )
-    sources_file: str = Field(
-        default="sources.yaml",
-        description="YAML filename containing source configurations"
-    )
-
-    # Workflow progress
-    current_step: int = Field(default=0, description="Current workflow step (0-9)")
-    workflow_complete: bool = Field(default=False, description="Whether the entire workflow is complete")
-
-    # Processing results
-    article_summaries: Dict[str, List[str]] = Field(
-        default_factory=dict,
-        description="URL -> list of bullet point summaries"
-    )
-    topic_clusters: Dict[str, List[str]] = Field(
-        default_factory=dict,
-        description="Topic name -> list of article URLs"
-    )
-    newsletter_sections: Dict[str, str] = Field(
-        default_factory=dict,
-        description="Section name -> section content"
-    )
-    final_newsletter: str = Field(default="", description="Final newsletter content")
-
-    # Configuration
-    cluster_topics: List[str] = Field(
-        default_factory=list,
-        description="List of topic names for categorization"
-    )
-    max_edits: int = Field(default=3, description="Maximum editing iterations")
-    n_browsers: int = Field(default=3, description="Number of concurrent browsers")
-
-    # Helper methods for DataFrame conversion
-    @property
-    def headline_df(self) -> 'pd.DataFrame':
-        """Convert stored data back to DataFrame"""
-        import pandas as pd
-        return pd.DataFrame(self.headline_data)
-
-    def update_headlines(self, df: 'pd.DataFrame'):
-        """Update headline data from DataFrame"""
-        self.headline_data = df.to_dict('records')
-
 
 async def fetch_rss(session: aiohttp.ClientSession, source_key: str, source_record: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Fetch and parse RSS feed from a source record
+    Fetch and parse RSS feed from a source record with optional 24-hour filtering
 
     Args:
         session: aiohttp session for HTTP requests
@@ -148,20 +93,60 @@ async def fetch_rss(session: aiohttp.ClientSession, source_key: str, source_reco
         }
 
     try:
-        timeout = aiohttp.ClientTimeout(total=10)
+        timeout = aiohttp.ClientTimeout(total=30)
         async with session.get(rss_url, timeout=timeout) as response:
             if response.status == 200:
                 content = await response.text()
                 feed = feedparser.parse(content)
 
+                # Check if 24-hour filtering is requested
+                filter_24h = source_record.get('filter_24h', True)  # Default to True for filtering
+                from datetime import timezone
+                cutoff_time = datetime.now(timezone.utc) - timedelta(hours=24) if filter_24h else None
+
                 # Extract articles from feed entries
                 articles = []
-                for entry in feed.entries[:50]:  # Limit to 50 entries
+                total_entries = 0
+                filtered_out = 0
+
+                for entry in feed.entries[:50]:  # Limit to 50 entries from feed
+                    total_entries += 1
+
+                    # Parse the published date
+                    published_date = None
+                    if entry.get('published'):
+                        try:
+                            # Try parsing with email.utils first (handles RFC 2822 format)
+                            published_date = parsedate_to_datetime(entry.published)
+                        except (ValueError, TypeError):
+                            try:
+                                # Try ISO 8601 format parsing (handles "2025-09-09T15:00:54.00Z" format)
+                                published_date = datetime.fromisoformat(entry.published.replace('Z', '+00:00'))
+                            except (ValueError, TypeError):
+                                try:
+                                    # Fallback: try feedparser's parsed date
+                                    if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                                        published_date = datetime(*entry.published_parsed[:6])
+                                except (ValueError, TypeError):
+                                    pass
+
+                    # Apply 24-hour filter if enabled
+                    if filter_24h and cutoff_time and published_date:
+                        if published_date < cutoff_time:
+                            filtered_out += 1
+                            continue
+
+                    # Build title with title_detail if present
+                    title = entry.get('title', '')
+                    if hasattr(entry, 'title_detail') and entry.title_detail:
+                        title += f": {entry.title_detail}"
+
                     article = {
-                        'title': entry.get('title', ''),
+                        'title': title,
                         'url': entry.get('link', ''),
                         'description': entry.get('description', '') or entry.get('summary', ''),
                         'published': entry.get('published', ''),
+                        'published_datetime': published_date.isoformat() if published_date else None,
                         'source': source_key
                     }
                     articles.append(article)
@@ -174,6 +159,10 @@ async def fetch_rss(session: aiohttp.ClientSession, source_key: str, source_reco
                         'feed_title': feed.feed.get('title', ''),
                         'feed_description': feed.feed.get('description', ''),
                         'entries_count': len(articles),
+                        'total_entries_processed': total_entries,
+                        'filtered_out_count': filtered_out,
+                        'filter_24h_enabled': filter_24h,
+                        'cutoff_time': cutoff_time.isoformat() if cutoff_time else None,
                         'rss_url': rss_url
                     }
                 }
@@ -374,7 +363,7 @@ class WorkflowStatusTool:
                     f"  Total articles: {len(state.headline_data)}",
                     f"  AI-related: {sum(1 for a in state.headline_data if a.get('ai_related') is True)}",
                     f"  Summaries: {len(state.article_summaries)}",
-                    f"  Clusters: {len(state.topic_clusters)}",
+                    f"  Clusters: {len(state.clusters)}",
                     f"  Sections: {len(state.newsletter_sections)}",
                 ])
 
@@ -444,17 +433,17 @@ class StateInspectionTool:
             "",
             "PROCESSING RESULTS:",
             f"  Article summaries: {len(state.article_summaries)} articles",
-            f"  Topic clusters: {len(state.topic_clusters)} topics",
+            f"  Topic clusters: {len(state.clusters)} topics",
             f"  Newsletter sections: {len(state.newsletter_sections)} sections",
             f"  Final newsletter: {'Generated' if state.final_newsletter else 'Not created'}",
         ])
 
-        if state.topic_clusters:
+        if state.clusters:
             report_lines.extend([
                 "",
                 "TOPIC CLUSTERS:",
             ])
-            for topic, urls in state.topic_clusters.items():
+            for topic, urls in state.clusters.items():
                 report_lines.append(f"  {topic}: {len(urls)} articles")
 
         if state.newsletter_sections:
@@ -494,7 +483,9 @@ class StateInspectionTool:
 
 
 class GatherUrlsTool:
-    """Tool for Step 1: Gather URLs from various news sources"""
+    """Tool for Step 1: Gather URLs from various news source
+    - for rss, should examine if we can get text or summary from rss feed
+    """
 
     def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False, logger: logging.Logger = None):
         self.workflow_status = workflow_status  # Keep for UI progress tracking
@@ -586,7 +577,16 @@ class GatherUrlsTool:
 
 
 class FilterUrlsTool:
-    """Tool for Step 2: Filter URLs to AI-related content"""
+    """Tool for Step 2: Filter URLs to AI-related content
+    only download articles that are AI-related that are not already downloaded
+    - get all source, url, title from headline_data
+    - check if previously downloaded same url
+    - check if if previously downloaded same source, title (eg google news may rotate url)
+    - if not downloaded,
+    - store in downloaded_articles db
+    - check all titles if headline is AI-related using prompt
+    - merge this step with downloaded_articles step
+    """
 
     def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False, logger: logging.Logger = None):
         self.workflow_status = workflow_status
@@ -681,7 +681,16 @@ class FilterUrlsTool:
 
 
 class DownloadArticlesTool:
-    """Tool for Step 3: Download article content"""
+    """Tool for Step 3: Download article content
+    - merge this step with filter_urls step
+    - check if downloaded article already exists in download/articles directory
+    - download url using playwright if not a domain that we gave up on like wsj due to blocks
+    - store redirect url in headline_data
+    - store publish date in headline_data
+    - convert html to text with trafilatura, ignoring navigation, ads etc.
+    - check if text is 90% similar to previous article via chromadb
+    - if not similar, save text and update text_path to point to text, else "" and mark as dupe
+    """
 
     def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False, logger: logging.Logger = None):
         self.workflow_status = workflow_status
@@ -780,7 +789,10 @@ class DownloadArticlesTool:
 
 
 class ExtractSummariesTool:
-    """Tool for Step 4: Extract article summaries"""
+    """Tool for Step 4: Extract article summaries
+    - if text is available, send prompt to summarize and put in headline_data
+    - if text is not available, try to use summary from rss feed
+    """
 
     def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False, logger: logging.Logger = None):
         self.workflow_status = workflow_status
@@ -882,7 +894,15 @@ class ExtractSummariesTool:
 
 
 class ClusterByTopicTool:
-    """Tool for Step 5: Cluster articles by topic"""
+    """Tool for Step 5: Cluster articles by topic
+    - use summaries
+    - extract free-form topics using prompt
+    - add repeated free-form topics to canonical prompts
+    - check for all canonical prompt that are matched
+    - use prompt to limit each summary to 7 topics that best match
+    - add topics to summary in headline_data
+    - cluster summaries using hdbscan
+    - for each cluster, send prompt to generate cluster title    """
 
     def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False, logger: logging.Logger = None):
         self.workflow_status = workflow_status
@@ -898,8 +918,8 @@ class ClusterByTopicTool:
 
         # Check if step already completed via persistent state
         if state.current_step >= 5:
-            cluster_count = len(state.topic_clusters)
-            total_articles = sum(len(articles) for articles in state.topic_clusters.values())
+            cluster_count = len(state.clusters)
+            total_articles = sum(len(articles) for articles in state.clusters.values())
             return f"Step 5 already completed! Created {cluster_count} topic clusters with {total_articles} articles."
 
         # Check if step 4 is completed
@@ -921,7 +941,7 @@ class ClusterByTopicTool:
                 return f"❌ No summarized articles found to cluster. Please run step 4 first."
 
             # Clear existing clusters if rerunning
-            state.topic_clusters = {}
+            state.clusters = {}
 
             # Mock clustering logic - in a real implementation, this would use NLP/ML
             # to group articles by semantic similarity of their titles and summaries
@@ -932,7 +952,7 @@ class ClusterByTopicTool:
 
             # Initialize empty clusters
             for topic in predefined_topics:
-                state.topic_clusters[topic] = []
+                state.clusters[topic] = []
 
             # Simple keyword-based clustering
             topic_keywords = {
@@ -965,21 +985,21 @@ class ClusterByTopicTool:
                         best_topic = topic
 
                 # Add article URL to the appropriate cluster
-                state.topic_clusters[best_topic].append(url)
+                state.clusters[best_topic].append(url)
 
                 # Also update the article with cluster info
                 article['cluster_topic'] = best_topic
                 article['cluster_timestamp'] = datetime.now().isoformat()
 
             # Remove empty clusters
-            state.topic_clusters = {
-                topic: articles for topic, articles in state.topic_clusters.items()
+            state.clusters = {
+                topic: articles for topic, articles in state.clusters.items()
                 if articles
             }
 
             # Calculate stats
-            total_clusters = len(state.topic_clusters)
-            total_articles = sum(len(articles) for articles in state.topic_clusters.values())
+            total_clusters = len(state.clusters)
+            total_articles = sum(len(articles) for articles in state.clusters.values())
             cluster_coherence_score = 0.84  # Mock coherence score
 
             # Update persistent state
@@ -993,7 +1013,7 @@ class ClusterByTopicTool:
 
             status_msg = f"✅ Step 5 completed successfully! Organized {total_articles} articles into {total_clusters} topic clusters."
             status_msg += f"\n📊 Cluster coherence score: {cluster_coherence_score:.1%}"
-            status_msg += f"\n🏷️ Topics: {', '.join(state.topic_clusters.keys())}"
+            status_msg += f"\n🏷️ Topics: {', '.join(state.clusters.keys())}"
             status_msg += f"\n💾 Clusters stored in persistent state. Current step: {state.current_step}"
             return status_msg
 
@@ -1016,7 +1036,13 @@ class ClusterByTopicTool:
 
 
 class RateArticlesTool:
-    """Tool for Step 6: Rate article quality and importance"""
+    """Tool for Step 6: Rate article quality and importance
+    - create a rating using prompt to compare articles according to a rubric, and ELO/Bradley-Terry model
+    - optionally could use a prompt to ask if it's AI related, important and not spammy, and use log probs from prompt
+    - use additional criteria like log length of article, reputation of site
+    - combine to create a rating
+    - deduplicate each cluster of articles covering same story and add a point to the rating of the best story retained for each duplicate (since frequently covered stories are important)
+    """
 
     def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False, logger: logging.Logger = None):
         self.workflow_status = workflow_status
@@ -1125,7 +1151,12 @@ class RateArticlesTool:
 
 
 class SelectSectionsTool:
-    """Tool for Step 7: Select newsletter sections"""
+    """Tool for Step 7: Select newsletter sections
+    select all stories with a minimum rating
+    send stories and a prompt to select major themes
+    send a prompt with all the themes and refine it to 6-12 themes
+    send a prompt to all stories and assign to a final theme or other
+    """
 
     def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False, logger: logging.Logger = None):
         self.workflow_status = workflow_status
@@ -1237,7 +1268,12 @@ class SelectSectionsTool:
 
 
 class DraftSectionsTool:
-    """Tool for Step 8: Draft section content"""
+    """Tool for Step 8: Draft section content
+    for each section, send a prompt to draft content
+    send section to a prompt to draft a title that is on topic and engaging,funny, punny, etc.
+    send result to a second prompt to check format and rewrite
+    use critic-optimizer agentic pattern
+    """
 
     def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False, logger: logging.Logger = None):
         self.workflow_status = workflow_status
@@ -1363,7 +1399,9 @@ class DraftSectionsTool:
 
 
 class FinalizeNewsletterTool:
-    """Tool for Step 9: Finalize complete newsletter"""
+    """Tool for Step 9: Finalize complete newsletter
+    assemble sections.
+    send full newsletter to a critic optimizer loop to refine and finalize and choose overall subject line"""
 
     def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False, logger: logging.Logger = None):
         self.workflow_status = workflow_status
