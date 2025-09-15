@@ -13,24 +13,64 @@ import logging
 import os
 import json
 import dotenv
-import yaml
-import feedparser
-import aiohttp
-import requests
-import pandas as pd
 from datetime import datetime, timedelta
+
+import pandas as pd
+
+from IPython.display import HTML, Image, Markdown, display
+
 from typing import Dict, Any, Optional, List
 from pydantic import BaseModel, Field
 from email.utils import parsedate_to_datetime
 
 from agents import Agent, Runner, set_default_openai_client, FunctionTool, Tool, SQLiteSession
 from openai import AsyncOpenAI
-from utilities import WorkflowStatus, StepStatus, get_workflow_status_report, print_workflow_summary
+from newsletter_state import NewsletterAgentState, StepStatus
 from log_handler import SQLiteLogHandler
-from newsletter_state import NewsletterAgentState
+from fetch import Fetcher
+from llm import LLMagent
 
 # Global constants
 LOGDB = 'newsagent_logs.db'
+
+# AI Classification Prompts
+FILTER_SYSTEM_PROMPT = """
+You are a content-classification assistant that labels news headlines as AI-related or not.
+Return **only** a JSON object that satisfies the provided schema.
+For each headline provided, you must return an element with the same id, and a boolean value; do not skip any items.
+No markdown, no markdown fences, no extra keys, no comments.
+"""
+
+FILTER_USER_PROMPT = """
+Classify every headline below.
+
+AI-related if the title mentions (explicitly or implicitly):
+- Core AI technologies: machine learning, neural / deep / transformer networks
+- AI Applications: computer vision, NLP, robotics, autonomous driving, generative media
+- AI hardware, GPU chip supply, AI data centers and infrastructure
+- Companies or labs known for AI: OpenAI, DeepMind, Anthropic, xAI, NVIDIA, etc.
+- AI models & products: ChatGPT, Gemini, Claude, Sora, Midjourney, DeepSeek, etc.
+- New AI products and AI integration into existing products/services
+- AI policy / ethics / safety / regulation / analysis
+- Research results related to AI
+- AI industry figures (Sam Altman, Demis Hassabis, etc.)
+- AI market and business developments, funding rounds, partnerships centered on AI
+- Any other news with a significant AI component
+
+Non-AI examples: crypto, ordinary software, non-AI gadgets and medical devices, and anything else.
+
+Headlines to classify: {headlines_list}
+"""
+
+# Pydantic models for AI classification
+class AIClassification(BaseModel):
+    """Single headline AI classification result"""
+    id: int = Field(description="Headline ID matching input")
+    is_ai_related: bool = Field(description="True if headline is AI-related, False otherwise")
+
+class AIClassificationBatch(BaseModel):
+    """Batch classification results"""
+    classifications: List[AIClassification] = Field(description="List of classification results")
 
 
 def setup_logging(session_id: str = "default", db_path: str = LOGDB) -> logging.Logger:
@@ -71,252 +111,12 @@ def setup_logging(session_id: str = "default", db_path: str = LOGDB) -> logging.
 
 
 
-async def fetch_rss(session: aiohttp.ClientSession, source_key: str, source_record: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Fetch and parse RSS feed from a source record with optional 24-hour filtering
-
-    Args:
-        session: aiohttp session for HTTP requests
-        source_key: Top-level key from sources.yaml (e.g., "Techmeme")
-        source_record: Full source record from sources.yaml
-
-    Returns:
-        Dict with source_key, results, status, metadata
-    """
-    rss_url = source_record.get('rss')
-    if not rss_url:
-        return {
-            'source_key': source_key,
-            'results': [],
-            'status': 'error',
-            'metadata': {'error': 'No RSS URL found in source record'}
-        }
-
-    try:
-        timeout = aiohttp.ClientTimeout(total=30)
-        async with session.get(rss_url, timeout=timeout) as response:
-            if response.status == 200:
-                content = await response.text()
-                feed = feedparser.parse(content)
-
-                # Check if 24-hour filtering is requested
-                filter_24h = source_record.get('filter_24h', True)  # Default to True for filtering
-                from datetime import timezone
-                cutoff_time = datetime.now(timezone.utc) - timedelta(hours=24) if filter_24h else None
-
-                # Extract articles from feed entries
-                articles = []
-                total_entries = 0
-                filtered_out = 0
-
-                for entry in feed.entries[:50]:  # Limit to 50 entries from feed
-                    total_entries += 1
-
-                    # Parse the published date
-                    published_date = None
-                    if entry.get('published'):
-                        try:
-                            # Try parsing with email.utils first (handles RFC 2822 format)
-                            published_date = parsedate_to_datetime(entry.published)
-                        except (ValueError, TypeError):
-                            try:
-                                # Try ISO 8601 format parsing (handles "2025-09-09T15:00:54.00Z" format)
-                                published_date = datetime.fromisoformat(entry.published.replace('Z', '+00:00'))
-                            except (ValueError, TypeError):
-                                try:
-                                    # Fallback: try feedparser's parsed date
-                                    if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                                        published_date = datetime(*entry.published_parsed[:6])
-                                except (ValueError, TypeError):
-                                    pass
-
-                    # Apply 24-hour filter if enabled
-                    if filter_24h and cutoff_time and published_date:
-                        if published_date < cutoff_time:
-                            filtered_out += 1
-                            continue
-
-                    # Build title with title_detail if present
-                    title = entry.get('title', '')
-                    if hasattr(entry, 'title_detail') and entry.title_detail:
-                        title += f": {entry.title_detail}"
-
-                    article = {
-                        'title': title,
-                        'url': entry.get('link', ''),
-                        'description': entry.get('description', '') or entry.get('summary', ''),
-                        'published': entry.get('published', ''),
-                        'published_datetime': published_date.isoformat() if published_date else None,
-                        'source': source_key
-                    }
-                    articles.append(article)
-
-                return {
-                    'source_key': source_key,
-                    'results': articles,
-                    'status': 'success',
-                    'metadata': {
-                        'feed_title': feed.feed.get('title', ''),
-                        'feed_description': feed.feed.get('description', ''),
-                        'entries_count': len(articles),
-                        'total_entries_processed': total_entries,
-                        'filtered_out_count': filtered_out,
-                        'filter_24h_enabled': filter_24h,
-                        'cutoff_time': cutoff_time.isoformat() if cutoff_time else None,
-                        'rss_url': rss_url
-                    }
-                }
-            else:
-                return {
-                    'source_key': source_key,
-                    'results': [],
-                    'status': 'error',
-                    'metadata': {'error': f'HTTP {response.status} from {rss_url}'}
-                }
-
-    except Exception as e:
-        return {
-            'source_key': source_key,
-            'results': [],
-            'status': 'error',
-            'metadata': {'error': f'Failed to fetch RSS: {str(e)}'}
-        }
-
-
-async def fetch_html(session: aiohttp.ClientSession, source_key: str, source_record: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Dummy function for HTML fetching - returns None for now
-
-    Args:
-        session: aiohttp session (unused)
-        source_key: Top-level key from sources.yaml
-        source_record: Full source record from sources.yaml
-
-    Returns:
-        Dict with source_key and None results
-    """
-    return {
-        'source_key': source_key,
-        'results': None,
-        'status': 'not_implemented',
-        'metadata': {'message': 'HTML fetching not yet implemented'}
-    }
-
-
-def fn_extract_newsapi(state: NewsletterAgentState) -> NewsletterAgentState:
-    """
-    Get AI news via newsapi - this is a placeholder function
-    https://newsapi.org/docs/get-started
-    """
-    # This function is not currently integrated with the workflow
-    # It's here for reference from the original implementation
-    print("NewsAPI function called but not implemented in current workflow")
-    return state
-
-
-async def fetch_api(session: aiohttp.ClientSession, source_key: str, source_record: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Dummy function for API fetching - returns None for now
-
-    Args:
-        session: aiohttp session (unused)
-        source_key: Top-level key from sources.yaml
-        source_record: Full source record from sources.yaml
-
-    Returns:
-        Dict with source_key and None results
-    """
-
-    return {
-        'source_key': source_key,
-        'results': None,
-        'status': 'not_implemented',
-        'metadata': {'message': 'API fetching not yet implemented'}
-    }
-
-
-async def gather_urls(sources_file: str = "sources.yaml", max_concurrent: int = 8) -> List[Dict[str, Any]]:
-    """
-    Load sources.yaml and fetch content from all sources concurrently
-
-    Args:
-        sources_file: Path to sources.yaml file
-        max_concurrent: Maximum concurrent requests
-
-    Returns:
-        List of results from all sources
-    """
-    # Load sources from YAML file
-    try:
-        with open(sources_file, 'r', encoding='utf-8') as file:
-            sources = yaml.safe_load(file) or {}
-    except FileNotFoundError:
-        return [{
-            'source_key': 'error',
-            'results': [],
-            'status': 'error',
-            'metadata': {'error': f'Sources file not found: {sources_file}'}
-        }]
-    except yaml.YAMLError as e:
-        return [{
-            'source_key': 'error',
-            'results': [],
-            'status': 'error',
-            'metadata': {'error': f'Error parsing YAML: {str(e)}'}
-        }]
-
-    # Create semaphore for concurrency control
-    semaphore = asyncio.Semaphore(max_concurrent)
-
-    async def fetch_with_semaphore(session, source_key, source_record):
-        async with semaphore:
-            # Determine which fetch function to use based on priority:
-            # 1. RSS if available (highest priority)
-            # 2. API if type is 'rest'
-            # 3. HTML otherwise
-
-            if source_record.get('rss'):
-                return await fetch_rss(session, source_key, source_record)
-            elif source_record.get('type') == 'rest':
-                return await fetch_api(session, source_key, source_record)
-            else:
-                return await fetch_html(session, source_key, source_record)
-
-    # Create tasks for all sources
-    async with aiohttp.ClientSession() as session:
-        tasks = [
-            fetch_with_semaphore(session, source_key, source_record)
-            for source_key, source_record in sources.items()
-            if isinstance(source_record, dict)  # Skip any malformed entries
-        ]
-
-        # Execute all tasks concurrently
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Filter out exceptions and return valid results
-        valid_results = []
-        for result in results:
-            if isinstance(result, dict):
-                valid_results.append(result)
-            else:
-                # Log exception as error result
-                valid_results.append({
-                    'source_key': 'unknown',
-                    'results': [],
-                    'status': 'error',
-                    'metadata': {'error': f'Exception during fetch: {str(result)}'}
-                })
-
-        return valid_results
-
-
 # tools
 
 class WorkflowStatusTool:
     """Tool to check current workflow status"""
 
-    def __init__(self, workflow_status: WorkflowStatus, logger: logging.Logger):
-        self.workflow_status = workflow_status
+    def __init__(self, logger: logging.Logger):
         self.logger = logger
 
     async def _check_workflow_status(self, ctx, args: str) -> str:
@@ -328,49 +128,29 @@ class WorkflowStatusTool:
             # Access the persistent state
             state: NewsletterAgentState = ctx.context
 
-            # Create a status report based on persistent state
-            step_names = [
-                "step_01_gather_urls", "step_02_filter_urls", "step_03_download_articles",
-                "step_04_extract_summaries", "step_05_cluster_by_topic", "step_06_rate_articles",
-                "step_07_select_sections", "step_08_draft_sections", "step_09_finalize_newsletter"
-            ]
+            # Use the unified status reporting system
+            result = state.get_workflow_status_report("WORKFLOW STATUS (FROM PERSISTENT STATE)")
 
-            lines = [
-                "WORKFLOW STATUS (FROM PERSISTENT STATE)",
-                f"Current Step: {state.current_step}/9",
-                f"Workflow Complete: {state.workflow_complete}",
-                f"Progress: {(state.current_step/9)*100:.1f}%",
-                "",
-                "Step Details:"
-            ]
-
-            for i, step_name in enumerate(step_names, 1):
-                if i <= state.current_step:
-                    status = "✅ completed"
-                elif i == state.current_step + 1:
-                    status = "➡️ next to execute"
-                else:
-                    status = "⭕ not started"
-
-                formatted_name = step_name.replace('step_', 'Step ').replace('_', ' ').title()
-                formatted_name = formatted_name.replace('0', '').replace('  ', ' ')  # Clean up numbering
-                lines.append(f"  {formatted_name}: {status}")
-
+            # Add data summary if we have articles
             if state.headline_data:
-                lines.extend([
-                    "",
-                    "Data Summary:",
-                    f"  Total articles: {len(state.headline_data)}",
-                    f"  AI-related: {sum(1 for a in state.headline_data if a.get('ai_related') is True)}",
-                    f"  Summaries: {len(state.article_summaries)}",
-                    f"  Clusters: {len(state.clusters)}",
-                    f"  Sections: {len(state.newsletter_sections)}",
-                ])
+                ai_related = sum(1 for a in state.headline_data if a.get('ai_related') is True)
+                result += f"\n\nData Summary:\n"
+                result += f"  Total articles: {len(state.headline_data)}\n"
+                result += f"  AI-related: {ai_related}\n"
+                result += f"  Clusters: {len(state.clusters)}\n"
+                result += f"  Sections: {len(state.newsletter_sections)}"
 
-                result = "\n".join(lines)
-                if self.logger:
-                    self.logger.info("Completed check_workflow_status")
-                return result
+            # Add intervention guidance if workflow is in error state
+            if state.has_errors():
+                failed_steps = state.get_failed_steps()
+                result += f"\n\n⚠️  INTERVENTION REQUIRED:\n"
+                result += f"  Failed steps: {', '.join(failed_steps)}\n"
+                if state.workflow_status_message:
+                    result += f"  Instructions: {state.workflow_status_message}"
+
+            if self.logger:
+                self.logger.info("Completed check_workflow_status")
+            return result
 
         except Exception as e:
             if self.logger:
@@ -403,17 +183,25 @@ class StateInspectionTool:
         # Access the persistent state
         state: NewsletterAgentState = ctx.context
 
-        # Create detailed state report
+        # Create detailed state report using unified status system
         report_lines = [
             "DETAILED STATE INSPECTION",
             "=" * 50,
-            f"Current Step: {state.current_step}/9",
-            f"Workflow Complete: {state.workflow_complete}",
+            f"Current Step: {state.get_current_step()}",
+            f"Workflow Complete: {state.all_complete()}",
+            f"Progress: {state.get_progress_percentage():.1f}%",
+            f"Workflow Status: {state.workflow_status.value}",
+        ]
+        
+        if state.workflow_status_message:
+            report_lines.append(f"Status Message: {state.workflow_status_message}")
+            
+        report_lines.extend([
             f"Sources File: {state.sources_file}",
             "",
             "HEADLINE DATA:",
             f"  Total articles: {len(state.headline_data)}",
-        ]
+        ])
 
         if state.headline_data:
             ai_related = sum(1 for a in state.headline_data if a.get('ai_related') is True)
@@ -432,7 +220,6 @@ class StateInspectionTool:
         report_lines.extend([
             "",
             "PROCESSING RESULTS:",
-            f"  Article summaries: {len(state.article_summaries)} articles",
             f"  Topic clusters: {len(state.clusters)} topics",
             f"  Newsletter sections: {len(state.newsletter_sections)} sections",
             f"  Final newsletter: {'Generated' if state.final_newsletter else 'Not created'}",
@@ -483,64 +270,91 @@ class StateInspectionTool:
 
 
 class GatherUrlsTool:
-    """Tool for Step 1: Gather URLs from various news source
-    - for rss, should examine if we can get text or summary from rss feed
+    """Tool for Step 1: Gather URLs from news sources defined in sources.yaml using Fetcher
+    - store headlines in persistent headline_data
     """
 
-    def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False, logger: logging.Logger = None):
-        self.workflow_status = workflow_status  # Keep for UI progress tracking
+    def __init__(self, verbose: bool = False, logger: logging.Logger = None):
+        # Legacy workflow_status removed - using unified state management
         self.verbose = verbose
         self.logger = logger
 
-    async def _gather_urls(self, ctx, args: str) -> str:
+    async def _fetch_urls(self, ctx, args: str) -> str:
         """Execute Step 1: Gather URLs using persistent state"""
         if self.logger:
             self.logger.info("Starting Step 1: Gather URLs")
 
-        step_name = "step_01_gather_urls"
+        step_name = "step_01_fetch_urls"
 
         # Access the persistent state
         state: NewsletterAgentState = ctx.context
 
         # Check if step already completed via persistent state
-        if state.current_step >= 1:
+        if state.is_step_complete("step_01_fetch_urls"):
             total_articles = len(state.headline_data)
             if self.logger:
                 self.logger.info(f"Step 1 already completed with {total_articles} articles")
             return f"Step 1 already completed! Found {total_articles} articles in persistent state."
 
         try:
-            # Update workflow status for UI tracking
-            self.workflow_status.start_step(step_name)
+            # Start the step using unified status system
+            state.start_step(step_name)
 
             # Use real RSS fetching from sources.yaml
-            sources_results = await gather_urls(state.sources_file, max_concurrent=5)
+            async with Fetcher() as f:
+                sources_results = await f.fetch_all(do_download=state.do_download)
 
             # Process results and store in persistent state
-            all_articles = []
             successful_sources = []
             failed_sources = []
+            all_articles = []
 
             for result in sources_results:
                 if result['status'] == 'success' and result['results']:
                     # Add source info to each article
-                    for article in result['results']:
-                        article['source_key'] = result['source_key']
-                        article['ai_related'] = None  # To be determined in step 2
-                        all_articles.append(article)
-                    successful_sources.append(result['source_key'])
-                elif result['status'] == 'not_implemented':
-                    # Skip HTML/API sources for now
-                    continue
+                    successful_sources.append(result['source'])
+                    all_articles.extend(result['results'])
                 else:
-                    failed_sources.append(result['source_key'])
+                    failed_sources.append(result['source'])
+
+            # Check if we need user intervention (significant failures)
+            total_sources = len(successful_sources) + len(failed_sources)
+            success_rate = len(successful_sources) / total_sources if total_sources > 0 else 0
+            
+            # Define intervention scenarios
+            requires_intervention = (
+                success_rate < 0.7 or  # Less than 70% success rate
+                any(source in ['Bloomberg', 'WSJ', 'Wall Street Journal', 'Reuters'] for source in failed_sources)
+            )
+            
+            if requires_intervention and failed_sources:
+                # Set error state with intervention message
+                intervention_message = f"Partial failure detected. {len(failed_sources)} sources failed: {', '.join(failed_sources)}. "
+                if any('Bloomberg' in source or 'WSJ' in source for source in failed_sources):
+                    intervention_message += "These sources typically require manual download due to access restrictions. "
+                intervention_message += f"Download HTML files manually to download/sources/ directory and resume with do_download=False."
+                
+                state.error_step(step_name, intervention_message)
+                
+                # Store partial results anyway
+                state.headline_data = all_articles
+                
+                if self.verbose:
+                    print(f"⚠️  Intervention required: {len(successful_sources)} successful, {len(failed_sources)} failed")
+                    print(f"Failed sources: {', '.join(failed_sources)}")
+                
+                return f"⚠️  Intervention Required! Successfully fetched from {len(successful_sources)} sources but {len(failed_sources)} sources failed.\n\n{intervention_message}"
 
             # Store results in persistent state
             state.headline_data = all_articles
-            state.current_step = 1
+            headline_df = pd.DataFrame(all_articles)
+            display(headline_df[["source", "url"]].groupby("source") \
+                .count() \
+                .reset_index() \
+                .rename({'url': 'count'}))
 
-            # Also update workflow status for UI
-            self.workflow_status.complete_step(step_name)
+            # Complete the step using unified status system
+            state.complete_step(step_name)
 
             if self.verbose:
                 print(f"✅ Completed Step 1: Gathered {len(all_articles)} URLs from {len(successful_sources)} RSS sources")
@@ -552,27 +366,32 @@ class GatherUrlsTool:
                 status_msg += f" {len(failed_sources)} sources failed or not implemented."
 
             status_msg += f"\n\n📊 Articles stored in persistent state: {len(state.headline_data)}"
+            headline_df = pd.DataFrame(state.headline_data)
+            display(headline_df)
             if self.logger:
                 self.logger.info(f"Completed Step 1: Gathered {len(all_articles)} articles")
             return status_msg
 
         except Exception as e:
+            error_msg = f"Failed to fetch URLs: {str(e)}"
             if self.logger:
                 self.logger.error(f"Step 1 failed: {str(e)}")
-            self.workflow_status.error_step(step_name, str(e))
-            return f"❌ Step 1 failed: {str(e)}"
+            
+            # Set error state using unified status system
+            state.error_step(step_name, error_msg)
+            return f"❌ Step 1 failed: {error_msg}"
 
     def create_tool(self) -> FunctionTool:
         """Create a FunctionTool instance following OpenAI Agents SDK conventions"""
         return FunctionTool(
-            name="gather_urls",
+            name="fetch_urls",
             description="Execute Step 1: Gather URLs and headlines from various news sources. Only use this tool if Step 1 is not already completed.",
             params_json_schema={
                 "type": "object",
                 "properties": {},
                 "required": []
             },
-            on_invoke_tool=self._gather_urls
+            on_invoke_tool=self._fetch_urls
         )
 
 
@@ -588,8 +407,7 @@ class FilterUrlsTool:
     - merge this step with downloaded_articles step
     """
 
-    def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False, logger: logging.Logger = None):
-        self.workflow_status = workflow_status
+    def __init__(self, verbose: bool = False, logger: logging.Logger = None):
         self.verbose = verbose
         self.logger = logger
 
@@ -604,50 +422,118 @@ class FilterUrlsTool:
         state: NewsletterAgentState = ctx.context
 
         # Check if step already completed via persistent state
-        if state.current_step >= 2:
+        if state.is_step_complete("step_02_filter_urls"):
             ai_related_count = sum(1 for article in state.headline_data if article.get('ai_related') is True)
             total_count = len(state.headline_data)
             return f"Step 2 already completed! Filtered {total_count} articles, {ai_related_count} identified as AI-related."
 
-        # Check if step 1 is completed
-        if state.current_step < 1 or not state.headline_data:
-            return f"❌ Cannot execute Step 2: Step 1 (Gather URLs) must be completed first. Current step: {state.current_step}"
+        # Check if step 1 is completed and no errors
+        if not state.is_step_complete("step_01_fetch_urls") or not state.headline_data:
+            return f"❌ Cannot execute Step 2: Step 1 (Gather URLs) must be completed first. Current status: {state.get_current_step()}"
+            
+        # Check if workflow is blocked by errors
+        if state.has_errors():
+            return f"❌ Cannot execute Step 2: Workflow is blocked by errors. {state.workflow_status_message}"
 
         try:
-            # Update workflow status for UI tracking
-            self.workflow_status.start_step(step_name)
+            # Start step using unified status system
+            state.start_step(step_name)
 
             # Read headlines from persistent state
             total_articles = len(state.headline_data)
 
-            # Mock AI classification - in a real implementation, this would use an AI model
-            # to analyze titles and descriptions for AI relevance
-            ai_related_count = 0
+            if self.verbose:
+                print(f"🔍 Classifying {total_articles} headlines using LLM...")
+
+            # Prepare headlines for batch classification
+            headlines_for_classification = []
             for i, article in enumerate(state.headline_data):
-                # Simple keyword-based mock classification
-                title_lower = article.get('title', '').lower()
-                description_lower = article.get('description', '').lower()
+                title = article.get('title', '')
+                description = article.get('description', '')
+                # Combine title and description for better classification
+                full_text = f"{title}. {description}".strip('. ')
+                
+                headlines_for_classification.append({
+                    'id': i,
+                    'headline': full_text
+                })
 
-                ai_keywords = [
-                    'artificial intelligence', 'ai', 'machine learning', 'ml', 'deep learning',
-                    'neural network', 'llm', 'large language model', 'gpt', 'claude',
-                    'openai', 'anthropic', 'chatbot', 'automation', 'algorithm',
-                    'computer vision', 'natural language', 'nlp', 'robotics'
-                ]
+            # Create LLM agent for AI classification
+            try:
+                classifier = LLMagent(
+                    system_prompt=FILTER_SYSTEM_PROMPT,
+                    user_prompt=FILTER_USER_PROMPT,
+                    output_type=AIClassificationBatch,
+                    model="gpt-4o-mini",
+                    verbose=self.verbose,
+                    logger=self.logger
+                )
 
-                is_ai_related = any(keyword in title_lower or keyword in description_lower
-                                  for keyword in ai_keywords)
+                # Format headlines list for the prompt
+                headlines_text = "\n".join([
+                    f"{item['id']}: {item['headline']}" 
+                    for item in headlines_for_classification
+                ])
 
-                # Update article with AI classification
-                state.headline_data[i]['ai_related'] = is_ai_related
-                if is_ai_related:
-                    ai_related_count += 1
+                # Use prompt_batch to classify all headlines
+                batch_variables = [{
+                    'headlines_list': headlines_text
+                }]
+                
+                classification_results = await classifier.prompt_batch(
+                    batch_variables,
+                    batch_size=1,  # Single batch since we're processing all headlines together
+                    max_concurrency=1
+                )
 
-            # Update persistent state
-            state.current_step = 2
+                # Extract classification results
+                classifications = classification_results[0].classifications
+                
+                if self.verbose:
+                    print(f"✅ Received {len(classifications)} classification results from LLM")
 
-            # Also update workflow status for UI
-            self.workflow_status.complete_step(step_name)
+                # Apply classifications to headlines
+                ai_related_count = 0
+                for classification in classifications:
+                    article_idx = classification.id
+                    is_ai_related = classification.is_ai_related
+                    
+                    # Update article with AI classification
+                    state.headline_data[article_idx]['ai_related'] = is_ai_related
+                    if is_ai_related:
+                        ai_related_count += 1
+
+            except Exception as e:
+                # Fallback to keyword-based classification if LLM fails
+                if self.logger:
+                    self.logger.warning(f"LLM classification failed, falling back to keyword-based: {str(e)}")
+                
+                if self.verbose:
+                    print(f"⚠️ LLM classification failed, using keyword fallback: {str(e)}")
+                
+                ai_related_count = 0
+                for i, article in enumerate(state.headline_data):
+                    # Simple keyword-based fallback classification
+                    title_lower = article.get('title', '').lower()
+                    description_lower = article.get('description', '').lower()
+
+                    ai_keywords = [
+                        'artificial intelligence', 'ai', 'machine learning', 'ml', 'deep learning',
+                        'neural network', 'llm', 'large language model', 'gpt', 'claude',
+                        'openai', 'anthropic', 'chatbot', 'automation', 'algorithm',
+                        'computer vision', 'natural language', 'nlp', 'robotics'
+                    ]
+
+                    is_ai_related = any(keyword in title_lower or keyword in description_lower
+                                      for keyword in ai_keywords)
+
+                    # Update article with AI classification
+                    state.headline_data[i]['ai_related'] = is_ai_related
+                    if is_ai_related:
+                        ai_related_count += 1
+
+            # Complete step using unified status system
+            state.complete_step(step_name)
 
             filter_accuracy = ai_related_count / total_articles if total_articles > 0 else 0
 
@@ -655,16 +541,19 @@ class FilterUrlsTool:
                 print(f"✅ Completed Step 2: Filtered to {ai_related_count} AI-related headlines from {total_articles} total")
 
             status_msg = f"✅ Step 2 completed successfully! Filtered {total_articles} headlines to {ai_related_count} AI-related articles (accuracy: {filter_accuracy:.1%})."
-            status_msg += f"\n\n📊 Results stored in persistent state. Current step: {state.current_step}"
+            status_msg += f"\n\n📊 Results stored in persistent state. Current step: {state.get_current_step()}"
             if self.logger:
                 self.logger.info(f"Completed Step 2: Filtered to {ai_related_count} AI-related articles")
             return status_msg
 
         except Exception as e:
+            error_msg = f"Failed to filter URLs: {str(e)}"
             if self.logger:
                 self.logger.error(f"Step 2 failed: {str(e)}")
-            self.workflow_status.error_step(step_name, str(e))
-            return f"❌ Step 2 failed: {str(e)}"
+            
+            # Set error state using unified status system
+            state.error_step(step_name, error_msg)
+            return f"❌ Step 2 failed: {error_msg}"
 
     def create_tool(self) -> FunctionTool:
         """Create a FunctionTool instance following OpenAI Agents SDK conventions"""
@@ -692,8 +581,7 @@ class DownloadArticlesTool:
     - if not similar, save text and update text_path to point to text, else "" and mark as dupe
     """
 
-    def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False, logger: logging.Logger = None):
-        self.workflow_status = workflow_status
+    def __init__(self, verbose: bool = False, logger: logging.Logger = None):
         self.verbose = verbose
         self.logger = logger
 
@@ -794,8 +682,7 @@ class ExtractSummariesTool:
     - if text is not available, try to use summary from rss feed
     """
 
-    def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False, logger: logging.Logger = None):
-        self.workflow_status = workflow_status
+    def __init__(self, verbose: bool = False, logger: logging.Logger = None):
         self.verbose = verbose
         self.logger = logger
 
@@ -808,8 +695,7 @@ class ExtractSummariesTool:
 
         # Check if step already completed via persistent state
         if state.current_step >= 4:
-            summary_count = len([url for url in state.article_summaries.keys() if state.article_summaries[url]])
-            return f"Step 4 already completed! Generated summaries for {summary_count} articles."
+            return f"Step 4 already completed! Generated summaries."
 
         # Check if step 3 is completed
         if state.current_step < 3:
@@ -827,9 +713,6 @@ class ExtractSummariesTool:
 
             if not articles_with_content:
                 return f"❌ No downloaded AI-related articles found to summarize. Please run step 3 first."
-
-            # Clear existing summaries if rerunning
-            state.article_summaries = {}
 
             # Generate summaries for each article
             articles_summarized = 0
@@ -849,7 +732,6 @@ class ExtractSummariesTool:
                 ]
 
                 # Store summary in persistent state
-                state.article_summaries[url] = mock_summary
                 articles_summarized += 1
                 total_bullets += len(mock_summary)
 
@@ -904,8 +786,7 @@ class ClusterByTopicTool:
     - cluster summaries using hdbscan
     - for each cluster, send prompt to generate cluster title    """
 
-    def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False, logger: logging.Logger = None):
-        self.workflow_status = workflow_status
+    def __init__(self, verbose: bool = False, logger: logging.Logger = None):
         self.verbose = verbose
         self.logger = logger
 
@@ -1044,8 +925,7 @@ class RateArticlesTool:
     - deduplicate each cluster of articles covering same story and add a point to the rating of the best story retained for each duplicate (since frequently covered stories are important)
     """
 
-    def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False, logger: logging.Logger = None):
-        self.workflow_status = workflow_status
+    def __init__(self, verbose: bool = False, logger: logging.Logger = None):
         self.verbose = verbose
         self.logger = logger
 
@@ -1158,8 +1038,7 @@ class SelectSectionsTool:
     send a prompt to all stories and assign to a final theme or other
     """
 
-    def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False, logger: logging.Logger = None):
-        self.workflow_status = workflow_status
+    def __init__(self, verbose: bool = False, logger: logging.Logger = None):
         self.verbose = verbose
         self.logger = logger
 
@@ -1275,8 +1154,7 @@ class DraftSectionsTool:
     use critic-optimizer agentic pattern
     """
 
-    def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False, logger: logging.Logger = None):
-        self.workflow_status = workflow_status
+    def __init__(self, verbose: bool = False, logger: logging.Logger = None):
         self.verbose = verbose
         self.logger = logger
 
@@ -1403,8 +1281,7 @@ class FinalizeNewsletterTool:
     assemble sections.
     send full newsletter to a critic optimizer loop to refine and finalize and choose overall subject line"""
 
-    def __init__(self, workflow_status: WorkflowStatus, verbose: bool = False, logger: logging.Logger = None):
-        self.workflow_status = workflow_status
+    def __init__(self, verbose: bool = False, logger: logging.Logger = None):
         self.verbose = verbose
         self.logger = logger
 
@@ -1524,7 +1401,7 @@ class NewsletterAgent(Agent[NewsletterAgentState]):
         """
         # Initialize session for persistence
         self.session = SQLiteSession(session_id, "newsletter_agent.db")
-        self.workflow_status = WorkflowStatus()  # Keep for progress tracking UI
+        # Remove legacy workflow status - now using unified state management
         self.verbose = verbose
 
         # Initialize logger
@@ -1583,17 +1460,17 @@ Remember: Your state is persistent. You can safely resume from any point. Never 
             instructions=system_prompt,
             model="gpt-4o-mini",
             tools=[
-                WorkflowStatusTool(self.workflow_status, self.logger).create_tool(),
+                WorkflowStatusTool(self.logger).create_tool(),
                 StateInspectionTool(self.verbose, self.logger).create_tool(),
-                GatherUrlsTool(self.workflow_status, self.verbose, self.logger).create_tool(),
-                FilterUrlsTool(self.workflow_status, self.verbose, self.logger).create_tool(),
-                DownloadArticlesTool(self.workflow_status, self.verbose, self.logger).create_tool(),
-                ExtractSummariesTool(self.workflow_status, self.verbose, self.logger).create_tool(),
-                ClusterByTopicTool(self.workflow_status, self.verbose, self.logger).create_tool(),
-                RateArticlesTool(self.workflow_status, self.verbose, self.logger).create_tool(),
-                SelectSectionsTool(self.workflow_status, self.verbose, self.logger).create_tool(),
-                DraftSectionsTool(self.workflow_status, self.verbose, self.logger).create_tool(),
-                FinalizeNewsletterTool(self.workflow_status, self.verbose, self.logger).create_tool(),
+                GatherUrlsTool(self.verbose, self.logger).create_tool(),
+                FilterUrlsTool(self.verbose, self.logger).create_tool(),
+                DownloadArticlesTool(self.verbose, self.logger).create_tool(),
+                ExtractSummariesTool(self.verbose, self.logger).create_tool(),
+                ClusterByTopicTool(self.verbose, self.logger).create_tool(),
+                RateArticlesTool(self.verbose, self.logger).create_tool(),
+                SelectSectionsTool(self.verbose, self.logger).create_tool(),
+                DraftSectionsTool(self.verbose, self.logger).create_tool(),
+                FinalizeNewsletterTool(self.verbose, self.logger).create_tool(),
             ]
         )
 

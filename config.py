@@ -5,6 +5,7 @@ import dotenv
 dotenv.load_dotenv()
 
 REQUEST_TIMEOUT = 900
+SHORT_REQUEST_TIMEOUT = 60
 DOMAIN_RATE_LIMIT = 5.0
 
 FIREFOX_PROFILE_PATH = os.getenv('FIREFOX_PROFILE_PATH')
@@ -34,6 +35,8 @@ CHROMA_DB_NAME = "chroma_articles"
 CHROMA_DB_PATH = os.path.join(CHROMA_DB_DIR, CHROMA_DB_NAME)
 CHROMA_DB_COLLECTION = "articles"
 CHROMA_DB_EMBEDDING_FUNCTION = "text-embedding-3-large"
+
+LOGDB = 'newsagent_logs.db'
 
 OUTPUT_DIR = "out"
 

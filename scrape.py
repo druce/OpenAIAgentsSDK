@@ -1,16 +1,8 @@
 """
 Web scraping utilities.
 
-This module contains functions used for web scraping from web sites in sources.yaml and individual news stories.
+This module contains lower level functions used for web scraping from web sites
 
-one way to refactor this is to instantiate a class for each site
-base on https://www.scrapy.org/
-with playwright integration https://github.com/scrapy-plugins/scrapy-playwright
-initialize with parameters from sources.yaml
-
-can use also rss for many of these
-
-seemingly not maintained
 https://github.com/AndyTheFactory/newspaper4k
 https://github.com/fhamborg/news-please
 
@@ -22,6 +14,7 @@ https://github.com/fhamborg/news-please
 import asyncio
 import re
 import os
+import logging
 from urllib.parse import urljoin, urlparse
 # import pdb
 import json
@@ -44,20 +37,36 @@ import tiktoken
 
 import trafilatura
 
-from log_handler import log
+# from log_handler import log  # Replaced with standard logging
 from config import (DOWNLOAD_DIR, IGNORE_LIST, PAGES_DIR, FIREFOX_PROFILE_PATH,  # SCREENSHOT_DIR,
-                    MIN_TITLE_LEN, SLEEP_TIME, MAX_INPUT_TOKENS, DOMAIN_RATE_LIMIT)
+                    MIN_TITLE_LEN, SLEEP_TIME, MAX_INPUT_TOKENS, DOMAIN_RATE_LIMIT,
+                    SHORT_REQUEST_TIMEOUT)
+
+# Module-level logger for default logging
+# when calling from high level function, pass logger=logger but this is here as a default
+_logger = logging.getLogger(__name__)
 
 @dataclass
 class DomainState:
-    last_request: float = 0
-    lock: asyncio.Lock = None
+    last_request: float = 0    # last request for a domain as monotonic timestamp
+    lock: asyncio.Lock = None  # lock for concurrent access
 
     def __post_init__(self):
         if self.lock is None:
             self.lock = asyncio.Lock()
 
-class SmartRateLimiter:
+class RateLimiter:
+    """Rate limiter for domain-based request throttling.
+
+    Controls the frequency of requests to each domain by enforcing a delay
+    between consecutive requests to the same domain. Each domain is tracked
+    independently, allowing concurrent requests to different domains while
+    respecting per-domain rate limits.
+
+    Args:
+        delay_seconds: Minimum delay in seconds between requests to the same domain.
+                      Defaults to DOMAIN_RATE_LIMIT from config.
+    """
     def __init__(self, delay_seconds: float = DOMAIN_RATE_LIMIT):
         self.delay = delay_seconds
         self.domains: Dict[str, DomainState] = defaultdict(DomainState)
@@ -77,43 +86,48 @@ class SmartRateLimiter:
         """Mark that a request was made for this domain"""
         self.domains[domain].last_request = monotonic()
 
-# Global worker tracking
+
+# Global worker tracking (legacy - kept for backward compatibility)
 _active_workers = 0
 _worker_counter = 0
 _worker_lock = None
 
-def get_og_tags(source: str) -> Dict[str, str]:
+def get_og_tags(source: str, logger: Optional[logging.Logger] = None) -> Dict[str, str]:
     """
-    Fetches Open Graph og: tags from a given URL or local file and returns them as a dictionary.
+    scrapes Open Graph og: tags from a given URL or local file and returns them as a dictionary.
 
     Parameters:
     source (str): The URL of the webpage or the path to the local HTML file.
+    logger (Optional[logging.Logger]): Optional logger for this operation.
 
     Returns:
     dict: A dictionary containing the og: tags found in the webpage.
     """
+    logger = logger or _logger
     result_dict = {}
     content = None
 
     if source.startswith(("http://", "https://")):
         try:
-            response = requests.get(source, timeout=60)
+            response = requests.get(source, timeout=SHORT_REQUEST_TIMEOUT)
             if response.status_code == 200:
                 content = response.content
         except requests.RequestException as e:
-            log(f"Error fetching {source}: {e}")
+            logger.error(f"Error scraping {source}: {e}")
     else:
         try:
             with open(source, "r", encoding="utf-8") as f:
                 content = f.read()
         except FileNotFoundError:
-            log(f"Error: File not found at {source}")
+            logger.error(f"Error: File not found at {source}")
         except PermissionError as e:
-            log(f"Permission denied reading file {source}: {e}")
+            logger.error(f"Permission denied reading file {source}: {e}")
         except UnicodeDecodeError as e:
-            log(f"Encoding error reading file {source}: {e}")
+            logger.error(f"Encoding error reading file {source}: {e}")
         except OSError as e:
-            log(f"OS error reading file {source}: {e}")
+            logger.error(f"OS error reading file {source}: {e}")
+        except Exception as e:
+            logger.error(f"Unknown error reading file {source}: {e}")
 
     if content:
         soup = BeautifulSoup(content, "html.parser")
@@ -179,6 +193,7 @@ def trunc_tokens(long_prompt: str, model: str = 'gpt-4o', maxtokens: int = MAX_I
 def sanitize_filename(filename: str) -> str:
     """
     Sanitizes a filename by removing unsafe characters and ensuring it is valid.
+    E.g. take title and make it a valid filename
 
     Args:
         filename (str): The filename to sanitize.
@@ -199,12 +214,13 @@ def sanitize_filename(filename: str) -> str:
     return filename
 
 
-def normalize_html(path: Path | str) -> str:
+def normalize_html(path: Path | str, logger: Optional[logging.Logger] = None) -> str:
     """
     Clean and extract text content from an HTML file, including titles and social media metadata.
 
     Args:
         path (Path | str): Path to the HTML file to process
+        logger (Optional[logging.Logger]): Optional logger for this operation
 
     Returns:
         - str: Extracted and cleaned text content, or empty string if processing fails
@@ -217,18 +233,19 @@ def normalize_html(path: Path | str) -> str:
 
     All extracted content is concatenated and truncated to MAX_INPUT_TOKENS length.
     """
+    logger = logger or _logger
 
     try:
         with open(path, 'r', encoding='utf-8') as file:
             html_content = file.read()
     except FileNotFoundError as exc:
-        log(f"File not found: {path}")
+        logger.error(f"File not found ({exc}): {path}")
         return ""
     except PermissionError as exc:
-        log(f"Permission denied reading {path}: {exc}")
+        logger.error(f"Permission denied reading {path}: {exc}")
         return ""
     except UnicodeDecodeError as exc:
-        log(f"Encoding error reading {path}: {exc}")
+        logger.error(f"Encoding error reading {path}: {exc}")
         return ""
 
     # Parse the HTML content using trafilatura
@@ -241,7 +258,7 @@ def normalize_html(path: Path | str) -> str:
             "\n" if title_tag and title_tag.string else ""
     except (AttributeError, TypeError) as exc:
         title_str = ""
-        log(f"Error extracting page title: {exc}")
+        logger.warning(f"Error extracting page title: {exc}")
 
     try:
         # Try to get the title from the Open Graph meta tag
@@ -254,7 +271,7 @@ def normalize_html(path: Path | str) -> str:
         og_title = "Social card title: " + og_title if og_title else ""
     except (AttributeError, KeyError, TypeError) as exc:
         og_title = ""
-        log(f"Error extracting og:title: {exc}")
+        logger.warning(f"Error extracting og:title: {exc}")
 
     try:
         # get summary from social media cards
@@ -268,16 +285,16 @@ def normalize_html(path: Path | str) -> str:
         og_desc = 'Social card description: ' + og_desc if og_desc else ""
     except (AttributeError, KeyError, TypeError) as exc:
         og_desc = ""
-        log(f"Error extracting og:description: {exc}")
+        logger.warning(f"Error extracting og:description: {exc}")
 
     # Get text and strip leading/trailing whitespace
-    log(title_str + og_title + og_desc, "clean_html")
+    logger.debug(f"clean_html: {title_str + og_title + og_desc}")
     try:
         plaintext = trafilatura.extract(html_content)
         plaintext = plaintext.strip() if plaintext else ""
     except (ImportError, RuntimeError, ValueError) as exc:
         plaintext = html_content
-        log(f"Trafilatura extraction failed: {exc}")
+        logger.warning(f"Trafilatura extraction failed: {exc}")
 
     # remove special tokens, have found in artiles about tokenization
     # All OpenAI special tokens follow the pattern <|something|>
@@ -291,7 +308,7 @@ def normalize_html(path: Path | str) -> str:
 
 async def get_browser(p: Any) -> BrowserContext:
     """
-    Initializes a Playwright browser instance with stealth settings.
+    Initializes a Playwright browser context with stealth settings.
 
     Args:
         p (async_playwright.Playwright): The Playwright instance.
@@ -411,145 +428,151 @@ async def perform_human_like_actions(page: Page) -> Page:
     return page
 
 
-async def smart_worker(queue: asyncio.Queue, browser: BrowserContext, results: list, rate_limiter: SmartRateLimiter) -> None:
-    """Worker that intelligently handles rate-limited domains"""
+async def scrape_urls_concurrent(
+    urls: List[Tuple[int, str, str]],
+    concurrency: int = 16,
+    rate_limit_seconds: float = DOMAIN_RATE_LIMIT,
+    max_retries: int = 3,
+    logger: Optional[logging.Logger] = None
+) -> List[Tuple[int, str, str, str, str, Optional[str]]]:
+    """
+    scrape URLs concurrently with retry-based rate limiting.
 
-    global _active_workers, _worker_counter, _worker_lock
+    Args:
+        urls: List of (index, url, title) tuples to scrape
+        concurrency: Maximum number of concurrent tasks (default: 16)
+        rate_limit_seconds: Seconds between requests to same domain
+        max_retries: Maximum retry attempts for rate-limited requests (default: 3)
+        logger: Optional logger for this operation
 
-    # Initialize worker lock if not already done
-    if _worker_lock is None:
-        _worker_lock = asyncio.Lock()
-
-    # Track worker startup
-    async with _worker_lock:
-        _active_workers += 1
-        _worker_counter += 1
-        worker_id = _worker_counter
-        log(f"Launching worker {worker_id} (total active: {_active_workers})")
-
-    consecutive_rate_limits = 0
-    max_requeue_attempts = 9  # Prevent infinite requeuing of same item, should never happen
-    item_attempt_count = defaultdict(int)
-
-    try:
-        while True:
-            try:
-                idx, url, title = await asyncio.wait_for(queue.get(), timeout=1.0)
-            except asyncio.TimeoutError:
-                if queue.empty():
-                    break
-                continue
-
+    Returns:
+        List of (index, status, url, title, file_path, last_updated) results
+        where status is 'success', 'ratelimit', or error description
+    """
+    logger = logger or _logger
+    all_results = []
+    rate_limiter = RateLimiter(delay_seconds=rate_limit_seconds)
+    semaphore = asyncio.Semaphore(concurrency)
+    
+    async def scrape_single_url(idx: int, url: str, title: str, browser: BrowserContext) -> Tuple[int, str, str, str, str, Optional[str]]:
+        """Scrape a single URL with rate limiting check."""
+        async with semaphore:  # Acquire concurrency slot
             domain = urlparse(url).netloc
-
-            # Check if we've tried this item too many times
-            item_key = (idx, url)
-            if item_attempt_count[item_key] >= max_requeue_attempts:
-                log(f"Max requeue attempts reached for {url}, skipping")
-                queue.task_done()
-                continue
 
             # Check if file already exists
             title_sanitized = sanitize_filename(title)
             html_path = os.path.join(PAGES_DIR, f'{title_sanitized}.html')
             if os.path.exists(html_path):
-                log(f"File already exists: {html_path}")
-                results.append((idx, url, title, html_path, None))
-                queue.task_done()
-                consecutive_rate_limits = 0
-                continue
+                logger.info(f"File already exists: {html_path}")
+                return (idx, 'success', url, title, html_path, None)
 
             # Skip ignored domains
             if domain in IGNORE_LIST:
-                log(f"Skipping ignored domain: {domain}")
-                results.append((idx, url, title, ""))
-                queue.task_done()
-                consecutive_rate_limits = 0
-                continue
+                logger.info(f"Skipping ignored domain: {domain}")
+                return (idx, 'success', url, title, "", None)
 
-            log(f"from queue: {idx}, {url} , {title}")
-
-            # Check rate limit
+            # Check rate limiting - if blocked, return immediately
             can_proceed, wait_time = rate_limiter.can_proceed(domain)
-
             if not can_proceed:
-                # Push to back of queue and try next item
-                await queue.put((idx, url, title))
-                item_attempt_count[item_key] += 1
-                consecutive_rate_limits += 1
+                logger.info(f"Rate limiting domain {domain}, will retry later (need to wait {wait_time:.1f}s)")
+                return (idx, 'ratelimit', url, title, "", None)
 
-                log(f"Domain {domain} rate-limited, requeuing {url} (attempt {item_attempt_count[item_key]})")
-
-                # If we've hit rate limits on many consecutive items,
-                # likely the queue is mostly the same domain - wait a bit
-                if consecutive_rate_limits >= 3:
-                    log(f"Multiple consecutive rate limits, pause for {DOMAIN_RATE_LIMIT} seconds")
-                    await asyncio.sleep(min(wait_time, DOMAIN_RATE_LIMIT))  # Cap wait time
-                    consecutive_rate_limits = 0
-
-                queue.task_done()
-                continue
-
-            # Proceed with request
-            consecutive_rate_limits = 0
-            rate_limiter.mark_request(domain)
-
+            # Proceed with scraping
             try:
-                log(f"Fetching {url}")
-                html_path, last_updated, final_url = await fetch_url(url, title, browser)
-                results.append((idx, final_url, title, html_path, last_updated))
+                rate_limiter.mark_request(domain)
+                logger.info(f"scraping {url}")
+
+                html_path, last_updated, final_url = await scrape_url(url, title, browser, logger=logger)
+                return (idx, 'success', final_url or url, title, html_path or "", last_updated)
+
             except asyncio.TimeoutError as exc:
-                log(f"Timeout fetching {url}: {exc}")
-                results.append((idx, url, title, "", None))
+                error_msg = f"Timeout: {exc}"
+                logger.error(f"Timeout scraping {url}: {exc}")
+                return (idx, error_msg, url, title, "", None)
             except (ConnectionError, OSError) as exc:
-                log(f"Network error fetching {url}: {exc}")
-                results.append((idx, url, title, "", None))
+                error_msg = f"Network error: {exc}"
+                logger.error(f"Network error scraping {url}: {exc}")
+                return (idx, error_msg, url, title, "", None)
             except Exception as exc:
-                log(f"Unexpected error fetching {url}: {exc}")
-                results.append((idx, url, title, "", None))
-            finally:
-                queue.task_done()
-    finally:
-        # Track worker shutdown
-        async with _worker_lock:
-            _active_workers -= 1
-            log(f"Worker {worker_id} shutting down (total active: {_active_workers})")
+                error_msg = f"Error: {exc}"
+                logger.error(f"Unexpected error scraping {url}: {exc}")
+                return (idx, error_msg, url, title, "", None)
 
+    async def scrape_batch(batch_urls: List[Tuple[int, str, str]], browser: BrowserContext) -> List[Tuple[int, str, str, str, str, Optional[str]]]:
+        """Scrape a batch of URLs concurrently."""
+        tasks = [
+            asyncio.create_task(scrape_single_url(idx, url, title, browser))
+            for idx, url, title in batch_urls
+        ]
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Handle exceptions
+        valid_results = []
+        for i, result in enumerate(results):
+            if isinstance(result, tuple):
+                valid_results.append(result)
+            else:
+                # Log exception and create error result
+                idx, url, title = batch_urls[i]
+                logger.error(f"Task failed with exception: {str(result)}")
+                valid_results.append((idx, f"Exception: {str(result)}", url, title, "", None))
+        
+        return valid_results
 
-async def fetch_queue(queue: asyncio.Queue, concurrency: int) -> List[Tuple[int, str, str, str, Optional[str]]]:
-    """
-    Processes a queue of URLs concurrently using a specified number of workers.
-
-    Args:
-        queue (asyncio.Queue): The queue containing tuples of (index, url, title) to process.
-        concurrency (int): The number of concurrent workers to use.
-
-    Returns:
-        list: A list of tuples containing (index, url, title, result) for each processed URL.
-    """
-
-    results = []
-    rate_limiter = SmartRateLimiter(delay_seconds=DOMAIN_RATE_LIMIT)
-
+    # Main retry loop
     async with async_playwright() as p:
-        log("Launching browser")
+        logger.info(f"Launching browser for {len(urls)} URLs with concurrency={concurrency}")
         browser = await get_browser(p)
 
-        log("Launching workers")
-        tasks = [
-            asyncio.create_task(smart_worker(queue, browser, results, rate_limiter))
-            for _ in range(concurrency)
-        ]
+        remaining_urls = list(urls)  # Copy of original URLs
+        retry_count = 0
+        
+        while remaining_urls and retry_count <= max_retries:
+            logger.info(f"Processing batch of {len(remaining_urls)} URLs (retry {retry_count})")
+            
+            # Process current batch
+            batch_results = await scrape_batch(remaining_urls, browser)
+            
+            # Separate results by status
+            final_results = [r for r in batch_results if r[1] != 'ratelimit']
+            rate_limited_results = [r for r in batch_results if r[1] == 'ratelimit']
+            
+            # Add successful/error results to final list
+            all_results.extend(final_results)
+            
+            # If no rate-limited results, we're done
+            if not rate_limited_results:
+                break
+                
+            # If we've hit max retries, add rate-limited results as final errors
+            if retry_count >= max_retries:
+                logger.warning(f"Max retries ({max_retries}) reached, giving up on {len(rate_limited_results)} rate-limited URLs")
+                # Convert remaining rate-limited results to final errors
+                for r in rate_limited_results:
+                    all_results.append((r[0], 'Max retries exceeded', r[2], r[3], "", None))
+                break
+            
+            # Wait before retrying rate-limited URLs
+            logger.info(f"Waiting {rate_limit_seconds}s before retrying {len(rate_limited_results)} rate-limited URLs")
+            await asyncio.sleep(rate_limit_seconds)
+            
+            # Prepare URLs for next retry
+            remaining_urls = [(r[0], r[2], r[3]) for r in rate_limited_results]
+            retry_count += 1
 
-        await queue.join()
-        log("Finishing and closing browser")
-
-        for task in tasks:
-            task.cancel()
-
+        logger.info("Closing browser")
         await browser.close()
 
-    return results
+    # Sort results by original index
+    all_results.sort(key=lambda x: x[0])
+    
+    success_count = sum(1 for r in all_results if r[1] == 'success')
+    error_count = len(all_results) - success_count
+    logger.info(f"Completed scraping {len(all_results)} URLs: {success_count} successful, {error_count} failed")
+    
+    return all_results
+
 
 # potentially switch to chromium, didn't do in the past due to chromedriver version issues but not an issue with playwright
 # 1. test running a chrome.py with playwright and playwright-stealth and chromium, make a new profile, figure out what it uses
@@ -559,17 +582,27 @@ async def fetch_queue(queue: asyncio.Queue, concurrency: int) -> List[Tuple[int,
 # 5. update get_browser below to use chrome and new profile. potentially ask o3 to look at your code and suggest a good stealth calling template.
 
 
-async def fetch_url(url: str, title: str, browser_context: Optional[BrowserContext] = None, click_xpath: Optional[str] = None, scrolls: int = 0, scroll_div: str = "", initial_sleep: float = SLEEP_TIME, destination: str = DOWNLOAD_DIR) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+async def scrape_url(url: str,
+                    title: str,
+                    browser_context: Optional[BrowserContext] = None,
+                    click_xpath: Optional[str] = None,
+                    scrolls: int = 0,
+                    scroll_div: str = "",
+                    initial_sleep: float = SLEEP_TIME,
+                    destination: str = DOWNLOAD_DIR,
+                    logger: Optional[logging.Logger] = None) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
-    Fetches a URL using a Playwright browser context.
+    scrapes a URL using a Playwright browser context.
 
     Args:
-        url (str): The URL to fetch.
-        title (str): The title for the fetched page.
+        url (str): The URL to scrape.
+        title (str): The title for the scraped page.
         click_xpath (str): An optional XPath expression to click on before saving.
         scrolls (int): The number of times to scroll to the bottom of the page and wait for new content to load.
         browser_context (BrowserContext): The Playwright browser context to use. If not provided, a new browser context will be initialized.
         initial_sleep (float): The number of seconds to wait after the page has loaded before clicking.
+        destination (str): The directory to save the downloaded file.
+        logger (logging.Logger): Optional logger for this operation.
 
     Returns:
         tuple: (html_path, last_updated_time, final_url) where:
@@ -579,10 +612,11 @@ async def fetch_url(url: str, title: str, browser_context: Optional[BrowserConte
 
     # should add retry functionality, re-enable screenshots
     """
-    print(f"fetch_url({url})")
+    logger = logger or _logger
+    logger.info(f"scrape_url({url})")
     try:
         # make output directories
-        print(f"Fetching {url} to {destination}")
+        logger.info(f"scraping {url} to {destination}")
         if not os.path.exists(destination):
             os.makedirs(destination)
 
@@ -590,30 +624,28 @@ async def fetch_url(url: str, title: str, browser_context: Optional[BrowserConte
         html_path = os.path.join(destination, f'{title}.html')
         # check if file already exists, don't re-download
         if os.path.exists(html_path):
-            print(f"File already exists: {html_path}")
+            logger.info(f"File already exists: {html_path}")
             return html_path, None, url
 
         # if file does not exist, download
+        logger.info(f"Downloading {url}")
         page = await browser_context.new_page()
-        response = await page.goto(url, timeout=60000, wait_until='domcontentloaded')
-        print(f"Response: {response.status}")
-        if initial_sleep is None:
-            initial_sleep = SLEEP_TIME if SLEEP_TIME is not None else 5
-        print(initial_sleep)
-        print(SLEEP_TIME)
-        sleep_time = initial_sleep+random.uniform(2, 5)
+        response = await page.goto(url, timeout=SHORT_REQUEST_TIMEOUT*1000, wait_until='domcontentloaded')
+        logger.info(f"Response: {response.status}")
+        logger.debug(f"Initial sleep: {initial_sleep}")
+        sleep_time = initial_sleep + random.uniform(1, 3)
         await asyncio.sleep(sleep_time)
         await perform_human_like_actions(page)
-        print("performed human like actions")
+        logger.debug("performed human like actions")
         if click_xpath:
-            await asyncio.sleep(initial_sleep+random.uniform(2, 5))
-            print(f"Attempting to click on {click_xpath}")
+            await asyncio.sleep(initial_sleep + random.uniform(1, 3))
+            logger.info(f"Attempting to click on {click_xpath}")
             # click_xpath == '//*[@aria-label="Artificial intelligence"]'
             await page.wait_for_selector(f'xpath={click_xpath}')
             await page.click(f'xpath={click_xpath}')
         for i in range(scrolls):
-            print(f"Scrolling {title} ({i+1}/{scrolls})")
-            await asyncio.sleep(random.uniform(2, 5))  # Stealth delay
+            logger.info(f"Scrolling {title} ({i+1}/{scrolls})")
+            await asyncio.sleep(random.uniform(1, 3))  # Stealth delay
             if scroll_div:
                 await page.evaluate("""
                     const el = document.querySelector('%s');
@@ -628,7 +660,7 @@ async def fetch_url(url: str, title: str, browser_context: Optional[BrowserConte
 
         html_source = await page.content()
         if page.url != url:
-            print(f"Page URL redirected from {url} to {page.url}")
+            logger.info(f"Page URL redirected from {url} to {page.url}")
         # Determine last updated time, first try meta tags
         last_updated = None
         soup_meta = BeautifulSoup(html_source, "html.parser")
@@ -646,7 +678,7 @@ async def fetch_url(url: str, title: str, browser_context: Optional[BrowserConte
             tag = soup_meta.find("meta", attrs={attr: val})
             if tag and tag.get("content"):
                 last_updated = tag["content"]
-                print(
+                logger.debug(
                     f"Found last updated time from meta tag {attr}={val}: {last_updated}")
                 break
 
@@ -663,7 +695,7 @@ async def fetch_url(url: str, title: str, browser_context: Optional[BrowserConte
                 data = json.loads(script.string)
                 if data.get('@type') == 'NewsArticle':
                     last_updated = data.get('datePublished')
-                    print(
+                    logger.debug(
                         f"Found script last updated time from script datePublished: {last_updated}")
                     break
             except Exception:
@@ -673,14 +705,14 @@ async def fetch_url(url: str, title: str, browser_context: Optional[BrowserConte
         if not last_updated:
             if response and response.headers.get("last-modified"):
                 last_updated = response.headers.get("last-modified")
-                print(
+                logger.debug(
                     f"Found last updated time from HTTP header: {last_updated}")
 
         # Fallback to document.lastModified
         if not last_updated:
             try:
                 last_updated = await page.evaluate("document.lastModified")
-                print(
+                logger.debug(
                     f"Found last updated time from document.lastModified: {last_updated}")
             except Exception:
                 last_updated = None
@@ -688,20 +720,30 @@ async def fetch_url(url: str, title: str, browser_context: Optional[BrowserConte
         # Validate and normalize last_updated to Zulu datetime
         if last_updated and isinstance(last_updated, str):
             try:
+                logger.debug(f"Attempting to parse last_updated: '{last_updated}' (type: {type(last_updated)})")
                 dt = date_parser.parse(last_updated)
+                logger.debug(f"Parsed datetime: {dt}")
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=datetime.timezone.utc)
+                    logger.debug(f"Added UTC timezone: {dt}")
                 dt_utc = dt.astimezone(datetime.timezone.utc)
+                logger.debug(f"Converted to UTC: {dt_utc}")
                 last_updated = dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-            except (ValueError, TypeError) as e:
-                print(f"Could not parse last_updated '{last_updated}': {e}")
+                logger.debug(f"Formatted last_updated: {last_updated}")
+            except Exception as e:
+                logger.warning(f"Could not parse last_updated '{last_updated}': {type(e).__name__}: {e}")
                 # set to 1 day ago
-                last_updated = (datetime.datetime.now(
-                    datetime.timezone.utc) - datetime.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                try:
+                    last_updated = (datetime.datetime.now(
+                        datetime.timezone.utc) - datetime.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    logger.debug(f"Set fallback last_updated: {last_updated}")
+                except Exception as fallback_e:
+                    logger.error(f"Failed to create fallback datetime: {type(fallback_e).__name__}: {fallback_e}")
+                    last_updated = None
 
         # Save HTML
-        print(f"Saving HTML to {html_path}")
-        # if the file already exists, delete it
+        logger.info(f"Saving HTML to {html_path}")
+        # if the file already exists, overwrite it
         with open(html_path, 'w', encoding='utf-8') as file:
             file.write(html_source)
 
@@ -720,31 +762,33 @@ async def fetch_url(url: str, title: str, browser_context: Optional[BrowserConte
 
         return html_path, last_updated, final_url
     except asyncio.TimeoutError as exc:
-        print(f"Timeout error fetching {url}: {exc}")
-        if 'page' in locals():
-            await page.close()
+        logger.error(f"Timeout error scraping {url}: {exc}")
         return None, None, None
     except (ConnectionError, OSError) as exc:
-        print(f"Network error fetching {url}: {exc}")
-        if 'page' in locals():
-            await page.close()
+        logger.error(f"Network error scraping {url}: {exc}")
         return None, None, None
     except Exception as exc:
-        print(f"Unexpected error fetching {url}: {exc}")
-        if 'page' in locals():
-            await page.close()
+        logger.error(f"Unexpected error scraping {url}: {exc}")
         return None, None, None
+    finally:
+        # Ensure page is always closed
+        if 'page' in locals() and page:
+            try:
+                await page.close()
+            except Exception as exc:
+                logger.warning(f"Error closing page for {url}: {exc}")
 
 
-async def fetch_source(source_dict: Dict[str, Any], browser_context: Optional[BrowserContext] = None) -> Tuple[str, Optional[str]]:
+async def scrape_source(source_dict: Dict[str, Any], browser_context: Optional[BrowserContext] = None, logger: Optional[logging.Logger] = None) -> Tuple[str, Optional[str]]:
     """
-    Fetches a landing page using fetch_url and parameters defined in sources.yaml.
+    scrapes a landing page using scrape_url and parameters defined in sources.yaml.
     source_dict is the landing page parameters loaded from sources.yaml.
     Updates source_dict['latest'] with the path to the downloaded file.
 
     Args:
         source_dict (dict): A dictionary containing the parameters defined in sources.yaml.
         browser_context (BrowserContext, optional): The Playwright browser context to use. If not provided, a new browser context will be initialized.
+        logger (logging.Logger, optional): Optional logger for this operation.
 
     Returns:
         str: The path to the downloaded file.
@@ -753,59 +797,31 @@ async def fetch_source(source_dict: Dict[str, Any], browser_context: Optional[Br
         Exception: If there is an error during the execution of the function.
 
     """
+    logger = logger or _logger
     url = source_dict.get("url")
-    title = source_dict["title"]
+    filename = source_dict["filename"]
     sourcename = source_dict["sourcename"]
     click_xpath = source_dict.get("click", "")
     scrolls = source_dict.get("scroll", 0)
     scroll_div = source_dict.get("scroll_div", "")
     initial_sleep = source_dict.get("initial_sleep", SLEEP_TIME)
 
-    print(f"Starting fetch_source {url}, {title}")
+    logger.info(f"Starting scrape_source {url}, {filename}")
 
-    # Open the page and fetch the HTML
-    file_path, _, _ = await fetch_url(url, title, browser_context,
-                                      click_xpath, scrolls, scroll_div, initial_sleep)
+    # Open the page and scrape the HTML
+    file_path, _, _ = await scrape_url(url, filename, browser_context,
+                                      click_xpath, scrolls, scroll_div, initial_sleep, logger=logger)
     source_dict['latest'] = file_path
     return (sourcename, file_path)
 
 
-async def fetch_source_queue(queue: asyncio.Queue, concurrency: int) -> List[Tuple[str, Optional[str]]]:
-    """
-    Processes a queue of sources concurrently using a specified number of workers.
-
-    Args:
-        queue (asyncio.Queue): The queue containing tuples of (index, url, title) to process.
-        concurrency (int): The number of concurrent workers to use.
-
-    Returns:
-        list: A list of tuples containing (index, url, title, result) for each processed URL.
-    """
-    async with async_playwright() as p:
-        browser = await get_browser(p)
-        sem = asyncio.Semaphore(concurrency)
-
-        async def bounded(source):
-            async with sem:
-                result = await fetch_source(source, browser)
-                return result
-
-        source_array = []
-        while not queue.empty():
-            source = await queue.get()
-            source_array.append(source)
-
-        results = await asyncio.gather(*[bounded(source) for source in source_array])
-        await browser.close()
-    return results
-
-
-def parse_file(source_dict: Dict[str, Any]) -> List[Dict[str, str]]:
+def parse_source_file(source_dict: Dict[str, Any], logger: Optional[logging.Logger] = None) -> List[Dict[str, str]]:
     """
     Parse a saved HTML file and return a list of dictionaries with title, url, src for each link in the file.
 
     Args:
         source_dict (dict): A dictionary containing the source information.
+        logger (Optional[logging.Logger]): Optional logger for this operation.
 
     Returns:
         list: A list of dictionaries, where each dictionary represents a link in the HTML file.
@@ -815,13 +831,19 @@ def parse_file(source_dict: Dict[str, Any]) -> List[Dict[str, str]]:
         None
 
     """
+
+    logger = logger or _logger
     sourcename = source_dict['sourcename']
-    title = source_dict["title"]
-    filename = source_dict["latest"]
+    filename = f'{DOWNLOAD_DIR}/{source_dict["filename"]}.html'
     url = source_dict.get("url")
     exclude = source_dict.get("exclude")
     include = source_dict.get("include")
     minlength = source_dict.get("minlength", MIN_TITLE_LEN)
+    logger.debug(f"minlength from source_dict: {repr(source_dict.get('minlength'))}, MIN_TITLE_LEN: {repr(MIN_TITLE_LEN)}, final minlength: {repr(minlength)}")
+    # Ensure minlength is never None for comparison operations
+    if minlength is None:
+        logger.warning(f"minlength was None! source_dict minlength: {repr(source_dict.get('minlength'))}, MIN_TITLE_LEN: {repr(MIN_TITLE_LEN)}")
+        minlength = 28  # Default minimum title length
 
     link_list = []
 
@@ -830,7 +852,7 @@ def parse_file(source_dict: Dict[str, Any]) -> List[Dict[str, str]]:
         with open(filename, "r", encoding="utf-8") as file:
             html_content = file.read()
     except (FileNotFoundError, PermissionError, UnicodeDecodeError) as e:
-        log(f"Error reading file {filename}: {e}")
+        logger.error(f"Error reading file {filename}: {e}")
         return []
 
     # Parse the HTML content
@@ -840,9 +862,9 @@ def parse_file(source_dict: Dict[str, Any]) -> List[Dict[str, str]]:
     if soup:
         links = soup.find_all("a")
     else:
-        log(f"Skipping {url}, unable to parse", "parse_file")
+        logger.warning(f"Skipping {url}, unable to parse")
         return []
-    log(f"found {len(links)} raw links", "parse_file")
+    logger.debug(f"found {len(links)} raw links")
 
     # drop empty text
     links = [link for link in links if link.get_text(strip=True)]
@@ -889,7 +911,7 @@ def parse_file(source_dict: Dict[str, Any]) -> List[Dict[str, str]]:
         title = link.get_text(strip=True)
         if title == "LINK":
             # try to update title if the title is LINK (or eventually other patterns)
-            og_dict = get_og_tags(url)
+            og_dict = get_og_tags(url, logger=logger)
             if og_dict.get("og:title"):
                 title = og_dict.get("og:title")
 
@@ -899,38 +921,8 @@ def parse_file(source_dict: Dict[str, Any]) -> List[Dict[str, str]]:
 
         link_list.append({"title": title, "url": url, "src": sourcename})
 
-    log(f"found {len(link_list)} filtered links", "parse_file")
+    logger.debug(f"found {len(link_list)} filtered links")
 
     return link_list
 
 
-# map google news headlines to redirect
-# google would never show the real url, so we have to follow redirects
-# but then google eventually hard blocked scraping so this is not used
-# def get_google_news_redirects(orig_df):
-#     redirect_dict = {}
-#     for row in orig_df.itertuples():
-#         parsed_url = urlparse(row.url)
-#         netloc = parsed_url.netloc
-#         if netloc == 'news.google.com':
-#             log_str = netloc + " -> "
-#             response = requests.get(row.url, allow_redirects=False, timeout=10)
-#             # The URL to which it would have redirected
-#             redirect_url = response.headers.get('Location')
-#             redirect_dict[row.url] = redirect_url
-#             parsed_url2 = urlparse(redirect_url)
-#             netloc2 = parsed_url2.netloc
-#             if netloc2 == 'news.google.com':
-#                 #                 logstr += netloc2 + " -> "
-#                 response = requests.get(redirect_url, allow_redirects=False)
-#             # The URL to which it would have redirected
-#                 redirect_url = response.headers.get('Location')
-#                 if redirect_url:
-#                     redirect_dict[row.url] = redirect_url
-#                     log_str += redirect_url
-#             log(log_str, "get_google_news_redirects")
-
-#     orig_df['actual_url'] = orig_df['url'].apply(
-#         lambda url: redirect_dict.get(url, url))
-
-#     return orig_df

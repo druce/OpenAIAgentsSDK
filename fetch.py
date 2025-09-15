@@ -38,10 +38,8 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 from prompt_loader import PromptLoader
 from log_handler import SQLiteLogHandler, setup_sqlite_logging, sanitize_error_for_logging, log
-from utilities import (StepStatus, WorkflowStatus,
-                       get_workflow_status_report, print_workflow_summary,
-                      )
-
+# Removed utilities imports - functionality merged into newsletter_state.py
+from config import DOWNLOAD_DIR
 
 class Fetcher:
     """
@@ -102,8 +100,8 @@ class Fetcher:
         # Create aiohttp session
         self.session = aiohttp.ClientSession()
 
-        # Note: Browser context will be created only when needed for HTML fetching
-        # to avoid overhead when only doing RSS fetching
+        # Initialize browser context for clarity since it's torn down in __aexit__
+        self.browser_context = await self._get_browser_context()
 
         return self
 
@@ -127,7 +125,7 @@ class Fetcher:
             self.logger = logger
         else:
             self.logger = logging.getLogger(f"fetcher_{id(self)}")
-            self.logger.setLevel(logging.INFO)
+            self.logger.setLevel(logging.DEBUG)
 
             # Only add handler if none exist (to avoid duplicates)
             if not self.logger.handlers:
@@ -158,16 +156,28 @@ class Fetcher:
         log_func(formatted_message)
 
     async def _get_browser_context(self):
-        """Lazy initialization of browser context for HTML fetching."""
-        if self.browser_context is None:
-            # Import here to avoid circular imports and only when needed
-            from playwright.async_api import async_playwright
-            from scrape import get_browser
+        """Lazy initialization of browser context with race condition protection."""
+        # Fast path: if browser already exists, return it immediately
+        if self.browser_context is not None:
+            return self.browser_context
 
-            # Initialize playwright and browser context
-            if not hasattr(self, '_playwright'):
-                self._playwright = await async_playwright().start()
-            self.browser_context = await get_browser(self._playwright)
+        # Create lock if it doesn't exist (one-time setup)
+        if not hasattr(self, '_browser_lock'):
+            self._browser_lock = asyncio.Lock()
+
+        # Use lock to prevent race conditions during initialization
+        async with self._browser_lock:
+            # Double-check: another coroutine might have initialized it while we waited
+            if self.browser_context is None:
+                # Import here to avoid circular imports and only when needed
+                from playwright.async_api import async_playwright
+                from scrape import get_browser
+
+                # Initialize playwright and browser context
+                if not hasattr(self, '_playwright'):
+                    self._playwright = await async_playwright().start()
+                self.browser_context = await get_browser(self._playwright)
+
         return self.browser_context
 
     async def fetch_rss(self, source: str) -> Dict[str, Any]:
@@ -201,49 +211,48 @@ class Fetcher:
 
         try:
             self._log(f"Fetching RSS from {source}: {rss_url}", "fetch_rss", "INFO")
-            async with self.semaphore:
-                timeout = aiohttp.ClientTimeout(total=10)
-                async with self.session.get(rss_url, timeout=timeout) as response:
-                    if response.status == 200:
-                        content = await response.text()
-                        feed = feedparser.parse(content)
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with self.session.get(rss_url, timeout=timeout) as response:
+                if response.status == 200:
+                    content = await response.text()
+                    feed = feedparser.parse(content)
 
-                        # Extract articles from feed entries
-                        articles = []
-                        for entry in feed.entries[:50]:  # Limit to 50 entries
-                            # Format title with title_detail if available
-                            title = entry.get('title', '')
-                            title_detail = entry.get('title_detail', {}).get('value', '') if entry.get('title_detail') else ''
-                            formatted_title = f"{title}: {title_detail}" if title_detail and title_detail != title else title
+                    # Extract articles from feed entries
+                    articles = []
+                    for entry in feed.entries[:50]:  # Limit to 50 entries
+                        # Format title with title_detail if available
+                        title = entry.get('title', '')
+                        title_detail = entry.get('title_detail', {}).get('value', '') if entry.get('title_detail') else ''
+                        formatted_title = f"{title}: {title_detail}" if title_detail and title_detail != title else title
 
-                            article = {
-                                'source': source,
-                                'title': formatted_title,
-                                'url': entry.get('link', ''),
-                                'published': entry.get('published', ''),
-                                'rss_summary': entry.get('summary', '') or entry.get('description', '')
-                            }
-                            articles.append(article)
-
-                        self._log(f"RSS fetch successful for {source}: {len(articles)} articles", "fetch_rss", "INFO")
-                        return {
+                        article = {
                             'source': source,
-                            'results': articles,
-                            'status': 'success',
-                            'metadata': {
-                                'feed_title': feed.feed.get('title', ''),
-                                'feed_description': feed.feed.get('description', ''),
-                                'entries_count': len(articles),
-                                'rss_url': rss_url
-                            }
+                            'title': formatted_title,
+                            'url': entry.get('link', ''),
+                            'published': entry.get('published', ''),
+                            'rss_summary': entry.get('summary', '') or entry.get('description', '')
                         }
-                    else:
-                        return {
-                            'source': source,
-                            'results': [],
-                            'status': 'error',
-                            'metadata': {'error': f'HTTP {response.status} from {rss_url}'}
+                        articles.append(article)
+
+                    self._log(f"RSS fetch successful for {source}: {len(articles)} articles", "fetch_rss", "INFO")
+                    return {
+                        'source': source,
+                        'results': articles,
+                        'status': 'success',
+                        'metadata': {
+                            'feed_title': feed.feed.get('title', ''),
+                            'feed_description': feed.feed.get('description', ''),
+                            'entries_count': len(articles),
+                            'rss_url': rss_url
                         }
+                    }
+                else:
+                    return {
+                        'source': source,
+                        'results': [],
+                        'status': 'error',
+                        'metadata': {'error': f'HTTP {response.status} from {rss_url}'}
+                    }
 
         except Exception as e:
             self._log(f"RSS fetch failed for {source}: {str(e)}", "fetch_rss", "ERROR")
@@ -254,7 +263,7 @@ class Fetcher:
                 'metadata': {'error': f'Failed to fetch RSS: {str(e)}'}
             }
 
-    async def fetch_html(self, source_key: str) -> Dict[str, Any]:
+    async def fetch_html(self, source_key: str, do_download: bool = True) -> Dict[str, Any]:
         """
         Fetch and parse HTML source to extract article links
 
@@ -273,8 +282,8 @@ class Fetcher:
                 'metadata': {'error': 'Fetcher must be used as async context manager: async with Fetcher() as f:'}
             }
 
-        source_record = self.sources.get(source_key, {})
-        url = source_record.get('url')
+        source_dict = self.sources.get(source_key, {})
+        url = source_dict.get('url')
         if not url:
             return {
                 'source': source_key,
@@ -285,10 +294,10 @@ class Fetcher:
 
         try:
             self._log(f"Fetching HTML from {source_key}: {url}", "fetch_html", "INFO")
-            async with self.semaphore:
-                # Import here to avoid circular imports
-                from scrape import fetch_source, parse_file
+            # Import here to avoid circular imports
+            from scrape import scrape_source, parse_source_file
 
+            if do_download:
                 # Get browser context
                 browser_context = await self._get_browser_context()
                 # Check if browser context is valid
@@ -300,59 +309,53 @@ class Fetcher:
                         'metadata': {'error': 'Browser context is not available or has been closed'}
                     }
 
-                # Prepare source dict for fetch_source function
-                source_dict = {
-                    'url': url,
-                    'title': source_key,  # Use source_key as title for file naming
-                    'sourcename': source_key,
-                    'click': source_record.get('click', ''),
-                    'scroll': source_record.get('scroll', 0),
-                    'scroll_div': source_record.get('scroll_div', ''),
-                    'initial_sleep': source_record.get('initial_sleep'),
-                    'include': source_record.get('include'),
-                    'exclude': source_record.get('exclude'),
-                    'minlength': source_record.get('minlength')
-                }
                 self._log(f"Source dict for {source_key}: {source_dict}", "fetch_html", "INFO")
 
                 # Fetch the landing page HTML
-                sourcename, file_path = await fetch_source(source_dict, browser_context)
+                source_dict["sourcename"] = source_key
+                _, file_path = await scrape_source(source_dict, browser_context, logger=self.logger)
 
-                if not file_path:
-                    self._log(f"Failed to download HTML page from {source_key}: {url}", "fetch_html", "ERROR")
-                    return {
-                        'source': source_key,
-                        'results': [],
-                        'status': 'error',
-                        'metadata': {'error': 'Failed to download HTML page'}
-                    }
+            else:
+                filename = self.sources.get(source_key, {}).get('filename')
+                file_path = f'{DOWNLOAD_DIR}/{filename}.html'
 
-                # Parse the HTML file to extract article links
-                source_dict['latest'] = file_path  # parse_file expects this key
-                link_list = parse_file(source_dict)
-
-                # Convert to same format as fetch_rss results
-                articles = []
-                for link in link_list:
-                    article = {
-                        'source': source_key,
-                        'title': link.get('title', ''),
-                        'url': link.get('url', '')
-                        # Note: No 'published' key for HTML sources
-                    }
-                    articles.append(article)
-
-                self._log(f"HTML fetch successful for {source_key}: {len(articles)} articles", "fetch_html", "INFO")
+            if not file_path:
+                self._log(f"Failed to download HTML page from {source_key}: {url}", "fetch_html", "ERROR")
                 return {
                     'source': source_key,
-                    'results': articles,
-                    'status': 'success',
-                    'metadata': {
-                        'landing_page': url,
-                        'articles_found': len(articles),
-                        'file_path': file_path
-                    }
+                    'results': [],
+                    'status': 'error',
+                    'metadata': {'error': 'Failed to download HTML page'}
                 }
+
+            # Parse the HTML file to extract article links
+            source_dict['latest'] = file_path  # parse_file expects this key
+            self._log(f"Parsing HTML file: {file_path}", "fetch_html", "INFO")
+            link_list = parse_source_file(source_dict)
+            self._log(f"Parsed HTML file: {file_path}", "fetch_html", "INFO")
+
+            # Convert to same format as fetch_rss results
+            articles = []
+            for link in link_list:
+                article = {
+                    'source': source_key,
+                    'title': link.get('title', ''),
+                    'url': link.get('url', '')
+                    # Note: No 'published' key for HTML sources
+                }
+                articles.append(article)
+
+            self._log(f"HTML fetch successful for {source_key}: {len(articles)} articles", "fetch_html", "INFO")
+            return {
+                'source': source_key,
+                'results': articles,
+                'status': 'success',
+                'metadata': {
+                    'landing_page': url,
+                    'articles_found': len(articles),
+                    'file_path': file_path
+                }
+            }
 
         except Exception as e:
             self._log(f"HTML fetch failed for {source_key}: {str(e)}", "fetch_html", "ERROR")
@@ -385,32 +388,31 @@ class Fetcher:
             }
 
         try:
-            async with self.semaphore:
-                # Map function names to actual class methods
-                function_map = {
-                    'fn_extract_newsapi': self.extract_newsapi,
-                    # Add more API functions here as needed
+            # Map function names to actual class methods
+            function_map = {
+                'fn_extract_newsapi': self.extract_newsapi,
+                # Add more API functions here as needed
+            }
+
+            func = function_map.get(function_name)
+            if not func:
+                return {
+                    'source': source_key,
+                    'results': [],
+                    'status': 'error',
+                    'metadata': {'error': f'Unknown function: {function_name}'}
                 }
 
-                func = function_map.get(function_name)
-                if not func:
-                    return {
-                        'source': source_key,
-                        'results': [],
-                        'status': 'error',
-                        'metadata': {'error': f'Unknown function: {function_name}'}
-                    }
+            # Call the method and return its result
+            # Note: Most API methods are synchronous, so we call them directly
+            if asyncio.iscoroutinefunction(func):
+                result = await func()
+            else:
+                result = func()
 
-                # Call the method and return its result
-                # Note: Most API methods are synchronous, so we call them directly
-                if asyncio.iscoroutinefunction(func):
-                    result = await func()
-                else:
-                    result = func()
-
-                # Ensure the source key matches our source_key
-                result['source'] = source_key
-                return result
+            # Ensure the source key matches our source_key
+            result['source'] = source_key
+            return result
 
         except Exception as e:
             return {
@@ -420,27 +422,30 @@ class Fetcher:
                 'metadata': {'error': f'Failed to fetch from API: {str(e)}'}
             }
 
-    async def gather_all(self) -> List[Dict[str, Any]]:
+    async def fetch_all(self, do_download: bool = True) -> List[Dict[str, Any]]:
         """
         Fetch content from all sources concurrently
+        uses semaphore from constructor to limit concurrent requests to max_concurrent
 
         Returns:
             List of results from all sources
         """
-        self._log(f"Starting gather_all for {len(self.sources)} sources", "gather_all", "INFO")
+        self._log(f"Starting fetch_all for {len(self.sources)} sources", "fetch_all", "INFO")
         async def fetch_with_semaphore(source_key, source_record):
             async with self.semaphore:
-                # Determine which fetch function to use based on priority:
-                # 1. RSS if available (highest priority)
-                # 2. API if type is 'rest'
-                # 3. HTML otherwise
-
-                if source_record.get('rss'):
+                if source_record.get('type') == 'rss':
                     return await self.fetch_rss(source_key)
                 elif source_record.get('type') == 'rest':
                     return await self.fetch_api(source_key)
+                elif source_record.get('type') == 'html':
+                    return await self.fetch_html(source_key, do_download)
                 else:
-                    return await self.fetch_html(source_key)
+                    return {
+                        'source': source_key,
+                        'results': [],
+                        'status': 'error',
+                        'metadata': {'error': 'Unknown source type: ' + source_record.get('type')}
+                    }
 
         # Create tasks for all sources
         tasks = [
@@ -471,7 +476,7 @@ class Fetcher:
         error_count = sum(1 for r in valid_results if r.get('status') == 'error')
         total_articles = sum(len(r.get('results', [])) for r in valid_results if r.get('status') == 'success')
 
-        self._log(f"gather_all completed: {success_count} successful, {error_count} failed, {total_articles} total articles", "gather_all", "INFO")
+        self._log(f"fetch_all completed: {success_count} successful, {error_count} failed, {total_articles} total articles", "fetch_all", "INFO")
 
         return valid_results
 
@@ -582,5 +587,5 @@ async def gather_urls(sources_file: str = "sources.yaml", max_concurrent: int = 
 
     # Use Fetcher class for coordinated fetching
     async with Fetcher(sources, max_concurrent) as fetcher:
-        return await fetcher.gather_all()
+        return await fetcher.fetch_all()
 
