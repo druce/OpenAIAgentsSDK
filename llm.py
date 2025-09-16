@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """
-General-purpose LLM calling module with flexible prompt templating and batch processing.
+LLM calling module with flexible prompt templating and batch processing.
+
+Suppose we have 1000 headlines in a dataframe and we want to apply a prompt to each one.
+Some stuff we might want
+- structured output, like ideally apply prompts to this column and put results in a new column
+- output validation, so llm doesn't e.g. transpose rows
+- batching , don't send 1000 at once but don't send a single headline with a large prompt 1000 times
+- concurrency / async processing, send many batches at once (but maybe specify some max concurrency)
+- retry logic with exponential backoff
 
 This module provides the LLMagent class for making structured LLM calls with:
 - Flexible prompt templates with variable substitution
@@ -8,6 +16,8 @@ This module provides the LLMagent class for making structured LLM calls with:
 - Retry logic with exponential backoff
 - Pydantic output validation
 - Async batch processing with concurrency control
+
+todo: function that takes a dataframe , list of input columns, name of output column, and
 """
 
 import asyncio
@@ -180,7 +190,7 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                     async with sem:
                         # Process the entire batch in a single API call
                         result = await self.prompt_dict({'input_str': str(batch_variables)})
-                        batch_results = [result]
+                        batch_results = result
 
                         # Validate IDs if item_id_field is specified
                         if item_id_field:
@@ -238,7 +248,7 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                     flattened_results.extend(getattr(results, item_list_field))
                 else:
                     break
-            flattened_success = True
+                flattened_success = True
 
             if flattened_success:
                 # Validate final result count
@@ -250,15 +260,17 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                     return flattened_results
             else: # return unflattened results
                 return batch_results
+        else: # return unflattened results
+            return batch_results
 
 
     async def filter_dataframe(self,
-                                   input_df: pd.DataFrame,
-                                   input_vars: Optional[Dict[str, Any]] = None,
-                                   item_list_field: str = 'results_list',
-                                   item_id_field: str = 'id',
-                                   retries: int = 3
-                                   ) -> Any:
+                               input_df: pd.DataFrame,
+                               input_vars: Optional[Dict[str, Any]] = None,
+                               item_list_field: str = 'results_list',
+                               item_id_field: str = 'id',
+                               retries: int = 3
+                              ) -> Any:
         """
         Process a single DataFrame asynchronously using Agent SDK.
 
@@ -291,10 +303,8 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                 # add input_vars if provided
                 if input_vars is not None:
                     input_dict.update(input_vars)
-
                 # Use existing prompt_dict method with retry logic
                 result = await self.prompt_dict(input_dict)
-
                 # Validate item count and IDs if item_list_field is specified
                 if item_list_field:
                     if hasattr(result, item_list_field):
@@ -329,19 +339,23 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                                         else:
                                             raise ValueError(error_msg)
 
-                                # Check if all sent IDs have corresponding received IDs
-                                sent_set = set(sent_ids)
-                                received_set = set(received_ids)
-
-                                if sent_set != received_set:
+                                # Validate ID order - sent and received must match exactly (order + presence)
+                                if sent_ids != received_ids:
+                                    # Provide detailed error information
+                                    sent_set = set(sent_ids)
+                                    received_set = set(received_ids)
                                     missing_ids = sent_set - received_set
                                     extra_ids = received_set - sent_set
-                                    error_msg = f"ID mismatch:"
-                                    if missing_ids:
-                                        error_msg += f" Missing IDs: {missing_ids}"
-                                    if extra_ids:
-                                        error_msg += f" Extra IDs: {extra_ids}"
-
+                                    
+                                    if missing_ids or extra_ids:
+                                        error_msg = f"ID presence mismatch:"
+                                        if missing_ids:
+                                            error_msg += f" Missing IDs: {missing_ids}"
+                                        if extra_ids:
+                                            error_msg += f" Extra IDs: {extra_ids}"
+                                    else:
+                                        error_msg = f"ID order mismatch: sent {sent_ids} != received {received_ids}"
+                                    
                                     self.logger.warning(f"Attempt {attempt + 1}/{retries}: {error_msg}")
                                     if attempt < retries - 1:
                                         await asyncio.sleep(2 ** attempt)  # Exponential backoff
@@ -388,20 +402,52 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         # If we get here, all retries failed
         raise last_exc or RuntimeError(f"Unknown error after {retries} attempts")
 
+    async def _process_indexed_chunk(self, 
+                                   chunk_idx: int, 
+                                   chunk_df: pd.DataFrame,
+                                   input_vars: Optional[Dict[str, Any]] = None,
+                                   item_list_field: str = 'results_list',
+                                   item_id_field: str = 'id',
+                                   retries: int = 3) -> tuple[int, Any]:
+        """
+        Process a single chunk and return with its index for order preservation.
+        
+        Args:
+            chunk_idx: Index of this chunk in the original chunk list
+            chunk_df: DataFrame chunk to process
+            input_vars: Optional additional variables for prompt substitution
+            item_list_field: Name of the field in response containing results list
+            item_id_field: Name of the ID field to validate matches
+            retries: Number of retry attempts for validation failures
+            
+        Returns:
+            Tuple of (chunk_index, result) for order preservation
+        """
+        result = await self.filter_dataframe(
+            chunk_df,
+            input_vars=input_vars,
+            item_list_field=item_list_field,
+            item_id_field=item_id_field,
+            retries=retries
+        )
+        return chunk_idx, result
+
     async def filter_dataframe_batch(self,
                                    input_df: pd.DataFrame,
                                    input_vars: Optional[Dict[str, Any]] = None,
                                    item_list_field: str = 'results_list',
                                    item_id_field: str = 'id',
                                    retries: int = 3,
-                                   chunk_size: int = 25
+                                   chunk_size: int = 25,
+                                   return_series: bool = False,
+                                   value_field: str = 'output'
                                    ) -> Any:
         """
         Process a DataFrame in chunks asynchronously using concurrent calls to filter_dataframe.
 
         Chunks the input DataFrame using paginate_df_async and processes each chunk
-        simultaneously with filter_dataframe. If item_list_field is specified and valid,
-        concatenates all result lists into a single object. Otherwise returns a list of results.
+        simultaneously with filter_dataframe. Chunks are processed with index tracking to
+        guarantee correct ordering regardless of async completion timing.
 
         Args:
             input_df: The DataFrame to process
@@ -410,9 +456,12 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             item_id_field: Name of the ID field to validate matches between sent and received data
             retries: Number of retry attempts for validation failures per chunk
             chunk_size: Number of rows per chunk (default: 25)
+            return_series: If True, return pandas Series for direct DataFrame assignment
+            value_field: Field name to extract values from when return_series=True
 
         Returns:
-            Single concatenated result object (if item_list_field specified) or list of results
+            If return_series=True: pandas Series with values for DataFrame column assignment
+            Otherwise: Single concatenated result object (if item_list_field specified) or list of results
         """
         if input_df.empty:
             return []
@@ -425,47 +474,55 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         if not chunks:
             return []
 
-        # Process all chunks concurrently
+        # Process all chunks concurrently with index tracking
         tasks = [
-            self.filter_dataframe(
-                chunk,
+            self._process_indexed_chunk(
+                i, chunk,
                 input_vars=input_vars,
                 item_list_field=item_list_field,
                 item_id_field=item_id_field,
                 retries=retries
             )
-            for chunk in chunks
+            for i, chunk in enumerate(chunks)
         ]
 
         try:
-            results = await asyncio.gather(*tasks)
+            indexed_results = await asyncio.gather(*tasks)
+            # Sort by chunk index to guarantee order
+            sorted_results = sorted(indexed_results, key=lambda x: x[0])
         except Exception as e:
             self.logger.error(f"Error in filter_dataframe_batch: {e}")
             raise
 
-        # If item_list_field is specified, concatenate all result lists
+        # If item_list_field is specified, concatenate all result lists in order
         if item_list_field:
             try:
-                # Validate that all results have the expected field
+                # Extract results in correct chunk order
                 all_items = []
-                for result in results:
-                    if hasattr(result, item_list_field):
-                        result_list = getattr(result, item_list_field)
+                for chunk_idx, chunk_result in sorted_results:
+                    if hasattr(chunk_result, item_list_field):
+                        result_list = getattr(chunk_result, item_list_field)
                         if isinstance(result_list, list):
                             all_items.extend(result_list)
                         else:
                             self.logger.error(f"Field '{item_list_field}' is not a list: {type(result_list)}")
-                            return results  # Fall back to returning raw results
+                            return [result for _, result in sorted_results]  # Fall back to returning raw results
                     else:
-                        self.logger.error(f"Result missing field '{item_list_field}': {result}")
-                        return results  # Fall back to returning raw results
+                        self.logger.error(f"Result missing field '{item_list_field}': {chunk_result}")
+                        return [result for _, result in sorted_results]  # Fall back to returning raw results
 
+                # Check if we should return Series for DataFrame assignment
+                if return_series:
+                    values = [getattr(item, value_field) for item in all_items]
+                    return pd.Series(values, index=input_df.index)
+                
                 # Create a new result object with concatenated items
                 # Use the structure of the first result as template
-                if results and hasattr(results[0], item_list_field):
+                if sorted_results and hasattr(sorted_results[0][1], item_list_field):
+                    first_result = sorted_results[0][1]
                     # Create a copy of the first result and replace the list field
-                    concatenated_result = results[0].__class__(**{
-                        **{k: v for k, v in results[0].__dict__.items() if k != item_list_field},
+                    concatenated_result = first_result.__class__(**{
+                        **{k: v for k, v in first_result.__dict__.items() if k != item_list_field},
                         item_list_field: all_items
                     })
                     return concatenated_result
@@ -475,7 +532,66 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
 
             except Exception as e:
                 self.logger.error(f"Error concatenating results: {e}")
-                return results  # Fall back to returning raw results
+                return [result for _, result in sorted_results]  # Fall back to returning raw results
         else:
             # No item_list_field specified, return list of results
-            return results
+            if return_series:
+                self.logger.warning("return_series=True but no item_list_field specified, returning raw results")
+            return [result for _, result in sorted_results]
+
+    async def filter_dataframe_values(self, 
+                                    input_df: pd.DataFrame, 
+                                    value_field: str = 'output',
+                                    **kwargs) -> pd.Series:
+        """
+        Process DataFrame and return values as Series for direct column assignment.
+        
+        This is a convenience method that wraps filter_dataframe_batch and extracts
+        the specified field values as a pandas Series for direct DataFrame assignment.
+        All chunk ordering and ID validation guarantees from filter_dataframe_batch apply.
+        
+        Args:
+            input_df: DataFrame to process
+            value_field: Field name to extract from results (default: 'output')
+            **kwargs: All other arguments passed to filter_dataframe_batch
+                     (item_list_field, item_id_field, retries, chunk_size, etc.)
+            
+        Returns:
+            pandas Series with extracted values, indexed to match input_df
+            
+        Examples:
+            # Basic classification
+            df["ai_related"] = await agent.filter_dataframe_values(df[['headline']])
+            
+            # Extract different field
+            df["confidence"] = await agent.filter_dataframe_values(
+                df[['text']], 
+                value_field='confidence'
+            )
+            
+            # With ID validation
+            df["sentiment"] = await agent.filter_dataframe_values(
+                df[['text', 'id']], 
+                item_id_field='id',
+                value_field='sentiment'
+            )
+        """
+        # Call filter_dataframe_batch with all provided arguments
+        result = await self.filter_dataframe_batch(input_df, **kwargs)
+        
+        # Extract values from the structured result
+        if hasattr(result, 'results_list'):
+            # Standard case: structured object with results_list
+            values = [getattr(item, value_field) for item in result.results_list]
+        elif isinstance(result, list):
+            # Fallback case: result is already a list of items
+            values = [getattr(item, value_field) for item in result]
+        else:
+            # Unexpected result format
+            raise ValueError(f"Unexpected result format from filter_dataframe_batch: {type(result)}")
+        
+        # Validate that we have the right number of values
+        if len(values) != len(input_df):
+            raise ValueError(f"Value count mismatch: expected {len(input_df)}, got {len(values)}")
+        
+        return pd.Series(values, index=input_df.index)
