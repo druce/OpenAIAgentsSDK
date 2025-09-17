@@ -1,6 +1,8 @@
 # Newsletter Agent System
 
-An advanced AI-powered newsletter generation system built on the OpenAI Agents SDK that implements a complete 9-step workflow for automated newsletter creation from multiple news sources.
+An advanced AI-powered newsletter generation system built on the OpenAI Agents SDK that implements a 9-step workflow for automated newsletter creation from multiple news sources.
+
+Note: This is a work in progress, the intent is to port the AInewsbot repo to the OpenAI Agents SDK. Currently it runs the first 3 steps, fetching, filtering and downloading articles. The remaining steps are mocked. Check back in a few weeks for a complete implementation.
 
 ## Overview
 
@@ -18,7 +20,7 @@ pip install -r requirements.txt
 playwright install chromium
 
 # Set up environment variables
-cp .env.example .env
+cp dot-env.txt .env
 # Edit .env with your API keys
 ```
 
@@ -287,7 +289,7 @@ python news_agent.py  # Automatically resumes from last step
 
 **Input Processing**:
 - 17 news sources → 650+ raw articles
-- AI classification → 330+ AI-related articles  
+- AI classification → 330+ AI-related articles
 - Content download → 300+ full articles (after deduplication)
 
 **Output Quality**:
