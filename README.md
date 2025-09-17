@@ -30,8 +30,6 @@ cp dot-env.txt .env
 # Generate a complete newsletter
 python news_agent.py
 
-# Check workflow status
-python check_status.py
 ```
 
 ### Interactive Development
@@ -201,10 +199,8 @@ OpenAIAgentsSDK/
 ├── scrape.py                 # Advanced web scraping utilities
 ├── sources.yaml              # News source configurations
 ├── config.py                 # System configuration and constants
-├── utilities.py              # Workflow utilities and helpers
 ├── llm.py                    # LLM integration and classification
 ├── log_handler.py           # Database logging system
-├── check_status.py          # Workflow status monitoring
 ├── tests/                   # Comprehensive test suite
 ├── download/                # Downloaded content storage
 └── requirements.txt         # Python dependencies
