@@ -28,6 +28,7 @@ from openai import AsyncOpenAI
 from newsletter_state import NewsletterAgentState, StepStatus
 from log_handler import SQLiteLogHandler
 from fetch import Fetcher
+from scrape import scrape_urls_concurrent
 from llm import LLMagent
 
 # Global constants
@@ -59,18 +60,21 @@ AI-related if the title mentions (explicitly or implicitly):
 
 Non-AI examples: crypto, ordinary software, non-AI gadgets and medical devices, and anything else.
 
-Headlines to classify: {headlines_list}
+Headlines to classify: {input_text}
 """
 
 # Pydantic models for AI classification
-class AIClassification(BaseModel):
-    """Single headline AI classification result"""
-    id: int = Field(description="Headline ID matching input")
-    is_ai_related: bool = Field(description="True if headline is AI-related, False otherwise")
 
-class AIClassificationBatch(BaseModel):
-    """Batch classification results"""
-    classifications: List[AIClassification] = Field(description="List of classification results")
+# output class for classifying headlines
+class AIClassification(BaseModel):
+    """A single headline classification result"""
+    id: int = Field("The news item id")
+    input_str: str = Field(description="The original headline title")
+    output: bool = Field(description="Whether the headline title is AI-related")
+
+class AIClassificationList(BaseModel):
+    """List of AIClassification for batch processing"""
+    results_list: list[AIClassification] = Field(description="List of classification results")
 
 
 def setup_logging(session_id: str = "default", db_path: str = LOGDB) -> logging.Logger:
@@ -133,7 +137,7 @@ class WorkflowStatusTool:
 
             # Add data summary if we have articles
             if state.headline_data:
-                ai_related = sum(1 for a in state.headline_data if a.get('ai_related') is True)
+                ai_related = sum(1 for a in state.headline_data if a.get('isAI') is True)
                 result += f"\n\nData Summary:\n"
                 result += f"  Total articles: {len(state.headline_data)}\n"
                 result += f"  AI-related: {ai_related}\n"
@@ -192,10 +196,10 @@ class StateInspectionTool:
             f"Progress: {state.get_progress_percentage():.1f}%",
             f"Workflow Status: {state.workflow_status.value}",
         ]
-        
+
         if state.workflow_status_message:
             report_lines.append(f"Status Message: {state.workflow_status_message}")
-            
+
         report_lines.extend([
             f"Sources File: {state.sources_file}",
             "",
@@ -204,7 +208,7 @@ class StateInspectionTool:
         ])
 
         if state.headline_data:
-            ai_related = sum(1 for a in state.headline_data if a.get('ai_related') is True)
+            ai_related = sum(1 for a in state.headline_data if a.get('isAI') is True)
             with_content = sum(1 for a in state.headline_data if a.get('content'))
             with_ratings = sum(1 for a in state.headline_data if a.get('quality_rating'))
             with_clusters = sum(1 for a in state.headline_data if a.get('cluster_topic'))
@@ -275,7 +279,6 @@ class GatherUrlsTool:
     """
 
     def __init__(self, verbose: bool = False, logger: logging.Logger = None):
-        # Legacy workflow_status removed - using unified state management
         self.verbose = verbose
         self.logger = logger
 
@@ -320,38 +323,40 @@ class GatherUrlsTool:
             # Check if we need user intervention (significant failures)
             total_sources = len(successful_sources) + len(failed_sources)
             success_rate = len(successful_sources) / total_sources if total_sources > 0 else 0
-            
+
             # Define intervention scenarios
             requires_intervention = (
                 success_rate < 0.7 or  # Less than 70% success rate
                 any(source in ['Bloomberg', 'WSJ', 'Wall Street Journal', 'Reuters'] for source in failed_sources)
             )
-            
+
             if requires_intervention and failed_sources:
                 # Set error state with intervention message
                 intervention_message = f"Partial failure detected. {len(failed_sources)} sources failed: {', '.join(failed_sources)}. "
                 if any('Bloomberg' in source or 'WSJ' in source for source in failed_sources):
                     intervention_message += "These sources typically require manual download due to access restrictions. "
                 intervention_message += f"Download HTML files manually to download/sources/ directory and resume with do_download=False."
-                
+
                 state.error_step(step_name, intervention_message)
-                
+
                 # Store partial results anyway
                 state.headline_data = all_articles
-                
+
                 if self.verbose:
                     print(f"⚠️  Intervention required: {len(successful_sources)} successful, {len(failed_sources)} failed")
                     print(f"Failed sources: {', '.join(failed_sources)}")
-                
+
                 return f"⚠️  Intervention Required! Successfully fetched from {len(successful_sources)} sources but {len(failed_sources)} sources failed.\n\n{intervention_message}"
 
             # Store results in persistent state
-            state.headline_data = all_articles
             headline_df = pd.DataFrame(all_articles)
             display(headline_df[["source", "url"]].groupby("source") \
                 .count() \
                 .reset_index() \
                 .rename({'url': 'count'}))
+            # assign id
+            headline_df['id'] = headline_df.index
+            state.headline_data = headline_df.to_dict('records')
 
             # Complete the step using unified status system
             state.complete_step(step_name)
@@ -376,7 +381,7 @@ class GatherUrlsTool:
             error_msg = f"Failed to fetch URLs: {str(e)}"
             if self.logger:
                 self.logger.error(f"Step 1 failed: {str(e)}")
-            
+
             # Set error state using unified status system
             state.error_step(step_name, error_msg)
             return f"❌ Step 1 failed: {error_msg}"
@@ -393,7 +398,6 @@ class GatherUrlsTool:
             },
             on_invoke_tool=self._fetch_urls
         )
-
 
 class FilterUrlsTool:
     """Tool for Step 2: Filter URLs to AI-related content
@@ -420,23 +424,26 @@ class FilterUrlsTool:
 
         # Access the persistent state
         state: NewsletterAgentState = ctx.context
-
+        print("workflow status")
+        print(state.workflow_status)
+        print(state.workflow_status_message)
+        print(state.get_status_dict())
         # Check if step already completed via persistent state
-        if state.is_step_complete("step_02_filter_urls"):
-            ai_related_count = sum(1 for article in state.headline_data if article.get('ai_related') is True)
+        if state.is_step_complete(step_name):
+            ai_related_count = sum(1 for article in state.headline_data if article.get('isAI') is True)
             total_count = len(state.headline_data)
             return f"Step 2 already completed! Filtered {total_count} articles, {ai_related_count} identified as AI-related."
 
         # Check if step 1 is completed and no errors
         if not state.is_step_complete("step_01_fetch_urls") or not state.headline_data:
             return f"❌ Cannot execute Step 2: Step 1 (Gather URLs) must be completed first. Current status: {state.get_current_step()}"
-            
+
         # Check if workflow is blocked by errors
         if state.has_errors():
             return f"❌ Cannot execute Step 2: Workflow is blocked by errors. {state.workflow_status_message}"
 
         try:
-            # Start step using unified status system
+            # Start step
             state.start_step(step_name)
 
             # Read headlines from persistent state
@@ -446,101 +453,35 @@ class FilterUrlsTool:
                 print(f"🔍 Classifying {total_articles} headlines using LLM...")
 
             # Prepare headlines for batch classification
-            headlines_for_classification = []
-            for i, article in enumerate(state.headline_data):
-                title = article.get('title', '')
-                description = article.get('description', '')
-                # Combine title and description for better classification
-                full_text = f"{title}. {description}".strip('. ')
-                
-                headlines_for_classification.append({
-                    'id': i,
-                    'headline': full_text
-                })
+            headline_df = pd.DataFrame(state.headline_data)
+            display(headline_df)
 
             # Create LLM agent for AI classification
-            try:
-                classifier = LLMagent(
-                    system_prompt=FILTER_SYSTEM_PROMPT,
-                    user_prompt=FILTER_USER_PROMPT,
-                    output_type=AIClassificationBatch,
-                    model="gpt-4o-mini",
-                    verbose=self.verbose,
-                    logger=self.logger
-                )
+            classifier = LLMagent(
+                system_prompt=FILTER_SYSTEM_PROMPT,
+                user_prompt=FILTER_USER_PROMPT,
+                output_type=AIClassificationList,
+                model="gpt-5-nano",
+                verbose=self.verbose,
+                logger=self.logger
+            )
 
-                # Format headlines list for the prompt
-                headlines_text = "\n".join([
-                    f"{item['id']}: {item['headline']}" 
-                    for item in headlines_for_classification
-                ])
+            headline_df['isAI'] = \
+                await classifier.filter_dataframe(headline_df[["id", "title"]])
 
-                # Use prompt_batch to classify all headlines
-                batch_variables = [{
-                    'headlines_list': headlines_text
-                }]
-                
-                classification_results = await classifier.prompt_batch(
-                    batch_variables,
-                    batch_size=1,  # Single batch since we're processing all headlines together
-                    max_concurrency=1
-                )
-
-                # Extract classification results
-                classifications = classification_results[0].classifications
-                
-                if self.verbose:
-                    print(f"✅ Received {len(classifications)} classification results from LLM")
-
-                # Apply classifications to headlines
-                ai_related_count = 0
-                for classification in classifications:
-                    article_idx = classification.id
-                    is_ai_related = classification.is_ai_related
-                    
-                    # Update article with AI classification
-                    state.headline_data[article_idx]['ai_related'] = is_ai_related
-                    if is_ai_related:
-                        ai_related_count += 1
-
-            except Exception as e:
-                # Fallback to keyword-based classification if LLM fails
-                if self.logger:
-                    self.logger.warning(f"LLM classification failed, falling back to keyword-based: {str(e)}")
-                
-                if self.verbose:
-                    print(f"⚠️ LLM classification failed, using keyword fallback: {str(e)}")
-                
-                ai_related_count = 0
-                for i, article in enumerate(state.headline_data):
-                    # Simple keyword-based fallback classification
-                    title_lower = article.get('title', '').lower()
-                    description_lower = article.get('description', '').lower()
-
-                    ai_keywords = [
-                        'artificial intelligence', 'ai', 'machine learning', 'ml', 'deep learning',
-                        'neural network', 'llm', 'large language model', 'gpt', 'claude',
-                        'openai', 'anthropic', 'chatbot', 'automation', 'algorithm',
-                        'computer vision', 'natural language', 'nlp', 'robotics'
-                    ]
-
-                    is_ai_related = any(keyword in title_lower or keyword in description_lower
-                                      for keyword in ai_keywords)
-
-                    # Update article with AI classification
-                    state.headline_data[i]['ai_related'] = is_ai_related
-                    if is_ai_related:
-                        ai_related_count += 1
+            # Update state with AI classification results
+            state.headline_data = headline_df.to_dict('records')
 
             # Complete step using unified status system
             state.complete_step(step_name)
 
-            filter_accuracy = ai_related_count / total_articles if total_articles > 0 else 0
+            ai_related_count = sum(1 for article in state.headline_data if article.get('isAI') is True)
+            total_count = len(state.headline_data)
 
             if self.verbose:
                 print(f"✅ Completed Step 2: Filtered to {ai_related_count} AI-related headlines from {total_articles} total")
 
-            status_msg = f"✅ Step 2 completed successfully! Filtered {total_articles} headlines to {ai_related_count} AI-related articles (accuracy: {filter_accuracy:.1%})."
+            status_msg = f"✅ Step 2 completed successfully! Filtered {total_articles} headlines to {ai_related_count} AI-related articles."
             status_msg += f"\n\n📊 Results stored in persistent state. Current step: {state.get_current_step()}"
             if self.logger:
                 self.logger.info(f"Completed Step 2: Filtered to {ai_related_count} AI-related articles")
@@ -550,7 +491,7 @@ class FilterUrlsTool:
             error_msg = f"Failed to filter URLs: {str(e)}"
             if self.logger:
                 self.logger.error(f"Step 2 failed: {str(e)}")
-            
+
             # Set error state using unified status system
             state.error_step(step_name, error_msg)
             return f"❌ Step 2 failed: {error_msg}"
@@ -594,64 +535,123 @@ class DownloadArticlesTool:
 
         # Access the persistent state
         state: NewsletterAgentState = ctx.context
+        print("workflow status")
+        print(state.workflow_status)
+        print(state.workflow_status_message)
+        print(state.get_status_dict())
 
         # Check if step already completed via persistent state
-        if state.current_step >= 3:
-            ai_articles = [article for article in state.headline_data if article.get('ai_related') is True]
-            downloaded_count = sum(1 for article in ai_articles if article.get('content'))
-            return f"Step 3 already completed! Downloaded content for {downloaded_count} AI-related articles."
+        if state.is_step_complete(step_name):
+            ai_related_count = sum(1 for article in state.headline_data if article.get('isAI') is True)
+            total_count = len(state.headline_data)
+            # todo: count downloaded articles with path configured
+            # check if they exist in download directory
+            return f"Step 3 already completed! Filtered {total_count} articles, {ai_related_count} identified as AI-related."
 
-        # Check if step 2 is completed
-        if state.current_step < 2:
-            return f"❌ Cannot execute Step 3: Step 2 (Filter URLs) must be completed first. Current step: {state.current_step}"
+        # Check if step 2 is completed and no errors
+        if not state.is_step_complete("step_02_filter_urls"):
+            return f"❌ Cannot execute Step 3: Step 2 (Filter URLs) must be completed first. Current status: {step_name}"
+
+        # Check if workflow is blocked by errors
+        if state.has_errors():
+            print(state.get_status_dict())
+            return f"❌ Cannot execute Step 3: Workflow is blocked by errors. {state.workflow_status_message}"
 
         try:
             # Update workflow status for UI tracking
-            self.workflow_status.start_step(step_name)
+            state.start_step(step_name)
 
-            # Get AI-related articles from persistent state
-            ai_articles = [article for article in state.headline_data if article.get('ai_related') is True]
+            headline_df = pd.DataFrame(state.headline_data)
 
-            if not ai_articles:
+            # Filter for AI-related articles
+            ai_mask = headline_df['isAI'] == True
+            ai_df = headline_df[ai_mask].copy()
+
+            if ai_df.empty:
                 return f"❌ No AI-related articles found to download. Please run step 2 first."
 
-            # Mock content download - in a real implementation, this would fetch actual article content
+            # Prepare input for scrape_urls_concurrent: (index, url, title)
+            scrape_inputs = []
+            for idx, row in ai_df.iterrows():
+                scrape_inputs.append((
+                    row['id'],  # Use 'id' as the index for matching
+                    row['url'],
+                    row['title']
+                ))
+
+            if self.logger:
+                self.logger.info(f"Starting concurrent scraping of {len(scrape_inputs)} AI-related articles")
+
+            # Use real scraping with scrape_urls_concurrent
+            scrape_results = await scrape_urls_concurrent(
+                scrape_inputs,
+                concurrency=16,
+                rate_limit_seconds=2.0,
+                logger=self.logger
+            )
+
+            # Process scraping results and update DataFrame
             successful_downloads = 0
             total_length = 0
 
-            for article in state.headline_data:
-                if article.get('ai_related') is True:
-                    # Simulate downloading article content
-                    # In reality, this would use web scraping or API calls
-                    mock_content = f"Mock article content for: {article.get('title', 'Unknown title')}\n\n"
-                    mock_content += f"This is placeholder content that would normally be extracted from {article.get('url', 'unknown URL')}.\n"
-                    mock_content += f"The article covers topics related to AI and technology as indicated by the title and description.\n"
-                    mock_content += f"Source: {article.get('source', 'Unknown source')}\n"
+            # Create mapping from id to scrape results
+            result_map = {}
+            for index, status, url, title, file_path, last_updated in scrape_results:
+                result_map[index] = {
+                    'status': status,
+                    'final_url': url,
+                    'file_path': file_path,
+                    'last_updated': last_updated
+                }
 
-                    # Add content to the article data
-                    article['content'] = mock_content
+            # Update headline_data with scraping results
+            for i, article in enumerate(state.headline_data):
+                if article.get('isAI') is True and article['id'] in result_map:
+                    result = result_map[article['id']]
+
+                    # Add new columns to headline_data
+                    article['status'] = result['status']
+                    article['final_url'] = result['final_url']
+                    article['file_path'] = result['file_path']
+                    article['last_updated'] = result['last_updated']
                     article['download_timestamp'] = datetime.now().isoformat()
-                    article['content_length'] = len(mock_content)
 
-                    successful_downloads += 1
-                    total_length += len(mock_content)
+                    # Extract content from downloaded file
+                    if result['status'] == 'success' and result['file_path']:
+                        try:
+                            # Use normalize_html to extract clean text content
+                            from scrape import normalize_html
+                            content = normalize_html(result['file_path'], logger=self.logger)
+                            article['content'] = content
+                            article['content_length'] = len(content)
+                            successful_downloads += 1
+                            total_length += len(content)
+                            
+                            if self.logger:
+                                self.logger.debug(f"Successfully extracted content from {result['file_path']}: {len(content)} characters")
+                        except Exception as e:
+                            if self.logger:
+                                self.logger.warning(f"Failed to extract content from {result['file_path']}: {e}")
+                            article['content'] = f"Failed to extract content: {e}"
+                            article['content_length'] = 0
+                    else:
+                        # Scraping failed or no file path
+                        article['content'] = f"Failed to scrape content. Status: {result['status']}"
+                        article['content_length'] = 0
 
             # Calculate stats
-            download_success_rate = successful_downloads / len(ai_articles) if ai_articles else 0
+            download_success_rate = successful_downloads / len(ai_df) if not ai_df.empty else 0
             avg_article_length = total_length / successful_downloads if successful_downloads > 0 else 0
 
-            # Update persistent state
-            state.current_step = 3
-
-            # Also update workflow status for UI
-            self.workflow_status.complete_step(step_name)
+            # Complete the step
+            state.complete_step(step_name)
 
             if self.verbose:
                 print(f"✅ Completed Step 3: Downloaded {successful_downloads} AI-related articles")
 
             status_msg = f"✅ Step 3 completed successfully! Downloaded {successful_downloads} AI-related articles with {download_success_rate:.0%} success rate."
             status_msg += f"\n📊 Average article length: {avg_article_length:.0f} characters"
-            status_msg += f"\n🔗 Content stored in persistent state. Current step: {state.current_step}"
+            status_msg += f"\n🔗 Content stored in persistent state."
             if self.logger:
                 self.logger.info(f"Completed Step 3: Downloaded {successful_downloads} articles")
             return status_msg
@@ -659,7 +659,7 @@ class DownloadArticlesTool:
         except Exception as e:
             if self.logger:
                 self.logger.error(f"Step 3 failed: {str(e)}")
-            self.workflow_status.error_step(step_name, str(e))
+            state.error_step(step_name, str(e))
             return f"❌ Step 3 failed: {str(e)}"
 
     def create_tool(self) -> FunctionTool:
@@ -694,21 +694,25 @@ class ExtractSummariesTool:
         state: NewsletterAgentState = ctx.context
 
         # Check if step already completed via persistent state
-        if state.current_step >= 4:
+        if state.is_step_complete(step_name):
             return f"Step 4 already completed! Generated summaries."
 
         # Check if step 3 is completed
-        if state.current_step < 3:
-            return f"❌ Cannot execute Step 4: Step 3 (Download Articles) must be completed first. Current step: {state.current_step}"
+        if not state.is_step_complete("step_03_download_articles"):
+            return f"❌ Cannot execute Step 4: Step 3 (Download Articles) must be completed first."
+
+        # Check if workflow is blocked by errors
+        if state.has_errors():
+            return f"❌ Cannot execute Step 4: Workflow is blocked by errors. {state.workflow_status_message}"
 
         try:
             # Update workflow status for UI tracking
-            self.workflow_status.start_step(step_name)
+            state.start_step(step_name)
 
             # Get articles with content from persistent state
             articles_with_content = [
                 article for article in state.headline_data
-                if article.get('ai_related') is True and article.get('content')
+                if article.get('isAI') is True and article.get('content')
             ]
 
             if not articles_with_content:
@@ -732,6 +736,7 @@ class ExtractSummariesTool:
                 ]
 
                 # Store summary in persistent state
+                state.article_summaries[url] = mock_summary
                 articles_summarized += 1
                 total_bullets += len(mock_summary)
 
@@ -743,22 +748,19 @@ class ExtractSummariesTool:
             avg_bullets_per_article = total_bullets / articles_summarized if articles_summarized > 0 else 0
             summary_quality_score = 0.89  # Mock quality score
 
-            # Update persistent state
-            state.current_step = 4
-
-            # Also update workflow status for UI
-            self.workflow_status.complete_step(step_name)
+            # Complete the step
+            state.complete_step(step_name)
 
             if self.verbose:
                 print(f"✅ Completed Step 4: Created summaries for {articles_summarized} articles")
 
             status_msg = f"✅ Step 4 completed successfully! Generated {avg_bullets_per_article:.1f}-bullet summaries for {articles_summarized} articles."
             status_msg += f"\n📝 Quality score: {summary_quality_score:.1%}"
-            status_msg += f"\n💾 Summaries stored in persistent state. Current step: {state.current_step}"
+            status_msg += f"\n💾 Summaries stored in persistent state."
             return status_msg
 
         except Exception as e:
-            self.workflow_status.error_step(step_name, str(e))
+            state.error_step(step_name, str(e))
             return f"❌ Step 4 failed: {str(e)}"
 
     def create_tool(self) -> FunctionTool:
@@ -798,23 +800,27 @@ class ClusterByTopicTool:
         state: NewsletterAgentState = ctx.context
 
         # Check if step already completed via persistent state
-        if state.current_step >= 5:
+        if state.is_step_complete(step_name):
             cluster_count = len(state.clusters)
             total_articles = sum(len(articles) for articles in state.clusters.values())
             return f"Step 5 already completed! Created {cluster_count} topic clusters with {total_articles} articles."
 
         # Check if step 4 is completed
-        if state.current_step < 4:
-            return f"❌ Cannot execute Step 5: Step 4 (Extract Summaries) must be completed first. Current step: {state.current_step}"
+        if not state.is_step_complete("step_04_extract_summaries"):
+            return f"❌ Cannot execute Step 5: Step 4 (Extract Summaries) must be completed first."
+
+        # Check if workflow is blocked by errors
+        if state.has_errors():
+            return f"❌ Cannot execute Step 5: Workflow is blocked by errors. {state.workflow_status_message}"
 
         try:
             # Update workflow status for UI tracking
-            self.workflow_status.start_step(step_name)
+            state.start_step(step_name)
 
             # Get articles with summaries from persistent state
             articles_with_summaries = [
                 article for article in state.headline_data
-                if article.get('ai_related') is True and
+                if article.get('isAI') is True and
                 article.get('url') in state.article_summaries
             ]
 
@@ -883,11 +889,8 @@ class ClusterByTopicTool:
             total_articles = sum(len(articles) for articles in state.clusters.values())
             cluster_coherence_score = 0.84  # Mock coherence score
 
-            # Update persistent state
-            state.current_step = 5
-
-            # Also update workflow status for UI
-            self.workflow_status.complete_step(step_name)
+            # Complete the step
+            state.complete_step(step_name)
 
             if self.verbose:
                 print(f"✅ Completed Step 5: Created {total_clusters} topic clusters")
@@ -895,11 +898,11 @@ class ClusterByTopicTool:
             status_msg = f"✅ Step 5 completed successfully! Organized {total_articles} articles into {total_clusters} topic clusters."
             status_msg += f"\n📊 Cluster coherence score: {cluster_coherence_score:.1%}"
             status_msg += f"\n🏷️ Topics: {', '.join(state.clusters.keys())}"
-            status_msg += f"\n💾 Clusters stored in persistent state. Current step: {state.current_step}"
+            status_msg += f"\n💾 Clusters stored in persistent state."
             return status_msg
 
         except Exception as e:
-            self.workflow_status.error_step(step_name, str(e))
+            state.error_step(step_name, str(e))
             return f"❌ Step 5 failed: {str(e)}"
 
     def create_tool(self) -> FunctionTool:
@@ -937,23 +940,27 @@ class RateArticlesTool:
         state: NewsletterAgentState = ctx.context
 
         # Check if step already completed via persistent state
-        if state.current_step >= 6:
+        if state.is_step_complete(step_name):
             rated_articles = [article for article in state.headline_data if article.get('quality_rating')]
             avg_rating = sum(article.get('quality_rating', 0) for article in rated_articles) / len(rated_articles) if rated_articles else 0
             return f"Step 6 already completed! Rated {len(rated_articles)} articles with average rating {avg_rating:.1f}/10."
 
         # Check if step 5 is completed
-        if state.current_step < 5:
-            return f"❌ Cannot execute Step 6: Step 5 (Cluster By Topic) must be completed first. Current step: {state.current_step}"
+        if not state.is_step_complete("step_05_cluster_by_topic"):
+            return f"❌ Cannot execute Step 6: Step 5 (Cluster By Topic) must be completed first."
+
+        # Check if workflow is blocked by errors
+        if state.has_errors():
+            return f"❌ Cannot execute Step 6: Workflow is blocked by errors. {state.workflow_status_message}"
 
         try:
             # Update workflow status for UI tracking
-            self.workflow_status.start_step(step_name)
+            state.start_step(step_name)
 
             # Get clustered articles from persistent state
             clustered_articles = [
                 article for article in state.headline_data
-                if article.get('ai_related') is True and article.get('cluster_topic')
+                if article.get('isAI') is True and article.get('cluster_topic')
             ]
 
             if not clustered_articles:
@@ -998,22 +1005,19 @@ class RateArticlesTool:
             # Calculate stats
             avg_rating = total_rating / articles_rated if articles_rated > 0 else 0
 
-            # Update persistent state
-            state.current_step = 6
-
-            # Also update workflow status for UI
-            self.workflow_status.complete_step(step_name)
+            # Complete the step
+            state.complete_step(step_name)
 
             if self.verbose:
                 print(f"✅ Completed Step 6: Rated {articles_rated} articles")
 
             status_msg = f"✅ Step 6 completed successfully! Rated {articles_rated} articles with average rating {avg_rating:.1f}/10."
             status_msg += f"\n⭐ High quality articles (≥7.0): {high_quality_count}"
-            status_msg += f"\n💾 Ratings stored in persistent state. Current step: {state.current_step}"
+            status_msg += f"\n💾 Ratings stored in persistent state."
             return status_msg
 
         except Exception as e:
-            self.workflow_status.error_step(step_name, str(e))
+            state.error_step(step_name, str(e))
             return f"❌ Step 6 failed: {str(e)}"
 
     def create_tool(self) -> FunctionTool:
@@ -1050,22 +1054,26 @@ class SelectSectionsTool:
         state: NewsletterAgentState = ctx.context
 
         # Check if step already completed via persistent state
-        if state.current_step >= 7:
+        if state.is_step_complete(step_name):
             section_count = len(state.newsletter_sections)
             return f"Step 7 already completed! Created {section_count} newsletter sections."
 
         # Check if step 6 is completed
-        if state.current_step < 6:
-            return f"❌ Cannot execute Step 7: Step 6 (Rate Articles) must be completed first. Current step: {state.current_step}"
+        if not state.is_step_complete("step_06_rate_articles"):
+            return f"❌ Cannot execute Step 7: Step 6 (Rate Articles) must be completed first."
+
+        # Check if workflow is blocked by errors
+        if state.has_errors():
+            return f"❌ Cannot execute Step 7: Workflow is blocked by errors. {state.workflow_status_message}"
 
         try:
             # Update workflow status for UI tracking
-            self.workflow_status.start_step(step_name)
+            state.start_step(step_name)
 
             # Get rated articles from persistent state
             rated_articles = [
                 article for article in state.headline_data
-                if article.get('ai_related') is True and article.get('quality_rating')
+                if article.get('isAI') is True and article.get('quality_rating')
             ]
 
             if not rated_articles:
@@ -1114,22 +1122,19 @@ class SelectSectionsTool:
                 state.newsletter_sections[cluster] = section_content
                 articles_assigned += len(top_articles)
 
-            # Update persistent state
-            state.current_step = 7
-
-            # Also update workflow status for UI
-            self.workflow_status.complete_step(step_name)
+            # Complete the step
+            state.complete_step(step_name)
 
             if self.verbose:
                 print(f"✅ Completed Step 7: Created {len(state.newsletter_sections)} newsletter sections")
 
             status_msg = f"✅ Step 7 completed successfully! Organized content into {len(state.newsletter_sections)} sections with {articles_assigned} articles assigned."
             status_msg += f"\n📑 Sections: {', '.join(state.newsletter_sections.keys())}"
-            status_msg += f"\n💾 Section plan stored in persistent state. Current step: {state.current_step}"
+            status_msg += f"\n💾 Section plan stored in persistent state."
             return status_msg
 
         except Exception as e:
-            self.workflow_status.error_step(step_name, str(e))
+            state.error_step(step_name, str(e))
             return f"❌ Step 7 failed: {str(e)}"
 
     def create_tool(self) -> FunctionTool:
@@ -1166,18 +1171,22 @@ class DraftSectionsTool:
         state: NewsletterAgentState = ctx.context
 
         # Check if step already completed via persistent state
-        if state.current_step >= 8:
+        if state.is_step_complete(step_name):
             drafted_sections = [s for s in state.newsletter_sections.values() if s.get('content')]
             total_words = sum(len(s.get('content', '').split()) for s in drafted_sections)
             return f"Step 8 already completed! Drafted {len(drafted_sections)} sections with {total_words} total words."
 
         # Check if step 7 is completed
-        if state.current_step < 7:
-            return f"❌ Cannot execute Step 8: Step 7 (Select Sections) must be completed first. Current step: {state.current_step}"
+        if not state.is_step_complete("step_07_select_sections"):
+            return f"❌ Cannot execute Step 8: Step 7 (Select Sections) must be completed first."
+
+        # Check if workflow is blocked by errors
+        if state.has_errors():
+            return f"❌ Cannot execute Step 8: Workflow is blocked by errors. {state.workflow_status_message}"
 
         try:
             # Update workflow status for UI tracking
-            self.workflow_status.start_step(step_name)
+            state.start_step(step_name)
 
             # Get section plans from persistent state
             if not state.newsletter_sections:
@@ -1244,22 +1253,19 @@ class DraftSectionsTool:
             # Calculate average words per section
             avg_words_per_section = total_words / sections_drafted if sections_drafted > 0 else 0
 
-            # Update persistent state
-            state.current_step = 8
-
-            # Also update workflow status for UI
-            self.workflow_status.complete_step(step_name)
+            # Complete the step
+            state.complete_step(step_name)
 
             if self.verbose:
                 print(f"✅ Completed Step 8: Drafted {sections_drafted} sections")
 
             status_msg = f"✅ Step 8 completed successfully! Drafted {sections_drafted} sections with {total_words} total words."
             status_msg += f"\n📝 Average words per section: {avg_words_per_section:.0f}"
-            status_msg += f"\n💾 Section content stored in persistent state. Current step: {state.current_step}"
+            status_msg += f"\n💾 Section content stored in persistent state."
             return status_msg
 
         except Exception as e:
-            self.workflow_status.error_step(step_name, str(e))
+            state.error_step(step_name, str(e))
             return f"❌ Step 8 failed: {str(e)}"
 
     def create_tool(self) -> FunctionTool:
@@ -1293,18 +1299,22 @@ class FinalizeNewsletterTool:
         state: NewsletterAgentState = ctx.context
 
         # Check if step already completed via persistent state
-        if state.current_step >= 9:
+        if state.is_step_complete(step_name):
             newsletter_length = len(state.final_newsletter.split()) if state.final_newsletter else 0
             sections_count = len([s for s in state.newsletter_sections.values() if s.get('content')])
             return f"Step 9 already completed! Newsletter finalized with {sections_count} sections and {newsletter_length} words."
 
         # Check if step 8 is completed
-        if state.current_step < 8:
-            return f"❌ Cannot execute Step 9: Step 8 (Draft Sections) must be completed first. Current step: {state.current_step}"
+        if not state.is_step_complete("step_08_draft_sections"):
+            return f"❌ Cannot execute Step 9: Step 8 (Draft Sections) must be completed first."
+
+        # Check if workflow is blocked by errors
+        if state.has_errors():
+            return f"❌ Cannot execute Step 9: Workflow is blocked by errors. {state.workflow_status_message}"
 
         try:
             # Update workflow status for UI tracking
-            self.workflow_status.start_step(step_name)
+            state.start_step(step_name)
 
             # Get drafted sections from persistent state
             drafted_sections = {
@@ -1354,12 +1364,8 @@ class FinalizeNewsletterTool:
             if newsletter_length >= 3000: base_quality += 0.5
             final_quality_score = min(10.0, base_quality)
 
-            # Mark workflow as complete
-            state.current_step = 9
-            state.workflow_complete = True
-
-            # Also update workflow status for UI
-            self.workflow_status.complete_step(step_name)
+            # Complete the step and mark workflow as complete
+            state.complete_step(step_name)
 
             if self.verbose:
                 print(f"✅ Completed Step 9: Finalized newsletter ({newsletter_length} words)")
@@ -1371,7 +1377,7 @@ class FinalizeNewsletterTool:
             return status_msg
 
         except Exception as e:
-            self.workflow_status.error_step(step_name, str(e))
+            state.error_step(step_name, str(e))
             return f"❌ Step 9 failed: {str(e)}"
 
     def create_tool(self) -> FunctionTool:
@@ -1391,21 +1397,18 @@ class FinalizeNewsletterTool:
 class NewsletterAgent(Agent[NewsletterAgentState]):
     """Newsletter agent with persistent state and workflow tools"""
 
-    def __init__(self, session_id: str = "newsletter_agent", verbose: bool = False):
+    def __init__(self, session_id: str = "newsletter_agent", verbose: bool = False, logger: logging.Logger = None):
         """
         Initialize the NewsletterAgent with persistent state
 
         Args:
             session_id: Unique identifier for the session (for persistence)
             verbose: Enable verbose logging
+            logger: Optional logger instance (creates one if None)
         """
-        # Initialize session for persistence
         self.session = SQLiteSession(session_id, "newsletter_agent.db")
-        # Remove legacy workflow status - now using unified state management
         self.verbose = verbose
-
-        # Initialize logger
-        self.logger = setup_logging(session_id, LOGDB)
+        self.logger = logger or setup_logging(session_id, LOGDB)
 
         # System prompt that guides tool selection based on workflow status
         system_prompt = """
@@ -1458,7 +1461,7 @@ Remember: Your state is persistent. You can safely resume from any point. Never 
         super().__init__(
             name="NewsletterAgent",
             instructions=system_prompt,
-            model="gpt-4o-mini",
+            model="gpt-5-mini",
             tools=[
                 WorkflowStatusTool(self.logger).create_tool(),
                 StateInspectionTool(self.verbose, self.logger).create_tool(),
@@ -1499,34 +1502,13 @@ async def main():
 
     # Load environment variables like the notebook does
     dotenv.load_dotenv()
-
-    # Set up OpenAI client with environment configuration
-    base_url = os.getenv("OPENAI_BASE_URL")
+    
     api_key = os.getenv("OPENAI_API_KEY")
-    default_headers_str = os.getenv("OPENAI_DEFAULT_HEADERS")
-
     if not api_key:
         raise ValueError("OPENAI_API_KEY environment variable not set")
 
-    # Parse default headers if provided
-    default_headers = {}
-    if default_headers_str:
-        try:
-            default_headers = json.loads(default_headers_str)
-        except json.JSONDecodeError:
-            print(f"Warning: Could not parse OPENAI_DEFAULT_HEADERS: {default_headers_str}")
-
-    client = AsyncOpenAI(
-        api_key=api_key,
-        base_url=base_url or "https://api.openai.com/v1",
-        default_headers=default_headers
-    )
-
-    # Set default client for the agents SDK
-    set_default_openai_client(client)
-
-    print(f"OpenAI Base URL: {base_url or 'https://api.openai.com/v1'}")
-    print(f"Default Headers: {default_headers}")
+    # Set up OpenAI client for the agents SDK
+    set_default_openai_client(AsyncOpenAI(api_key=api_key))
 
     # Create agent with persistent state
     agent = NewsletterAgent(session_id="test_newsletter", verbose=True)

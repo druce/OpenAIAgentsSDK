@@ -264,7 +264,7 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             return batch_results
 
 
-    async def filter_dataframe(self,
+    async def filter_dataframe_chunk(self,
                                input_df: pd.DataFrame,
                                input_vars: Optional[Dict[str, Any]] = None,
                                item_list_field: str = 'results_list',
@@ -346,7 +346,7 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                                     received_set = set(received_ids)
                                     missing_ids = sent_set - received_set
                                     extra_ids = received_set - sent_set
-                                    
+
                                     if missing_ids or extra_ids:
                                         error_msg = f"ID presence mismatch:"
                                         if missing_ids:
@@ -355,7 +355,7 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                                             error_msg += f" Extra IDs: {extra_ids}"
                                     else:
                                         error_msg = f"ID order mismatch: sent {sent_ids} != received {received_ids}"
-                                    
+
                                     self.logger.warning(f"Attempt {attempt + 1}/{retries}: {error_msg}")
                                     if attempt < retries - 1:
                                         await asyncio.sleep(2 ** attempt)  # Exponential backoff
@@ -372,28 +372,28 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
 
             except asyncio.TimeoutError as e:
                 last_exc = e
-                self.logger.error(f"Timeout error in filter_dataframe_async: {str(e)}")
+                self.logger.error(f"Timeout error in filter_dataframe_chunk: {str(e)}")
                 if attempt < retries - 1:
                     await asyncio.sleep(2 ** attempt)
                     continue
                 raise
             except (ConnectionError, TimeoutError) as e:
                 last_exc = e
-                self.logger.error(f"Network/timeout error in filter_dataframe_async: {str(e)}")
+                self.logger.error(f"Network/timeout error in filter_dataframe_chunk: {str(e)}")
                 if attempt < retries - 1:
                     await asyncio.sleep(2 ** attempt)
                     continue
                 raise
             except ValueError as e:
                 last_exc = e
-                self.logger.error(f"Invalid data in filter_dataframe_async: {str(e)}")
+                self.logger.error(f"Invalid data in filter_dataframe_chunk: {str(e)}")
                 if attempt < retries - 1:
                     await asyncio.sleep(2 ** attempt)
                     continue
                 raise
             except Exception as e:
                 last_exc = e
-                self.logger.error(f"Unexpected error in filter_dataframe_async: {str(e)}")
+                self.logger.error(f"Unexpected error in filter_dataframe_chunk: {str(e)}")
                 if attempt < retries - 1:
                     await asyncio.sleep(2 ** attempt)
                     continue
@@ -402,8 +402,8 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         # If we get here, all retries failed
         raise last_exc or RuntimeError(f"Unknown error after {retries} attempts")
 
-    async def _process_indexed_chunk(self, 
-                                   chunk_idx: int, 
+    async def _process_indexed_chunk(self,
+                                   chunk_idx: int,
                                    chunk_df: pd.DataFrame,
                                    input_vars: Optional[Dict[str, Any]] = None,
                                    item_list_field: str = 'results_list',
@@ -411,7 +411,7 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                                    retries: int = 3) -> tuple[int, Any]:
         """
         Process a single chunk and return with its index for order preservation.
-        
+
         Args:
             chunk_idx: Index of this chunk in the original chunk list
             chunk_df: DataFrame chunk to process
@@ -419,11 +419,11 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             item_list_field: Name of the field in response containing results list
             item_id_field: Name of the ID field to validate matches
             retries: Number of retry attempts for validation failures
-            
+
         Returns:
             Tuple of (chunk_index, result) for order preservation
         """
-        result = await self.filter_dataframe(
+        result = await self.filter_dataframe_chunk(
             chunk_df,
             input_vars=input_vars,
             item_list_field=item_list_field,
@@ -443,10 +443,10 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                                    value_field: str = 'output'
                                    ) -> Any:
         """
-        Process a DataFrame in chunks asynchronously using concurrent calls to filter_dataframe.
+        Process a DataFrame in chunks asynchronously using concurrent calls to filter_dataframe_chunk.
 
         Chunks the input DataFrame using paginate_df_async and processes each chunk
-        simultaneously with filter_dataframe. Chunks are processed with index tracking to
+        simultaneously with filter_dataframe_chunk. Chunks are processed with index tracking to
         guarantee correct ordering regardless of async completion timing.
 
         Args:
@@ -515,7 +515,7 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                 if return_series:
                     values = [getattr(item, value_field) for item in all_items]
                     return pd.Series(values, index=input_df.index)
-                
+
                 # Create a new result object with concatenated items
                 # Use the structure of the first result as template
                 if sorted_results and hasattr(sorted_results[0][1], item_list_field):
@@ -539,46 +539,46 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                 self.logger.warning("return_series=True but no item_list_field specified, returning raw results")
             return [result for _, result in sorted_results]
 
-    async def filter_dataframe_values(self, 
-                                    input_df: pd.DataFrame, 
+    async def filter_dataframe(self,
+                                    input_df: pd.DataFrame,
                                     value_field: str = 'output',
                                     **kwargs) -> pd.Series:
         """
         Process DataFrame and return values as Series for direct column assignment.
-        
+
         This is a convenience method that wraps filter_dataframe_batch and extracts
         the specified field values as a pandas Series for direct DataFrame assignment.
         All chunk ordering and ID validation guarantees from filter_dataframe_batch apply.
-        
+
         Args:
             input_df: DataFrame to process
             value_field: Field name to extract from results (default: 'output')
             **kwargs: All other arguments passed to filter_dataframe_batch
                      (item_list_field, item_id_field, retries, chunk_size, etc.)
-            
+
         Returns:
             pandas Series with extracted values, indexed to match input_df
-            
+
         Examples:
             # Basic classification
-            df["ai_related"] = await agent.filter_dataframe_values(df[['headline']])
-            
+            df["ai_related"] = await agent.filter_dataframe(df[['headline']])
+
             # Extract different field
-            df["confidence"] = await agent.filter_dataframe_values(
-                df[['text']], 
+            df["confidence"] = await agent.filter_dataframe(
+                df[['text']],
                 value_field='confidence'
             )
-            
+
             # With ID validation
-            df["sentiment"] = await agent.filter_dataframe_values(
-                df[['text', 'id']], 
+            df["sentiment"] = await agent.filter_dataframe(
+                df[['text', 'id']],
                 item_id_field='id',
                 value_field='sentiment'
             )
         """
         # Call filter_dataframe_batch with all provided arguments
         result = await self.filter_dataframe_batch(input_df, **kwargs)
-        
+
         # Extract values from the structured result
         if hasattr(result, 'results_list'):
             # Standard case: structured object with results_list
@@ -589,9 +589,9 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         else:
             # Unexpected result format
             raise ValueError(f"Unexpected result format from filter_dataframe_batch: {type(result)}")
-        
+
         # Validate that we have the right number of values
         if len(values) != len(input_df):
             raise ValueError(f"Value count mismatch: expected {len(input_df)}, got {len(values)}")
-        
+
         return pd.Series(values, index=input_df.index)

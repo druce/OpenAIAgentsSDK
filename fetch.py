@@ -35,11 +35,13 @@ from agents import (Agent, Runner, Tool, ModelSettings, FunctionTool, InputGuard
                    )
 
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from playwright.async_api import async_playwright
 
 from prompt_loader import PromptLoader
 from log_handler import SQLiteLogHandler, setup_sqlite_logging, sanitize_error_for_logging, log
 # Removed utilities imports - functionality merged into newsletter_state.py
 from config import DOWNLOAD_DIR
+from scrape import get_browser, scrape_source, parse_source_file
 
 class Fetcher:
     """
@@ -92,7 +94,7 @@ class Fetcher:
         self.max_concurrent = max_concurrent
         self._log(f"Fetcher initialized with max_concurrent={max_concurrent}", "fetcher_init", "INFO")
         self.session: Optional[aiohttp.ClientSession] = None
-        self.browser_context: Optional[Any] = None  # Will be BrowserContext when needed
+        # Browser context now managed by scrape.py module-level caching
         self.semaphore = asyncio.Semaphore(max_concurrent)
 
     async def __aenter__(self) -> 'Fetcher':
@@ -100,9 +102,7 @@ class Fetcher:
         # Create aiohttp session
         self.session = aiohttp.ClientSession()
 
-        # Initialize browser context for clarity since it's torn down in __aexit__
-        self.browser_context = await self._get_browser_context()
-
+        # Browser context is now lazily initialized and cached at module level
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -111,11 +111,7 @@ class Fetcher:
         if self.session:
             await self.session.close()
 
-        # Close browser context if it was created
-        if self.browser_context:
-            await self.browser_context.close()
-
-        # Close playwright instance if it was created
+        # Close playwright instance if it was created (browser context is cached at module level)
         if hasattr(self, '_playwright'):
             await self._playwright.stop()
 
@@ -156,29 +152,13 @@ class Fetcher:
         log_func(formatted_message)
 
     async def _get_browser_context(self):
-        """Lazy initialization of browser context with race condition protection."""
-        # Fast path: if browser already exists, return it immediately
-        if self.browser_context is not None:
-            return self.browser_context
+        """Get browser context using scrape.py's enhanced get_browser() with caching."""
+        # Initialize playwright if needed
+        if not hasattr(self, '_playwright'):
+            self._playwright = await async_playwright().start()
 
-        # Create lock if it doesn't exist (one-time setup)
-        if not hasattr(self, '_browser_lock'):
-            self._browser_lock = asyncio.Lock()
-
-        # Use lock to prevent race conditions during initialization
-        async with self._browser_lock:
-            # Double-check: another coroutine might have initialized it while we waited
-            if self.browser_context is None:
-                # Import here to avoid circular imports and only when needed
-                from playwright.async_api import async_playwright
-                from scrape import get_browser
-
-                # Initialize playwright and browser context
-                if not hasattr(self, '_playwright'):
-                    self._playwright = await async_playwright().start()
-                self.browser_context = await get_browser(self._playwright)
-
-        return self.browser_context
+        # Use enhanced get_browser with caching - no need for our own caching logic
+        return await get_browser(self._playwright, reuse=True)
 
     async def fetch_rss(self, source: str) -> Dict[str, Any]:
         """
@@ -294,8 +274,6 @@ class Fetcher:
 
         try:
             self._log(f"Fetching HTML from {source_key}: {url}", "fetch_html", "INFO")
-            # Import here to avoid circular imports
-            from scrape import scrape_source, parse_source_file
 
             if do_download:
                 # Get browser context

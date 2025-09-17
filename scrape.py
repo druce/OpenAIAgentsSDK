@@ -46,8 +46,18 @@ from config import (DOWNLOAD_DIR, IGNORE_LIST, PAGES_DIR, FIREFOX_PROFILE_PATH, 
 # when calling from high level function, pass logger=logger but this is here as a default
 _logger = logging.getLogger(__name__)
 
+# Module-level browser context caching
+_browser_context_cache = None
+_browser_lock = None
+
 @dataclass
 class DomainState:
+    """State tracking for individual domains in rate limiting.
+
+    Maintains the timestamp of the last request and provides thread-safe
+    access control for each domain to prevent hitting domains too frequently.
+    Used by RateLimiter to enforce per-domain request throttling.
+    """
     last_request: float = 0    # last request for a domain as monotonic timestamp
     lock: asyncio.Lock = None  # lock for concurrent access
 
@@ -86,11 +96,21 @@ class RateLimiter:
         """Mark that a request was made for this domain"""
         self.domains[domain].last_request = monotonic()
 
+    async def try_acquire_domain_slot(self, domain: str) -> Tuple[bool, float]:
+        """Atomically check and acquire domain slot if available (thread-safe)"""
+        state = self.domains[domain]
+        async with state.lock:
+            now = monotonic()
+            time_since_last = now - state.last_request
 
-# Global worker tracking (legacy - kept for backward compatibility)
-_active_workers = 0
-_worker_counter = 0
-_worker_lock = None
+            if time_since_last >= self.delay:
+                state.last_request = now  # Atomically mark request
+                return True, 0.0
+            else:
+                return False, self.delay - time_since_last
+
+
+
 
 def get_og_tags(source: str, logger: Optional[logging.Logger] = None) -> Dict[str, str]:
     """
@@ -306,15 +326,55 @@ def normalize_html(path: Path | str, logger: Optional[logging.Logger] = None) ->
     return visible_text
 
 
-async def get_browser(p: Any) -> BrowserContext:
+async def get_browser(p: Any, reuse: bool = True) -> BrowserContext:
     """
     Initializes a Playwright browser context with stealth settings.
 
     Args:
         p (async_playwright.Playwright): The Playwright instance.
+        reuse (bool): If True, reuse existing cached context; if False, create new one.
 
     Returns:
-        Browser: The initialized browser instance.
+        BrowserContext: The initialized browser context.
+    """
+    global _browser_context_cache, _browser_lock
+
+    if not reuse:
+        # Create fresh browser - bypass cache
+        return await _create_browser_context(p)
+
+    # Fast path: if browser already exists and is valid, return it
+    if _browser_context_cache is not None:
+        try:
+            # Quick test to see if context is still alive
+            pages = _browser_context_cache.pages
+            return _browser_context_cache
+        except Exception:
+            # Context is dead, clear cache
+            _browser_context_cache = None
+
+    # Initialize lock if needed
+    if _browser_lock is None:
+        _browser_lock = asyncio.Lock()
+
+    # Use lock to prevent race conditions during initialization
+    async with _browser_lock:
+        # Double-check pattern: another coroutine might have initialized it while we waited
+        if _browser_context_cache is None:
+            _browser_context_cache = await _create_browser_context(p)
+
+    return _browser_context_cache
+
+
+async def _create_browser_context(p: Any) -> BrowserContext:
+    """
+    Internal function to create a new browser context with full configuration.
+
+    Args:
+        p (async_playwright.Playwright): The Playwright instance.
+
+    Returns:
+        BrowserContext: The initialized browser context.
     """
     viewport = random.choice([
         {"width": 1920, "height": 1080},
@@ -429,20 +489,21 @@ async def perform_human_like_actions(page: Page) -> Page:
 
 
 async def scrape_urls_concurrent(
-    urls: List[Tuple[int, str, str]],
+    urls: List[Tuple[int, str, str]],  # index, url, title
     concurrency: int = 16,
     rate_limit_seconds: float = DOMAIN_RATE_LIMIT,
-    max_retries: int = 3,
     logger: Optional[logging.Logger] = None
 ) -> List[Tuple[int, str, str, str, str, Optional[str]]]:
     """
-    scrape URLs concurrently with retry-based rate limiting.
+    Scrape a batch of URLs concurrently with worker pool and random URL selection.
+
+    Uses a pool of concurrent workers that randomly select URLs from remaining set
+    to prevent domain clustering. Each worker respects per-domain rate limiting.
 
     Args:
         urls: List of (index, url, title) tuples to scrape
-        concurrency: Maximum number of concurrent tasks (default: 16)
+        concurrency: Maximum number of concurrent worker tasks
         rate_limit_seconds: Seconds between requests to same domain
-        max_retries: Maximum retry attempts for rate-limited requests (default: 3)
         logger: Optional logger for this operation
 
     Returns:
@@ -450,127 +511,131 @@ async def scrape_urls_concurrent(
         where status is 'success', 'ratelimit', or error description
     """
     logger = logger or _logger
-    all_results = []
     rate_limiter = RateLimiter(delay_seconds=rate_limit_seconds)
     semaphore = asyncio.Semaphore(concurrency)
-    
-    async def scrape_single_url(idx: int, url: str, title: str, browser: BrowserContext) -> Tuple[int, str, str, str, str, Optional[str]]:
-        """Scrape a single URL with rate limiting check."""
-        async with semaphore:  # Acquire concurrency slot
+
+    # Shared state for workers
+    remaining_urls = set(urls)  # Set of (idx, url, title) tuples
+    completed_results = {}  # Map idx -> result tuple
+    total_urls = len(urls)
+    processed_count = 0
+    url_lock = asyncio.Lock()  # Protects remaining_urls set
+    progress_lock = asyncio.Lock()  # Protects progress tracking
+
+    async def scrape_single_url_concurrent(idx: int, url: str, title: str, browser: BrowserContext, rate_limiter: RateLimiter, logger: logging.Logger) -> Tuple[int, str, str, str, str, Optional[str]]:
+        """Scrape a single URL concurrently with rate limiting check."""
+        domain = urlparse(url).netloc
+
+        # Check if file already exists
+        title_sanitized = sanitize_filename(title)
+        html_path = os.path.join(PAGES_DIR, f'{title_sanitized}.html')
+        if os.path.exists(html_path):
+            logger.info(f"File already exists: {html_path}")
+            return (idx, 'success', url, title, html_path, None)
+
+        # Skip ignored domains
+        if domain in IGNORE_LIST:
+            logger.info(f"Skipping ignored domain: {domain}")
+            return (idx, 'success', url, title, "", None)
+
+        # Atomically check and acquire domain slot - if blocked, return immediately
+        can_proceed, wait_time = await rate_limiter.try_acquire_domain_slot(domain)
+        if not can_proceed:
+            logger.info(f"Rate limiting domain {domain}, will retry later (need to wait {wait_time:.1f}s)")
+            return (idx, 'ratelimit', url, title, "", None)
+
+        # Proceed with scraping (domain slot already acquired atomically)
+        try:
+            html_path, last_updated, final_url = await scrape_url(url, title, browser, logger=logger)
+            return (idx, 'success', final_url or url, title, html_path or "", last_updated)
+
+        except asyncio.TimeoutError as exc:
+            error_msg = f"Timeout: {exc}"
+            logger.error(f"Timeout scraping {url}: {exc}")
+            return (idx, error_msg, url, title, "", None)
+        except (ConnectionError, OSError) as exc:
+            error_msg = f"Network error: {exc}"
+            logger.error(f"Network error scraping {url}: {exc}")
+            return (idx, error_msg, url, title, "", None)
+        except Exception as exc:
+            error_msg = f"Error: {exc}"
+            logger.error(f"Unexpected error scraping {url}: {exc}")
+            return (idx, error_msg, url, title, "", None)
+
+    async def worker(worker_id: int, browser: BrowserContext) -> None:
+        """Worker that continuously processes random URLs from the remaining set."""
+        while True:
+            # Get random URL from remaining set
+            current_url_tuple = None
+            async with url_lock:
+                if not remaining_urls:
+                    break  # No more URLs to process
+                current_url_tuple = random.choice(list(remaining_urls))
+                remaining_urls.remove(current_url_tuple)
+
+            if current_url_tuple is None:
+                break
+
+            # Update progress counter and log
+            async with progress_lock:
+                nonlocal processed_count
+                processed_count += 1
+                current_progress = processed_count
+
+            idx, url, title = current_url_tuple
             domain = urlparse(url).netloc
 
-            # Check if file already exists
-            title_sanitized = sanitize_filename(title)
-            html_path = os.path.join(PAGES_DIR, f'{title_sanitized}.html')
-            if os.path.exists(html_path):
-                logger.info(f"File already exists: {html_path}")
-                return (idx, 'success', url, title, html_path, None)
+            logger.info(f"Worker {worker_id} fetching {current_progress} of {total_urls} {url}")
 
-            # Skip ignored domains
-            if domain in IGNORE_LIST:
-                logger.info(f"Skipping ignored domain: {domain}")
-                return (idx, 'success', url, title, "", None)
+            # Process URL with semaphore limiting concurrency
+            async with semaphore:
+                result = await scrape_single_url_concurrent(idx, url, title, browser, rate_limiter, logger)
 
-            # Check rate limiting - if blocked, return immediately
-            can_proceed, wait_time = rate_limiter.can_proceed(domain)
-            if not can_proceed:
-                logger.info(f"Rate limiting domain {domain}, will retry later (need to wait {wait_time:.1f}s)")
-                return (idx, 'ratelimit', url, title, "", None)
+            if result[1] == 'ratelimit':  # result[1] is status
+                # Put URL back in set for retry by another worker
+                async with url_lock:
+                    remaining_urls.add(current_url_tuple)
 
-            # Proceed with scraping
-            try:
-                rate_limiter.mark_request(domain)
-                logger.info(f"scraping {url}")
+                # Decrement processed count since URL will be retried
+                async with progress_lock:
+                    processed_count -= 1
 
-                html_path, last_updated, final_url = await scrape_url(url, title, browser, logger=logger)
-                return (idx, 'success', final_url or url, title, html_path or "", last_updated)
+                logger.info(f"Worker {worker_id} re-queued rate-limited URL: {url}")
 
-            except asyncio.TimeoutError as exc:
-                error_msg = f"Timeout: {exc}"
-                logger.error(f"Timeout scraping {url}: {exc}")
-                return (idx, error_msg, url, title, "", None)
-            except (ConnectionError, OSError) as exc:
-                error_msg = f"Network error: {exc}"
-                logger.error(f"Network error scraping {url}: {exc}")
-                return (idx, error_msg, url, title, "", None)
-            except Exception as exc:
-                error_msg = f"Error: {exc}"
-                logger.error(f"Unexpected error scraping {url}: {exc}")
-                return (idx, error_msg, url, title, "", None)
+                # Add cooling-off delay to prevent tight loop when many same-domain URLs remain
+                await asyncio.sleep(2.0)
 
-    async def scrape_batch(batch_urls: List[Tuple[int, str, str]], browser: BrowserContext) -> List[Tuple[int, str, str, str, str, Optional[str]]]:
-        """Scrape a batch of URLs concurrently."""
-        tasks = [
-            asyncio.create_task(scrape_single_url(idx, url, title, browser))
-            for idx, url, title in batch_urls
-        ]
-        
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Handle exceptions
-        valid_results = []
-        for i, result in enumerate(results):
-            if isinstance(result, tuple):
-                valid_results.append(result)
             else:
-                # Log exception and create error result
-                idx, url, title = batch_urls[i]
-                logger.error(f"Task failed with exception: {str(result)}")
-                valid_results.append((idx, f"Exception: {str(result)}", url, title, "", None))
-        
-        return valid_results
+                # Success or permanent error - store result
+                async with progress_lock:
+                    completed_results[idx] = result
 
-    # Main retry loop
+                logger.info(f"Worker {worker_id} completed {url} with status: {result[1]}")
+
+    # Concurrent processing with worker pool
     async with async_playwright() as p:
-        logger.info(f"Launching browser for {len(urls)} URLs with concurrency={concurrency}")
-        browser = await get_browser(p)
+        logger.info(f"Launching browser for {len(urls)} URLs with {concurrency} concurrent workers")
+        browser = await get_browser(p, reuse=True)
 
-        remaining_urls = list(urls)  # Copy of original URLs
-        retry_count = 0
-        
-        while remaining_urls and retry_count <= max_retries:
-            logger.info(f"Processing batch of {len(remaining_urls)} URLs (retry {retry_count})")
-            
-            # Process current batch
-            batch_results = await scrape_batch(remaining_urls, browser)
-            
-            # Separate results by status
-            final_results = [r for r in batch_results if r[1] != 'ratelimit']
-            rate_limited_results = [r for r in batch_results if r[1] == 'ratelimit']
-            
-            # Add successful/error results to final list
-            all_results.extend(final_results)
-            
-            # If no rate-limited results, we're done
-            if not rate_limited_results:
-                break
-                
-            # If we've hit max retries, add rate-limited results as final errors
-            if retry_count >= max_retries:
-                logger.warning(f"Max retries ({max_retries}) reached, giving up on {len(rate_limited_results)} rate-limited URLs")
-                # Convert remaining rate-limited results to final errors
-                for r in rate_limited_results:
-                    all_results.append((r[0], 'Max retries exceeded', r[2], r[3], "", None))
-                break
-            
-            # Wait before retrying rate-limited URLs
-            logger.info(f"Waiting {rate_limit_seconds}s before retrying {len(rate_limited_results)} rate-limited URLs")
-            await asyncio.sleep(rate_limit_seconds)
-            
-            # Prepare URLs for next retry
-            remaining_urls = [(r[0], r[2], r[3]) for r in rate_limited_results]
-            retry_count += 1
+        # Create and start worker tasks
+        workers = []
+        for worker_id in range(concurrency):
+            worker_task = asyncio.create_task(worker(worker_id, browser))
+            workers.append(worker_task)
+
+        # Wait for all workers to complete
+        await asyncio.gather(*workers)
 
         logger.info("Closing browser")
         await browser.close()
 
-    # Sort results by original index
-    all_results.sort(key=lambda x: x[0])
-    
+    # Convert completed_results dict to sorted list by original index
+    all_results = [completed_results[idx] for idx in sorted(completed_results.keys())]
+
     success_count = sum(1 for r in all_results if r[1] == 'success')
     error_count = len(all_results) - success_count
     logger.info(f"Completed scraping {len(all_results)} URLs: {success_count} successful, {error_count} failed")
-    
+
     return all_results
 
 
@@ -589,7 +654,7 @@ async def scrape_url(url: str,
                     scrolls: int = 0,
                     scroll_div: str = "",
                     initial_sleep: float = SLEEP_TIME,
-                    destination: str = DOWNLOAD_DIR,
+                    destination: str = PAGES_DIR,
                     logger: Optional[logging.Logger] = None) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
     scrapes a URL using a Playwright browser context.
@@ -779,42 +844,6 @@ async def scrape_url(url: str,
                 logger.warning(f"Error closing page for {url}: {exc}")
 
 
-async def scrape_source(source_dict: Dict[str, Any], browser_context: Optional[BrowserContext] = None, logger: Optional[logging.Logger] = None) -> Tuple[str, Optional[str]]:
-    """
-    scrapes a landing page using scrape_url and parameters defined in sources.yaml.
-    source_dict is the landing page parameters loaded from sources.yaml.
-    Updates source_dict['latest'] with the path to the downloaded file.
-
-    Args:
-        source_dict (dict): A dictionary containing the parameters defined in sources.yaml.
-        browser_context (BrowserContext, optional): The Playwright browser context to use. If not provided, a new browser context will be initialized.
-        logger (logging.Logger, optional): Optional logger for this operation.
-
-    Returns:
-        str: The path to the downloaded file.
-
-    Raises:
-        Exception: If there is an error during the execution of the function.
-
-    """
-    logger = logger or _logger
-    url = source_dict.get("url")
-    filename = source_dict["filename"]
-    sourcename = source_dict["sourcename"]
-    click_xpath = source_dict.get("click", "")
-    scrolls = source_dict.get("scroll", 0)
-    scroll_div = source_dict.get("scroll_div", "")
-    initial_sleep = source_dict.get("initial_sleep", SLEEP_TIME)
-
-    logger.info(f"Starting scrape_source {url}, {filename}")
-
-    # Open the page and scrape the HTML
-    file_path, _, _ = await scrape_url(url, filename, browser_context,
-                                      click_xpath, scrolls, scroll_div, initial_sleep, logger=logger)
-    source_dict['latest'] = file_path
-    return (sourcename, file_path)
-
-
 def parse_source_file(source_dict: Dict[str, Any], logger: Optional[logging.Logger] = None) -> List[Dict[str, str]]:
     """
     Parse a saved HTML file and return a list of dictionaries with title, url, src for each link in the file.
@@ -926,3 +955,37 @@ def parse_source_file(source_dict: Dict[str, Any], logger: Optional[logging.Logg
     return link_list
 
 
+async def scrape_source(source_dict: Dict[str, Any], browser_context: Optional[BrowserContext] = None, logger: Optional[logging.Logger] = None) -> Tuple[str, Optional[str]]:
+    """
+    scrapes a landing page using scrape_url and parameters defined in sources.yaml.
+    source_dict is the landing page parameters loaded from sources.yaml.
+    Updates source_dict['latest'] with the path to the downloaded file.
+
+    Args:
+        source_dict (dict): A dictionary containing the parameters defined in sources.yaml.
+        browser_context (BrowserContext, optional): The Playwright browser context to use. If not provided, a new browser context will be initialized.
+        logger (logging.Logger, optional): Optional logger for this operation.
+
+    Returns:
+        str: The path to the downloaded file.
+
+    Raises:
+        Exception: If there is an error during the execution of the function.
+
+    """
+    logger = logger or _logger
+    url = source_dict.get("url")
+    filename = source_dict["filename"]
+    sourcename = source_dict["sourcename"]
+    click_xpath = source_dict.get("click", "")
+    scrolls = source_dict.get("scroll", 0)
+    scroll_div = source_dict.get("scroll_div", "")
+    initial_sleep = source_dict.get("initial_sleep", SLEEP_TIME)
+
+    logger.info(f"Starting scrape_source {url}, {filename}")
+
+    # Open the page and scrape the HTML
+    file_path, _, _ = await scrape_url(url, filename, browser_context,
+                                      click_xpath, scrolls, scroll_div, initial_sleep, destination=DOWNLOAD_DIR, logger=logger)
+    source_dict['latest'] = file_path
+    return (sourcename, file_path)
