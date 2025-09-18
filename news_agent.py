@@ -5,6 +5,9 @@ Newsletter Agent for testing the complete workflow end-to-end.
 This agent follows the ClassifierAgent pattern from test_agent.ipynb and implements
 all 9 workflow steps defined in the WorkflowStatus object from utilities.py.
 Each step updates the workflow status properly.
+
+TODO: in summarize step, dedupe with chromadb before summarizing , mark as duplicate if so
+
 """
 
 import asyncio
@@ -29,7 +32,14 @@ from newsletter_state import NewsletterAgentState, StepStatus
 from log_handler import SQLiteLogHandler
 from fetch import Fetcher
 from scrape import scrape_urls_concurrent
-from llm import LLMagent
+from llm import LLMagent, LangfuseClient
+
+# Pydantic models for structured output
+class ArticleSummary(BaseModel):
+    """Model for AI-generated article summaries with exactly 3 bullet points"""
+    summary: str = Field(
+        description="Bullet-point summary of the article"
+    )
 
 # Global constants
 LOGDB = 'newsagent_logs.db'
@@ -273,6 +283,37 @@ class StateInspectionTool:
         )
 
 
+class GetStateTool:
+    """Tool to return the raw state object for notebook inspection"""
+
+    def __init__(self, verbose: bool = False, logger: logging.Logger = None):
+        self.verbose = verbose
+        self.logger = logger
+
+    async def _get_state(self, ctx, args: str) -> NewsletterAgentState:
+        """Return the raw state object for inspection"""
+        # Access the persistent state
+        state: NewsletterAgentState = ctx.context
+
+        if self.verbose and self.logger:
+            self.logger.info(f"Returning state with {len(state.headline_data)} articles")
+
+        return state
+
+    def create_tool(self) -> FunctionTool:
+        """Create a FunctionTool instance following OpenAI Agents SDK conventions"""
+        return FunctionTool(
+            name="get_state",
+            description="Return the raw NewsletterAgentState object for direct inspection and manipulation",
+            params_json_schema={
+                "type": "object",
+                "properties": {},
+                "required": []
+            },
+            on_invoke_tool=self._get_state
+        )
+
+
 class GatherUrlsTool:
     """Tool for Step 1: Gather URLs from news sources defined in sources.yaml using Fetcher
     - store headlines in persistent headline_data
@@ -424,10 +465,6 @@ class FilterUrlsTool:
 
         # Access the persistent state
         state: NewsletterAgentState = ctx.context
-        print("workflow status")
-        print(state.workflow_status)
-        print(state.workflow_status_message)
-        print(state.get_status_dict())
         # Check if step already completed via persistent state
         if state.is_step_complete(step_name):
             ai_related_count = sum(1 for article in state.headline_data if article.get('isAI') is True)
@@ -596,11 +633,11 @@ class DownloadArticlesTool:
 
             # Create mapping from id to scrape results
             result_map = {}
-            for index, status, url, title, file_path, last_updated in scrape_results:
+            for index, status, url, title, html_path, last_updated in scrape_results:
                 result_map[index] = {
                     'status': status,
                     'final_url': url,
-                    'file_path': file_path,
+                    'html_path': html_path,
                     'last_updated': last_updated
                 }
 
@@ -612,26 +649,26 @@ class DownloadArticlesTool:
                     # Add new columns to headline_data
                     article['status'] = result['status']
                     article['final_url'] = result['final_url']
-                    article['file_path'] = result['file_path']
+                    article['html_path'] = result['html_path']
                     article['last_updated'] = result['last_updated']
                     article['download_timestamp'] = datetime.now().isoformat()
 
                     # Extract content from downloaded file
-                    if result['status'] == 'success' and result['file_path']:
+                    if result['status'] == 'success' and result['html_path']:
                         try:
                             # Use normalize_html to extract clean text content
                             from scrape import normalize_html
-                            content = normalize_html(result['file_path'], logger=self.logger)
+                            content = normalize_html(result['html_path'], logger=self.logger)
                             article['content'] = content
                             article['content_length'] = len(content)
                             successful_downloads += 1
                             total_length += len(content)
-                            
+
                             if self.logger:
-                                self.logger.debug(f"Successfully extracted content from {result['file_path']}: {len(content)} characters")
+                                self.logger.debug(f"Successfully extracted content from {result['html_path']}: {len(content)} characters")
                         except Exception as e:
                             if self.logger:
-                                self.logger.warning(f"Failed to extract content from {result['file_path']}: {e}")
+                                self.logger.warning(f"Failed to extract content from {result['html_path']}: {e}")
                             article['content'] = f"Failed to extract content: {e}"
                             article['content_length'] = 0
                     else:
@@ -686,8 +723,98 @@ class ExtractSummariesTool:
         self.verbose = verbose
         self.logger = logger
 
-    async def _extract_summaries(self, ctx, args: str) -> str:
-        """Execute Step 4: Extract Summaries using persistent state"""
+    def _normalize(self, html_path: str) -> str:
+        """
+        Normalize HTML content to text and save to TEXT_DIR
+
+        Args:
+            html_path: Path to HTML file in PAGES_DIR
+
+        Returns:
+            Path to normalized text file in TEXT_DIR
+        """
+        from pathlib import Path
+        from scrape import normalize_html
+        from config import TEXT_DIR
+
+        # Create text directory if it doesn't exist
+        os.makedirs(TEXT_DIR, exist_ok=True)
+
+        # Generate text file path (same name, .txt extension)
+        html_file = Path(html_path)
+        text_filename = html_file.stem + '.txt'
+        text_path = os.path.join(TEXT_DIR, text_filename)
+
+        try:
+            # Extract text from HTML
+            normalized_text = normalize_html(html_path, logger=self.logger)
+
+            # Save text to file
+            with open(text_path, 'w', encoding='utf-8') as f:
+                f.write(normalized_text)
+
+            if self.verbose and self.logger:
+                self.logger.info(f"Normalized HTML to text: {html_path} -> {text_path}")
+
+            return text_path
+
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Failed to normalize HTML {html_path}: {str(e)}")
+            return ""
+
+
+    async def _summarize(self, text_path: str) -> List[str]:
+        """
+        Generate AI-powered summary from text file
+
+        Args:
+            text_path: Path to text file to summarize
+
+        Returns:
+            List of 3 bullet-point summaries
+        """
+        SUMMARIZE_SYSTEM_PROMPT, SUMMARIZE_USER_PROMPT, model = LangfuseClient().get_prompt("newsagent/summarize")
+
+        try:
+            # Read text content
+            with open(text_path, 'r', encoding='utf-8') as f:
+                text_content = f.read().strip()
+
+            if not text_content:
+                if self.logger:
+                    self.logger.warning(f"Empty text file: {text_path}")
+                return "No content available for summarization."
+
+            # Create LLM agent for summarization
+            llm_agent = LLMagent(
+                system_prompt=SUMMARIZE_SYSTEM_PROMPT,
+                user_prompt=SUMMARIZE_USER_PROMPT,
+                output_type=ArticleSummary,
+                model=model,
+                verbose=self.verbose,
+                logger=self.logger
+            )
+
+            # Generate summary
+            result = await llm_agent.prompt(article=text_content)
+
+            if hasattr(result, 'summary') and isinstance(result.summary, str):
+                if self.verbose and self.logger:
+                    self.logger.info(f"Generated summary for {text_path}: {result.summary}")
+                return result.summary
+            else:
+                if self.logger:
+                    self.logger.error(f"Invalid summary format from LLM for {text_path}")
+                return "Summary generation failed."
+
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Failed to summarize {text_path}: {str(e)}")
+            return f"Error generating summary: {str(e)}"
+
+    async def _extract_summaries(self, ctx, args: str, max_concurrency: int = 16) -> str:
+        """Execute Step 4: Extract Summaries using AI-powered summarization"""
         step_name = "step_04_extract_summaries"
 
         # Access the persistent state
@@ -709,54 +836,113 @@ class ExtractSummariesTool:
             # Update workflow status for UI tracking
             state.start_step(step_name)
 
-            # Get articles with content from persistent state
-            articles_with_content = [
-                article for article in state.headline_data
-                if article.get('isAI') is True and article.get('content')
-            ]
+            # Convert headline_data to DataFrame for processing
+            headline_df = pd.DataFrame(state.headline_data)
 
-            if not articles_with_content:
-                return f"❌ No downloaded AI-related articles found to summarize. Please run step 3 first."
+            # Filter to AI-related articles with HTML content
+            ai_articles_mask = (headline_df.get('isAI') == True) & (headline_df['html_path'].notna())
+            if not ai_articles_mask.any():
+                return f"❌ No AI-related articles with HTML content found to summarize. Please run step 3 first."
 
-            # Generate summaries for each article
-            articles_summarized = 0
+            ai_articles_df = headline_df[ai_articles_mask].copy()
+
+            if self.logger:
+                self.logger.info(f"Processing {len(ai_articles_df)} AI articles for summarization")
+
+            # Step 1: Normalize HTML to text for all articles
+            text_paths = []
+            normalization_errors = 0
+
+            for idx, row in ai_articles_df.iterrows():
+                html_path = row['html_path']
+                try:
+                    text_path = self._normalize(html_path)
+                    text_paths.append(text_path)
+                except Exception as e:
+                    if self.logger:
+                        self.logger.error(f"Failed to normalize {html_path}: {str(e)}")
+                    text_paths.append(None)
+                    normalization_errors += 1
+
+            # Add text_path column to DataFrame
+            ai_articles_df = ai_articles_df.copy()
+            ai_articles_df['text_path'] = text_paths
+
+            # Step 2: Summarize articles with valid text paths
+            summaries = []
+            summarization_errors = 0
             total_bullets = 0
 
-            for article in articles_with_content:
-                url = article.get('url', f"article_{articles_summarized}")
-                title = article.get('title', 'Unknown title')
-                content = article.get('content', '')
+            # Create semaphore for concurrent summarization
+            semaphore = asyncio.Semaphore(max_concurrency)
 
-                # Mock summary generation - in a real implementation, this would use an AI model
-                # to create bullet point summaries from the full article content
-                mock_summary = [
-                    f"Key insight from '{title[:50]}...' - Main technological development discussed",
-                    f"Business implications or market impact highlighted in the article",
-                    f"Future outlook or expert predictions mentioned in the content"
-                ]
+            async def summarize_with_semaphore(idx, row):
+                async with semaphore:
+                    text_path = row['text_path']
 
-                # Store summary in persistent state
-                state.article_summaries[url] = mock_summary
-                articles_summarized += 1
-                total_bullets += len(mock_summary)
+                    if text_path is None:
+                        return idx, "No text."
 
-                # Add summary reference to article data as well
-                article['summary_bullets'] = len(mock_summary)
-                article['summary_timestamp'] = datetime.now().isoformat()
+                    try:
+                        summary_bullets = await self._summarize(text_path)
+                        return idx, summary_bullets
+                    except Exception as e:
+                        if self.logger:
+                            self.logger.error(f"Failed to summarize {text_path}: {str(e)}")
+                        return idx, f"Summarization failed: {str(e)}"
 
-            # Calculate stats
-            avg_bullets_per_article = total_bullets / articles_summarized if articles_summarized > 0 else 0
-            summary_quality_score = 0.89  # Mock quality score
+            # Create tasks for all articles
+            tasks = [
+                summarize_with_semaphore(idx, row)
+                for idx, row in ai_articles_df.iterrows()
+            ]
+
+            # Execute tasks concurrently
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Process results maintaining order
+            summaries = [None] * len(ai_articles_df)
+            for result in results:
+                if isinstance(result, Exception): # not currently returning exceptins from summarize_with_semaphore
+                    summarization_errors += 1
+                    continue
+                idx, summary_bullets = result
+                total_bullets += 1
+                summaries[ai_articles_df.index.get_loc(idx)] = summary_bullets
+
+            # Add summary column to DataFrame
+            ai_articles_df['summary'] = summaries
+
+            # Update the original headline_data with the new columns
+            for idx, row in ai_articles_df.iterrows():
+                # Find the corresponding article in state.headline_data
+                url = row['url']
+                for article in state.headline_data:
+                    if article.get('url') == url:
+                        article['text_path'] = row['text_path']
+                        article['summary'] = row['summary']
+                        article['summary_bullets'] = len([b for b in row['summary'] if b.strip()])
+                        article['summary_timestamp'] = datetime.now().isoformat()
+                        break
+
+            # Calculate statistics
+            articles_processed = len(ai_articles_df)
+            successful_summaries = articles_processed - summarization_errors - normalization_errors
+            avg_bullets_per_article = total_bullets / successful_summaries if successful_summaries > 0 else 0
 
             # Complete the step
             state.complete_step(step_name)
 
             if self.verbose:
-                print(f"✅ Completed Step 4: Created summaries for {articles_summarized} articles")
+                print(f"✅ Completed Step 4: Generated AI summaries for {successful_summaries}/{articles_processed} articles")
 
-            status_msg = f"✅ Step 4 completed successfully! Generated {avg_bullets_per_article:.1f}-bullet summaries for {articles_summarized} articles."
-            status_msg += f"\n📝 Quality score: {summary_quality_score:.1%}"
-            status_msg += f"\n💾 Summaries stored in persistent state."
+            status_msg = f"✅ Step 4 completed successfully! Generated AI-powered summaries for {successful_summaries}/{articles_processed} articles."
+            status_msg += f"\n📝 Average bullets per article: {avg_bullets_per_article:.1f}"
+            if normalization_errors > 0:
+                status_msg += f"\n⚠️  Normalization errors: {normalization_errors}"
+            if summarization_errors > 0:
+                status_msg += f"\n⚠️  Summarization errors: {summarization_errors}"
+            status_msg += f"\n💾 Summaries stored in headline DataFrame."
             return status_msg
 
         except Exception as e:
@@ -776,17 +962,20 @@ class ExtractSummariesTool:
             on_invoke_tool=self._extract_summaries
         )
 
-
+# - extract free-form topics using prompt
+# - add repeated free-form topics to canonical prompts
 class ClusterByTopicTool:
     """Tool for Step 5: Cluster articles by topic
     - use summaries
     - extract free-form topics using prompt
     - add repeated free-form topics to canonical prompts
-    - check for all canonical prompt that are matched
+    - check for all canonical prompt sthat are matched
     - use prompt to limit each summary to 7 topics that best match
     - add topics to summary in headline_data
     - cluster summaries using hdbscan
-    - for each cluster, send prompt to generate cluster title    """
+    - for each cluster, send prompt to generate cluster title
+    - after completion summaries have been updated to prepend topics, clusters created and named, headline_df items have a cluster_id
+    """
 
     def __init__(self, verbose: bool = False, logger: logging.Logger = None):
         self.verbose = verbose
@@ -821,7 +1010,7 @@ class ClusterByTopicTool:
             articles_with_summaries = [
                 article for article in state.headline_data
                 if article.get('isAI') is True and
-                article.get('url') in state.article_summaries
+                article.get('summary') is not None
             ]
 
             if not articles_with_summaries:
@@ -1033,6 +1222,10 @@ class RateArticlesTool:
             on_invoke_tool=self._rate_articles
         )
 
+# review how we created categories ...
+# try to extract common themes from other sections
+# clean up categories to remove duplicates and merge similar themes and tighten names
+# assign articles to sections or other
 
 class SelectSectionsTool:
     """Tool for Step 7: Select newsletter sections
@@ -1226,8 +1419,8 @@ class DraftSectionsTool:
                     article_title = article.get('title', 'Unknown Title')
                     article_source = article.get('source', 'Unknown Source')
 
-                    # Get the actual summary from state if available
-                    summary_bullets = state.article_summaries.get(article_url, [
+                    # Get the actual summary from article data if available
+                    summary_bullets = article.get('summary', [
                         f"Key insights from this {section_name.lower()} article",
                         f"Important implications for the AI community",
                         f"Notable developments worth following"
@@ -1465,6 +1658,7 @@ Remember: Your state is persistent. You can safely resume from any point. Never 
             tools=[
                 WorkflowStatusTool(self.logger).create_tool(),
                 StateInspectionTool(self.verbose, self.logger).create_tool(),
+                GetStateTool(self.verbose, self.logger).create_tool(),
                 GatherUrlsTool(self.verbose, self.logger).create_tool(),
                 FilterUrlsTool(self.verbose, self.logger).create_tool(),
                 DownloadArticlesTool(self.verbose, self.logger).create_tool(),
@@ -1484,6 +1678,42 @@ Remember: Your state is persistent. You can safely resume from any point. Never 
             print(f"Initialized NewsletterAgent with persistent state and 9-step workflow")
             print(f"Session ID: {session_id}")
 
+    async def get_state_direct(self) -> NewsletterAgentState:
+        """Directly return the state without going through LLM"""
+        # Just return the current default_state which gets populated by the framework
+        return self.default_state
+
+    async def run_tool_direct(self, tool_name: str) -> Any:
+        """Run a specific tool directly by name, bypassing LLM"""
+
+        # Find the tool instance from the agent's existing tools
+        target_tool = None
+        for tool in self.tools:
+            if tool.name == tool_name:
+                target_tool = tool
+                break
+
+        if target_tool is None:
+            available_tools = [tool.name for tool in self.tools]
+            raise ValueError(f"Unknown tool: {tool_name}. Available: {available_tools}")
+
+        # Create mock context with current state
+        class MockContext:
+            def __init__(self, state):
+                self.context = state
+
+        # Use the agent's current state
+        ctx = MockContext(self.default_state)
+
+        # Call the tool's invoke method directly
+        result = await target_tool.on_invoke_tool(ctx, "")
+
+        # Note: State saving is handled automatically by the Agent framework
+        # when using the normal run_step method. For direct tool calls,
+        # the state changes are made in-place to ctx.context
+
+        return result
+
     async def run_step(self, user_input: str) -> str:
         """Run a workflow step with persistent state"""
         result = await Runner.run(
@@ -1502,7 +1732,7 @@ async def main():
 
     # Load environment variables like the notebook does
     dotenv.load_dotenv()
-    
+
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise ValueError("OPENAI_API_KEY environment variable not set")

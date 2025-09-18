@@ -1,6 +1,6 @@
 # Newsletter Agent System
 
-An advanced AI-powered newsletter generation system built on the OpenAI Agents SDK that implements a 9-step workflow for automated newsletter creation from multiple news sources.
+An AI-powered newsletter generation system built on the OpenAI Agents SDK that implements a 9-step workflow for automated newsletter creation from multiple news sources.
 
 Note: This is a work in progress, the intent is to port the AInewsbot repo to the OpenAI Agents SDK. Currently it runs the first 3 steps, fetching, filtering and downloading articles. The remaining steps are mocked. Check back in a few weeks for a complete implementation.
 

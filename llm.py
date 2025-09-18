@@ -38,6 +38,8 @@ from tenacity import (
 from agents import Agent, Runner
 from log_handler import sanitize_error_for_logging
 
+import langfuse
+
 _logger = logging.getLogger(__name__)
 
 async def paginate_df_async(df: pd.DataFrame, chunk_size: int = 25):
@@ -45,6 +47,106 @@ async def paginate_df_async(df: pd.DataFrame, chunk_size: int = 25):
       for i in range(0, len(df), chunk_size):
           yield df.iloc[i:i + chunk_size]
           await asyncio.sleep(0)  # Allow other tasks to run
+
+
+class LangfuseClient:
+    """
+    Client for retrieving prompts from Langfuse.
+
+    Provides a clean interface to fetch prompts with system/user content and model configuration
+    from Langfuse prompt management.
+    """
+
+    def __init__(self, logger: Optional[logging.Logger] = None):
+        """
+        Initialize the Langfuse client.
+
+        Args:
+            logger: Optional logger instance to use instead of module logger
+
+        Raises:
+            ImportError: If langfuse is not available
+        """
+        self.logger = logger or _logger
+        self.client = langfuse.get_client()
+
+        if self.logger:
+            self.logger.info("Initialized LangfuseClient")
+
+    def get_prompt(self, prompt_name: str) -> tuple[str, str, str]:
+        """
+        Retrieve a prompt from Langfuse and extract system/user prompts and model configuration.
+
+        Args:
+            prompt_name: Name of the prompt in Langfuse (e.g., 'newsagent/headline_classifier')
+
+        Returns:
+            Tuple containing (system_prompt, user_prompt, model)
+
+        Raises:
+            ValueError: If prompt format is invalid or missing required content
+            Exception: If prompt retrieval fails
+        """
+        try:
+            # Get prompt from Langfuse
+            lf_prompt = self.client.get_prompt(prompt_name)
+
+            if self.logger:
+                self.logger.info(f"Retrieved prompt '{prompt_name}' from Langfuse")
+
+            # Validate prompt structure
+            if not hasattr(lf_prompt, 'prompt') or not isinstance(lf_prompt.prompt, list):
+                raise ValueError(f"Invalid prompt format for '{prompt_name}': missing or invalid 'prompt' field")
+
+            if len(lf_prompt.prompt) < 2:
+                raise ValueError(f"Invalid prompt format for '{prompt_name}': expected at least 2 prompt parts (system, user)")
+
+            # Extract system and user prompts
+            try:
+                system_prompt = lf_prompt.prompt[0]['content']
+                user_prompt = lf_prompt.prompt[1]['content']
+            except (KeyError, IndexError) as e:
+                raise ValueError(f"Invalid prompt structure for '{prompt_name}': {e}")
+
+            # Extract configuration
+            config = lf_prompt.config if hasattr(lf_prompt, 'config') else {}
+            model = config.get("model", "gpt-5")
+
+            if self.logger:
+                self.logger.info(f"Parsed prompt '{prompt_name}': model={model}, system_len={len(system_prompt)}, user_len={len(user_prompt)}")
+
+            return (system_prompt, user_prompt, model)
+
+        except Exception as e:
+            error_msg = f"Failed to retrieve prompt '{prompt_name}': {e}"
+            if self.logger:
+                self.logger.error(error_msg)
+            raise Exception(error_msg) from e
+
+    def create_llm_agent(self, prompt_name: str, output_type: Type[BaseModel],
+                        verbose: bool = False, logger: Optional[logging.Logger] = None) -> 'LLMagent':
+        """
+        Convenience method to create an LLMagent from a Langfuse prompt.
+
+        Args:
+            prompt_name: Name of the prompt in Langfuse
+            output_type: Pydantic model class for structured output
+            verbose: Enable verbose logging
+            logger: Optional logger instance
+
+        Returns:
+            Configured LLMagent instance
+        """
+        prompt_data = self.get_prompt(prompt_name)
+
+        return LLMagent(
+            system_prompt=prompt_data[0],
+            user_prompt=prompt_data[1],
+            output_type=output_type,
+            model=prompt_data[2],
+            verbose=verbose,
+            logger=logger or self.logger
+        )
 
 
 class LLMagent(Agent):
@@ -146,6 +248,38 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             self.logger.info(f"Result: {results}")
 
         return results.final_output if hasattr(results, 'final_output') else results
+
+    @retry(
+        retry=retry_if_exception_type((
+            openai.APIConnectionError,
+            openai.APITimeoutError,
+            openai.InternalServerError
+        )),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=1, max=30),
+    )
+    async def prompt(self, **kwargs) -> Any:
+        """
+        Make a single LLM call with dictionary-based variable substitution
+
+        Args:
+            **kwargs: Keyword arguments to substitute in prompt templates
+
+        Returns:
+            Single result of the specified output type
+        """
+        user_message = self._format_prompts(kwargs)
+
+        if self.verbose:
+            self.logger.info(f"User message: {user_message}")
+
+        results = await Runner.run(self, user_message)
+
+        if self.verbose:
+            self.logger.info(f"Result: {results}")
+
+        return results.final_output if hasattr(results, 'final_output') else results
+
 
     async def prompt_batch(self,
                           variables_list: List[Dict[str, Any]],

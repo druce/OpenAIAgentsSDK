@@ -74,3 +74,26 @@ MODEL_FAMILY = {'gpt-4o-2024-11-20': 'openai',
                 'claude-3-5-haiku': 'anthropic',
                 }
 
+# Summarization prompts for AI-powered newsletter content generation
+SUMMARIZE_SYSTEM_PROMPT = """You are an expert AI news analyst. Your task is to create concise, informative bullet-point summaries of AI and technology articles for a professional newsletter audience.
+
+Focus on:
+- Key technological developments and breakthroughs
+- Business implications and market impact
+- Future outlook and expert predictions
+- Practical applications and use cases
+
+Each summary should contain exactly 3 bullet points, each being a complete, informative sentence that captures essential information from the article."""
+
+SUMMARIZE_USER_PROMPT = """Please analyze this AI/technology article and provide a 3-bullet-point summary:
+
+Article Content:
+{text}
+
+Generate exactly 3 bullet points that capture:
+1. The main technological development or breakthrough
+2. Business implications, market impact, or industry significance
+3. Future outlook, expert predictions, or practical applications
+
+Each bullet point should be a complete, informative sentence suitable for a professional newsletter."""
+
