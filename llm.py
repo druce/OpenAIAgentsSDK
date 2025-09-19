@@ -258,10 +258,10 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=1, min=1, max=30),
     )
-    async def prompt(self, **kwargs) -> Any:
+    async def run_prompt(self, **kwargs) -> Any:
         """
-        Make a single LLM call with dictionary-based variable substitution
-
+        Make a single LLM call with keyword argument variable substitution
+        (don't use prompt to name it since the base class has a prompt method)
         Args:
             **kwargs: Keyword arguments to substitute in prompt templates
 

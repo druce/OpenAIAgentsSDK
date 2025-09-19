@@ -26,7 +26,9 @@ from typing import Dict, Any, Optional, List
 from pydantic import BaseModel, Field
 from email.utils import parsedate_to_datetime
 
-from agents import Agent, Runner, set_default_openai_client, FunctionTool, Tool, SQLiteSession
+from agents import (Agent, Runner, RunContextWrapper, FunctionTool,
+    Tool, SQLiteSession, set_default_openai_client)
+
 from openai import AsyncOpenAI
 from newsletter_state import NewsletterAgentState, StepStatus
 from log_handler import SQLiteLogHandler
@@ -282,36 +284,6 @@ class StateInspectionTool:
             on_invoke_tool=self._inspect_state
         )
 
-
-class GetStateTool:
-    """Tool to return the raw state object for notebook inspection"""
-
-    def __init__(self, verbose: bool = False, logger: logging.Logger = None):
-        self.verbose = verbose
-        self.logger = logger
-
-    async def _get_state(self, ctx, args: str) -> NewsletterAgentState:
-        """Return the raw state object for inspection"""
-        # Access the persistent state
-        state: NewsletterAgentState = ctx.context
-
-        if self.verbose and self.logger:
-            self.logger.info(f"Returning state with {len(state.headline_data)} articles")
-
-        return state
-
-    def create_tool(self) -> FunctionTool:
-        """Create a FunctionTool instance following OpenAI Agents SDK conventions"""
-        return FunctionTool(
-            name="get_state",
-            description="Return the raw NewsletterAgentState object for direct inspection and manipulation",
-            params_json_schema={
-                "type": "object",
-                "properties": {},
-                "required": []
-            },
-            on_invoke_tool=self._get_state
-        )
 
 
 class GatherUrlsTool:
@@ -572,10 +544,6 @@ class DownloadArticlesTool:
 
         # Access the persistent state
         state: NewsletterAgentState = ctx.context
-        print("workflow status")
-        print(state.workflow_status)
-        print(state.workflow_status_message)
-        print(state.get_status_dict())
 
         # Check if step already completed via persistent state
         if state.is_step_complete(step_name):
@@ -591,7 +559,6 @@ class DownloadArticlesTool:
 
         # Check if workflow is blocked by errors
         if state.has_errors():
-            print(state.get_status_dict())
             return f"❌ Cannot execute Step 3: Workflow is blocked by errors. {state.workflow_status_message}"
 
         try:
@@ -1590,18 +1557,41 @@ class FinalizeNewsletterTool:
 class NewsletterAgent(Agent[NewsletterAgentState]):
     """Newsletter agent with persistent state and workflow tools"""
 
-    def __init__(self, session_id: str = "newsletter_agent", verbose: bool = False, logger: logging.Logger = None):
+    def __init__(self,
+                 session_id: str = "newsletter_agent",
+                 state: Optional[NewsletterAgentState] = None,
+                 verbose: bool = False,
+                 logger: logging.Logger = None):
         """
         Initialize the NewsletterAgent with persistent state
 
         Args:
             session_id: Unique identifier for the session (for persistence)
+            state: Optional NewsletterAgentState to use. If None, creates new or loads from session
             verbose: Enable verbose logging
             logger: Optional logger instance (creates one if None)
         """
         self.session = SQLiteSession(session_id, "newsletter_agent.db")
         self.verbose = verbose
         self.logger = logger or setup_logging(session_id, LOGDB)
+
+        # Initialize state - use provided state or create/load default
+        if state is not None:
+            self.state = state
+            if self.verbose:
+                self.logger.info(f"Using provided state with {len(state.headline_data)} articles")
+        else:
+            # Try to load existing state from session, or create new if none exists
+            try:
+                # Note: session.load_state may not exist in OpenAI Agents SDK
+                # This is a placeholder for proper session loading
+                self.state = NewsletterAgentState()
+                if self.verbose:
+                    self.logger.info("Created new NewsletterAgentState")
+            except Exception as e:
+                self.state = NewsletterAgentState()
+                if self.verbose:
+                    self.logger.info(f"Created new NewsletterAgentState (session load failed: {e})")
 
         # System prompt that guides tool selection based on workflow status
         system_prompt = """
@@ -1658,7 +1648,6 @@ Remember: Your state is persistent. You can safely resume from any point. Never 
             tools=[
                 WorkflowStatusTool(self.logger).create_tool(),
                 StateInspectionTool(self.verbose, self.logger).create_tool(),
-                GetStateTool(self.verbose, self.logger).create_tool(),
                 GatherUrlsTool(self.verbose, self.logger).create_tool(),
                 FilterUrlsTool(self.verbose, self.logger).create_tool(),
                 DownloadArticlesTool(self.verbose, self.logger).create_tool(),
@@ -1671,47 +1660,37 @@ Remember: Your state is persistent. You can safely resume from any point. Never 
             ]
         )
 
-        # Initialize default state
-        self.default_state = NewsletterAgentState()
+        # Create tool dictionary
+        self._tool_dict = {tool.name: tool for tool in self.tools}
 
         if self.verbose:
             print(f"Initialized NewsletterAgent with persistent state and 9-step workflow")
             print(f"Session ID: {session_id}")
 
-    async def get_state_direct(self) -> NewsletterAgentState:
-        """Directly return the state without going through LLM"""
-        # Just return the current default_state which gets populated by the framework
-        return self.default_state
+    async def run_tool_direct(self, tool_name: str, tool_args: str = "") -> Any:
+        """Run a specific tool directly by name, bypassing LLM
 
-    async def run_tool_direct(self, tool_name: str) -> Any:
-        """Run a specific tool directly by name, bypassing LLM"""
+        Args:
+            tool_name: Name of the tool to run
+            tool_args: Arguments to pass to the tool (default: empty string)
 
-        # Find the tool instance from the agent's existing tools
-        target_tool = None
-        for tool in self.tools:
-            if tool.name == tool_name:
-                target_tool = tool
-                break
+        Returns:
+            Result from the tool execution
+        """
+        # Use dictionary lookup for O(1) performance
+        target_tool = self._tool_dict.get(tool_name)
 
         if target_tool is None:
-            available_tools = [tool.name for tool in self.tools]
+            available_tools = list(self._tool_dict.keys())
             raise ValueError(f"Unknown tool: {tool_name}. Available: {available_tools}")
 
-        # Create mock context with current state
-        class MockContext:
-            def __init__(self, state):
-                self.context = state
+        # Create proper context using the same pattern as the SDK
+        ctx = RunContextWrapper(self.state)
 
-        # Use the agent's current state
-        ctx = MockContext(self.default_state)
+        # Call the tool's invoke method directly with proper context
+        result = await target_tool.on_invoke_tool(ctx, tool_args)
 
-        # Call the tool's invoke method directly
-        result = await target_tool.on_invoke_tool(ctx, "")
-
-        # Note: State saving is handled automatically by the Agent framework
-        # when using the normal run_step method. For direct tool calls,
-        # the state changes are made in-place to ctx.context
-
+        # State is modified in-place through the context wrapper
         return result
 
     async def run_step(self, user_input: str) -> str:
@@ -1720,7 +1699,7 @@ Remember: Your state is persistent. You can safely resume from any point. Never 
             self,
             user_input,
             session=self.session,
-            context=self.default_state,  # Will load from session if exists
+            context=self.state,  # Use our managed state
             max_turns=50  # Increased for complete 9-step workflow
         )
         return result.final_output
