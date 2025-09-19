@@ -47,18 +47,17 @@ The newsletter generation follows a structured 9-step process with persistent st
 ### Step 1: Gather URLs 📰
 - **Sources**: Fetches from 17+ configured news sources
 - **Types**: RSS feeds, HTML scraping, REST APIs
-- **Output**: ~650+ raw article URLs with metadata
+- **Output**: raw article URLs with metadata
 
 ### Step 2: Filter URLs 🔍
-- **AI Classification**: Uses LLM (GPT-5-nano) to identify AI-related content
+- **AI Classification**: Uses LLM (GPT-5-nano) to identify AI-related content, also should wnd filter stuff seen before by matching URL or title/source, and previously processed
 - **Batch Processing**: Efficiently processes articles in batches
-- **Output**: ~333 AI-related articles (typical 50% filter rate)
+- **Output**: ~200 AI-related articles (typical 50% filter rate on 400 new articles per day)
 
 ### Step 3: Download Articles ⬇️
-- **Concurrent Scraping**: 16 parallel workers with per-domain rate limiting
-- **Content Extraction**: Uses Playwright + trafilatura for clean text
-- **Metadata**: Captures publication dates, final URLs, file paths
-- **Output**: Full article content with structured metadata
+- **Concurrent Scraping**: Parallel asynchronous Playwright workers with per-domain rate limiting
+- **Content Extraction**: Rrafilatura for clean text, extract publication dates, open graph metadata
+- **Output**: Full article content with metadata, eventually dedupe using embeddings +cosine similarity for e.g. syndicated articles on different URLs
 
 ### Step 4: Extract Summaries 📝
 - **AI Summarization**: Generates bullet-point summaries for each article
@@ -66,14 +65,14 @@ The newsletter generation follows a structured 9-step process with persistent st
 - **Output**: 3-point summaries stored in persistent state
 
 ### Step 5: Cluster by Topic 🏷️
-- **Thematic Grouping**: Organizes articles into topic clusters
-- **Categories**: LLM Advances, AI Safety & Ethics, Business Applications, etc.
-- **Output**: 6+ topic clusters with related articles
+- **Categories**: Apply Canonical topics like AI Safety & Ethics, OpenAI, etc. via prompts
+- **Thematic Grouping**: Organize articles into topic clusters using HDBSCAN 
+- **Output**: most articles assigned to named clusters 
 
 ### Step 6: Rate Articles ⭐
-- **Quality Scoring**: Assigns quality ratings (1-10) to each article
-- **Relevance**: Evaluates importance and newsworthiness
-- **Output**: Rated articles for section selection
+- **Quality Scoring**: Assigns quality ratings (1-10) to each article using a prompt and ELO type importance comparisons
+- **Relevance**: Evaluates according to a rubric, impacts lots of people, dollars, novelty
+- **Frequency**: If same story is covered by several articles, pick highest rated and boost points based on how many articles cover same story
 
 ### Step 7: Select Sections 📑
 - **Newsletter Structure**: Chooses top articles for each section
@@ -81,11 +80,10 @@ The newsletter generation follows a structured 9-step process with persistent st
 - **Output**: Newsletter section outline with assigned articles
 
 ### Step 8: Draft Sections ✍️
-- **Content Creation**: Writes engaging introductions and content for each section
-- **Professional Tone**: Generates publication-ready copy
-- **Output**: Drafted newsletter sections (~1200 words total)
+- **Content Creation**: Writes engaging content  and title for each section
+- **Output**: Drafted newsletter sections
 
-### Step 9: Finalize Newsletter 🎉
+### Step 9: Compose Final Newsletter 🎉
 - **Assembly**: Combines all sections into final newsletter
 - **Quality Control**: Applies final formatting and polish
 - **Output**: Complete newsletter ready for distribution
