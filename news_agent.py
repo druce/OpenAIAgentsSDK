@@ -17,8 +17,9 @@ import os
 import json
 import dotenv
 from datetime import datetime, timedelta
-
+from pathlib import Path
 import pandas as pd
+from collections import Counter
 
 from IPython.display import HTML, Image, Markdown, display
 
@@ -35,47 +36,23 @@ from log_handler import SQLiteLogHandler
 from fetch import Fetcher
 from scrape import scrape_urls_concurrent
 from llm import LLMagent, LangfuseClient
-
-# Pydantic models for structured output
-class ArticleSummary(BaseModel):
-    """Model for AI-generated article summaries with exactly 3 bullet points"""
-    summary: str = Field(
-        description="Bullet-point summary of the article"
-    )
+from dedupe_by_cosine_similarity import process_dataframe_with_filtering
+from config import TEXT_DIR, CANONICAL_TOPICS
 
 # Global constants
 LOGDB = 'newsagent_logs.db'
 
-# AI Classification Prompts
-FILTER_SYSTEM_PROMPT = """
-You are a content-classification assistant that labels news headlines as AI-related or not.
-Return **only** a JSON object that satisfies the provided schema.
-For each headline provided, you must return an element with the same id, and a boolean value; do not skip any items.
-No markdown, no markdown fences, no extra keys, no comments.
-"""
+# Pydantic models for structured output
+class ArticleSummary(BaseModel):
+    """Model for AI-generated article summaries with exactly 3 bullet points"""
+    id: int = Field(description="The article id")
+    summary: str = Field(
+        description="Bullet-point summary of the article"
+    )
 
-FILTER_USER_PROMPT = """
-Classify every headline below.
-
-AI-related if the title mentions (explicitly or implicitly):
-- Core AI technologies: machine learning, neural / deep / transformer networks
-- AI Applications: computer vision, NLP, robotics, autonomous driving, generative media
-- AI hardware, GPU chip supply, AI data centers and infrastructure
-- Companies or labs known for AI: OpenAI, DeepMind, Anthropic, xAI, NVIDIA, etc.
-- AI models & products: ChatGPT, Gemini, Claude, Sora, Midjourney, DeepSeek, etc.
-- New AI products and AI integration into existing products/services
-- AI policy / ethics / safety / regulation / analysis
-- Research results related to AI
-- AI industry figures (Sam Altman, Demis Hassabis, etc.)
-- AI market and business developments, funding rounds, partnerships centered on AI
-- Any other news with a significant AI component
-
-Non-AI examples: crypto, ordinary software, non-AI gadgets and medical devices, and anything else.
-
-Headlines to classify: {input_text}
-"""
-
-# Pydantic models for AI classification
+class ArticleSummaryList(BaseModel):
+    """List of AIClassification for batch processing"""
+    results_list: list[ArticleSummary] = Field(description="List of summary results")
 
 # output class for classifying headlines
 class AIClassification(BaseModel):
@@ -87,6 +64,36 @@ class AIClassification(BaseModel):
 class AIClassificationList(BaseModel):
     """List of AIClassification for batch processing"""
     results_list: list[AIClassification] = Field(description="List of classification results")
+
+# Topic extraction models
+class TopicExtraction(BaseModel):
+    """Topic extraction result for a single article"""
+    id: int = Field(description="The article id")
+    topics_list: List[str] = Field(description="List of up to 5 distinct, broad topics")
+
+class TopicExtractionList(BaseModel):
+    """List of TopicExtraction for batch processing"""
+    results_list: list[TopicExtraction] = Field(description="List of topic extraction results")
+
+# Canonical topic classification models
+class CanonicalTopicClassification(BaseModel):
+    """Single article classification result for a canonical topic"""
+    id: int = Field(description="The article id")
+    relevant: bool = Field(description="Whether the summary is relevant to the canonical topic")
+
+class CanonicalTopicClassificationList(BaseModel):
+    """List of classification results for batch processing"""
+    results_list: list[CanonicalTopicClassification] = Field(description="List of classification results")
+
+# Topic cleanup models
+class TopicCleanup(BaseModel):
+    """Cleaned and filtered topic list for a single article"""
+    id: int = Field(description="The article id")
+    topics_list: List[str] = Field(description="Final cleaned list of 3-7 best topics")
+
+class TopicCleanupList(BaseModel):
+    """List of cleaned topic results for batch processing"""
+    results_list: list[TopicCleanup] = Field(description="List of topic cleanup results")
 
 
 def setup_logging(session_id: str = "default", db_path: str = LOGDB) -> logging.Logger:
@@ -464,13 +471,15 @@ class FilterUrlsTool:
             # Prepare headlines for batch classification
             headline_df = pd.DataFrame(state.headline_data)
             display(headline_df)
+            filter_system_prompt, filter_user_prompt, model = \
+                LangfuseClient().get_prompt("newsagent/filter_urls")
 
             # Create LLM agent for AI classification
             classifier = LLMagent(
-                system_prompt=FILTER_SYSTEM_PROMPT,
-                user_prompt=FILTER_USER_PROMPT,
+                system_prompt=filter_system_prompt,
+                user_prompt=filter_user_prompt,
                 output_type=AIClassificationList,
-                model="gpt-5-nano",
+                model=model,
                 verbose=self.verbose,
                 logger=self.logger
             )
@@ -599,53 +608,62 @@ class DownloadArticlesTool:
             total_length = 0
 
             # Create mapping from id to scrape results
-            result_map = {}
-            for index, status, url, title, html_path, last_updated in scrape_results:
-                result_map[index] = {
-                    'status': status,
-                    'final_url': url,
-                    'html_path': html_path,
-                    'last_updated': last_updated
-                }
+            # Convert scrape results to DataFrame and merge with ai_df
+            scrape_df = pd.DataFrame(scrape_results, columns=['id', 'status', 'final_url', 'title', 'html_path', 'last_updated'])
+            ai_df = ai_df.merge(scrape_df[['id', 'status', 'final_url', 'html_path', 'last_updated']], on='id', how='left')
+
+            os.makedirs(TEXT_DIR, exist_ok=True)
 
             # Update headline_data with scraping results
-            for i, article in enumerate(state.headline_data):
-                if article.get('isAI') is True and article['id'] in result_map:
-                    result = result_map[article['id']]
+            for row in ai_df.itertuples():
+                if row.isAI is True and hasattr(row, 'html_path') and row.html_path:
+                    try:
+                        # Use normalize_html to extract clean text content
+                        from scrape import normalize_html
+                        content = normalize_html(row.html_path, logger=self.logger)
 
-                    # Add new columns to headline_data
-                    article['status'] = result['status']
-                    article['final_url'] = result['final_url']
-                    article['html_path'] = result['html_path']
-                    article['last_updated'] = result['last_updated']
-                    article['download_timestamp'] = datetime.now().isoformat()
+                        # Create text file path by replacing .html with .txt and moving to TEXT_DIR
+                        html_file = Path(row.html_path)
+                        text_filename = html_file.stem + '.txt'
+                        text_path = os.path.join(TEXT_DIR, text_filename)
 
-                    # Extract content from downloaded file
-                    if result['status'] == 'success' and result['html_path']:
-                        try:
-                            # Use normalize_html to extract clean text content
-                            from scrape import normalize_html
-                            content = normalize_html(result['html_path'], logger=self.logger)
-                            article['content'] = content
-                            article['content_length'] = len(content)
-                            successful_downloads += 1
-                            total_length += len(content)
+                        # Write content to text file
+                        with open(text_path, 'w', encoding='utf-8') as f:
+                            f.write(content)
 
-                            if self.logger:
-                                self.logger.debug(f"Successfully extracted content from {result['html_path']}: {len(content)} characters")
-                        except Exception as e:
-                            if self.logger:
-                                self.logger.warning(f"Failed to extract content from {result['html_path']}: {e}")
-                            article['content'] = f"Failed to extract content: {e}"
-                            article['content_length'] = 0
-                    else:
-                        # Scraping failed or no file path
-                        article['content'] = f"Failed to scrape content. Status: {result['status']}"
-                        article['content_length'] = 0
+                        # Update DataFrame with text path and content length
+                        ai_df.loc[row.Index, 'text_path'] = text_path
+                        ai_df.loc[row.Index, 'content_length'] = len(content)
+                        ai_df['content_length'] = ai_df['content_length'].fillna(0).astype(int)
+                        successful_downloads += 1
+                        total_length += len(content)
+
+                        if self.logger:
+                            self.logger.debug(f"Successfully extracted content to {text_path}: {len(content)} characters")
+                    except Exception as e:
+                        if self.logger:
+                            self.logger.warning(f"Failed to extract content from {row.html_path}: {e}")
+                        ai_df.loc[row.Index, 'text_path'] = ''
+                        ai_df.loc[row.Index, 'content_length'] = 0
+                else:
+                    # No HTML file to process
+                    ai_df.loc[row.Index, 'text_path'] = ''
+                    ai_df.loc[row.Index, 'content_length'] = 0
+
+            ai_df['text_path'] = ai_df['text_path'].fillna('')
+            # Deduplicate by final_url, keeping the one with greater content_length
+            ai_df['content_length'] = ai_df['content_length'].fillna(0)
+            ai_df = ai_df.sort_values('content_length', ascending=False).drop_duplicates(subset=['final_url'], keep='first')
+            # dedupe by cosine similarity
+            # several sources might syndicate same AP article, feedly and newsapi might show same article under different URL
+            ai_df = await process_dataframe_with_filtering(ai_df)
 
             # Calculate stats
             download_success_rate = successful_downloads / len(ai_df) if not ai_df.empty else 0
             avg_article_length = total_length / successful_downloads if successful_downloads > 0 else 0
+
+            # Store updated headline data in state
+            state.headline_data = ai_df.to_dict('records')
 
             # Complete the step
             state.complete_step(step_name)
@@ -690,97 +708,121 @@ class ExtractSummariesTool:
         self.verbose = verbose
         self.logger = logger
 
-    def _normalize(self, html_path: str) -> str:
-        """
-        Normalize HTML content to text and save to TEXT_DIR
-
-        Args:
-            html_path: Path to HTML file in PAGES_DIR
-
-        Returns:
-            Path to normalized text file in TEXT_DIR
-        """
-        from pathlib import Path
-        from scrape import normalize_html
-        from config import TEXT_DIR
-
-        # Create text directory if it doesn't exist
-        os.makedirs(TEXT_DIR, exist_ok=True)
-
-        # Generate text file path (same name, .txt extension)
-        html_file = Path(html_path)
-        text_filename = html_file.stem + '.txt'
-        text_path = os.path.join(TEXT_DIR, text_filename)
-
-        try:
-            # Extract text from HTML
-            normalized_text = normalize_html(html_path, logger=self.logger)
-
-            # Save text to file
-            with open(text_path, 'w', encoding='utf-8') as f:
-                f.write(normalized_text)
-
-            if self.verbose and self.logger:
-                self.logger.info(f"Normalized HTML to text: {html_path} -> {text_path}")
-
-            return text_path
-
-        except Exception as e:
-            if self.logger:
-                self.logger.error(f"Failed to normalize HTML {html_path}: {str(e)}")
+    def _read_text_file(self, text_path: str) -> str:
+        """Helper function to read text content from file path"""
+        if not text_path or text_path == '':
             return ""
 
+        try:
+            with open(text_path, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+            return content if content else ""
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"Failed to read text file {text_path}: {e}")
+            return ""
 
-    async def _summarize(self, text_path: str) -> List[str]:
-        """
-        Generate AI-powered summary from text file
-
-        Args:
-            text_path: Path to text file to summarize
-
-        Returns:
-            List of 3 bullet-point summaries
-        """
-        SUMMARIZE_SYSTEM_PROMPT, SUMMARIZE_USER_PROMPT, model = LangfuseClient().get_prompt("newsagent/summarize")
+    def extract_metadata(self, html_path: str) -> Dict[str, Any]:
+        """Extract metadata description and tags from HTML file"""
+        if not html_path or not os.path.exists(html_path):
+            return {"description": "", "tags": []}
 
         try:
-            # Read text content
-            with open(text_path, 'r', encoding='utf-8') as f:
-                text_content = f.read().strip()
+            from bs4 import BeautifulSoup
 
-            if not text_content:
-                if self.logger:
-                    self.logger.warning(f"Empty text file: {text_path}")
-                return "No content available for summarization."
+            with open(html_path, 'r', encoding='utf-8') as f:
+                html_content = f.read()
 
-            # Create LLM agent for summarization
-            llm_agent = LLMagent(
-                system_prompt=SUMMARIZE_SYSTEM_PROMPT,
-                user_prompt=SUMMARIZE_USER_PROMPT,
-                output_type=ArticleSummary,
-                model=model,
-                verbose=self.verbose,
-                logger=self.logger
-            )
+            soup = BeautifulSoup(html_content, 'html.parser')
 
-            # Generate summary
-            result = await llm_agent.prompt(article=text_content)
+            description = ""
+            tags = []
 
-            if hasattr(result, 'summary') and isinstance(result.summary, str):
-                if self.verbose and self.logger:
-                    self.logger.info(f"Generated summary for {text_path}: {result.summary}")
-                return result.summary
-            else:
-                if self.logger:
-                    self.logger.error(f"Invalid summary format from LLM for {text_path}")
-                return "Summary generation failed."
+            # Extract description from multiple sources (priority order)
+            # 1. og:description
+            og_desc = soup.find("meta", property="og:description")
+            if og_desc and og_desc.get("content"):
+                description = og_desc.get("content").strip()
+
+            # 2. twitter:description
+            if not description:
+                twitter_desc = soup.find("meta", attrs={"name": "twitter:description"})
+                if twitter_desc and twitter_desc.get("content"):
+                    description = twitter_desc.get("content").strip()
+
+            # 3. meta description
+            if not description:
+                meta_desc = soup.find("meta", attrs={"name": "description"})
+                if meta_desc and meta_desc.get("content"):
+                    description = meta_desc.get("content").strip()
+
+            # Extract tags from multiple sources
+            # 1. article:tag
+            article_tags = soup.find_all("meta", property="article:tag")
+            for tag in article_tags:
+                if tag.get("content"):
+                    tags.append(tag.get("content").strip())
+
+            # 2. article:section
+            article_section = soup.find("meta", property="article:section")
+            if article_section and article_section.get("content"):
+                tags.append(article_section.get("content").strip())
+
+            # 3. keywords meta tag
+            keywords_tag = soup.find("meta", attrs={"name": "keywords"})
+            if keywords_tag and keywords_tag.get("content"):
+                keywords = [k.strip() for k in keywords_tag.get("content").split(",")]
+                tags.extend(keywords)
+
+            # 4. parsely-section
+            parsely_section = soup.find("meta", attrs={"name": "parsely-section"})
+            if parsely_section and parsely_section.get("content"):
+                tags.append(parsely_section.get("content").strip())
+
+            # 5. JSON-LD structured data keywords
+            json_ld_scripts = soup.find_all('script', type='application/ld+json')
+            for script in json_ld_scripts:
+                try:
+                    import json
+                    data = json.loads(script.string)
+                    if isinstance(data, dict):
+                        # Handle single JSON-LD object
+                        if 'keywords' in data:
+                            if isinstance(data['keywords'], list):
+                                tags.extend(data['keywords'])
+                            elif isinstance(data['keywords'], str):
+                                tags.extend([k.strip() for k in data['keywords'].split(',')])
+                        if 'articleSection' in data:
+                            tags.append(data['articleSection'])
+                    elif isinstance(data, list):
+                        # Handle array of JSON-LD objects
+                        for item in data:
+                            if isinstance(item, dict):
+                                if 'keywords' in item:
+                                    if isinstance(item['keywords'], list):
+                                        tags.extend(item['keywords'])
+                                    elif isinstance(item['keywords'], str):
+                                        tags.extend([k.strip() for k in item['keywords'].split(',')])
+                                if 'articleSection' in item:
+                                    tags.append(item['articleSection'])
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    continue
+
+            # Clean up tags: remove duplicates, empty strings, and normalize
+            tags = list(set([tag.strip() for tag in tags if tag and tag.strip()]))
+
+            return {
+                "description": description,
+                "tags": tags
+            }
 
         except Exception as e:
             if self.logger:
-                self.logger.error(f"Failed to summarize {text_path}: {str(e)}")
-            return f"Error generating summary: {str(e)}"
+                self.logger.warning(f"Failed to extract metadata from {html_path}: {e}")
+            return {"description": "", "tags": []}
 
-    async def _extract_summaries(self, ctx, args: str, max_concurrency: int = 16) -> str:
+
+    async def _extract_summaries(self, ctx, args: str) -> str:
         """Execute Step 4: Extract Summaries using AI-powered summarization"""
         step_name = "step_04_extract_summaries"
 
@@ -805,9 +847,9 @@ class ExtractSummariesTool:
 
             # Convert headline_data to DataFrame for processing
             headline_df = pd.DataFrame(state.headline_data)
-
             # Filter to AI-related articles with HTML content
-            ai_articles_mask = (headline_df.get('isAI') == True) & (headline_df['html_path'].notna())
+            # TODO: filter to articles with text content with .str.len() > 0
+            ai_articles_mask = (headline_df.get('isAI') == True) & (headline_df['text_path'].notna())
             if not ai_articles_mask.any():
                 return f"❌ No AI-related articles with HTML content found to summarize. Please run step 3 first."
 
@@ -816,86 +858,48 @@ class ExtractSummariesTool:
             if self.logger:
                 self.logger.info(f"Processing {len(ai_articles_df)} AI articles for summarization")
 
-            # Step 1: Normalize HTML to text for all articles
-            text_paths = []
-            normalization_errors = 0
+            # Load text content into DataFrame
+            ai_articles_df['text_content'] = ai_articles_df['text_path'].apply(self._read_text_file)
 
-            for idx, row in ai_articles_df.iterrows():
-                html_path = row['html_path']
-                try:
-                    text_path = self._normalize(html_path)
-                    text_paths.append(text_path)
-                except Exception as e:
-                    if self.logger:
-                        self.logger.error(f"Failed to normalize {html_path}: {str(e)}")
-                    text_paths.append(None)
-                    normalization_errors += 1
+            # Get prompt and model from Langfuse
+            system_prompt, user_prompt, model = LangfuseClient().get_prompt("newsagent/extract_summaries")
 
-            # Add text_path column to DataFrame
-            ai_articles_df = ai_articles_df.copy()
-            ai_articles_df['text_path'] = text_paths
+            if self.verbose and self.logger:
+                self.logger.info(f"Using model '{model}' for summarization")
 
-            # Step 2: Summarize articles with valid text paths
-            summaries = []
-            summarization_errors = 0
-            total_bullets = 0
+            # Create LLM agent for batch summarization
+            summary_agent = LLMagent(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                output_type=ArticleSummaryList,
+                model=model,
+                verbose=self.verbose,
+                logger=self.logger
+            )
 
-            # Create semaphore for concurrent summarization
-            semaphore = asyncio.Semaphore(max_concurrency)
+            # Use filter_dataframe for batch summarization
+            # TODO: even though we pass text_content variable
+            #  always needs input_text as prompt to pass the full dataframe
 
-            async def summarize_with_semaphore(idx, row):
-                async with semaphore:
-                    text_path = row['text_path']
-
-                    if text_path is None:
-                        return idx, "No text."
-
-                    try:
-                        summary_bullets = await self._summarize(text_path)
-                        return idx, summary_bullets
-                    except Exception as e:
-                        if self.logger:
-                            self.logger.error(f"Failed to summarize {text_path}: {str(e)}")
-                        return idx, f"Summarization failed: {str(e)}"
-
-            # Create tasks for all articles
-            tasks = [
-                summarize_with_semaphore(idx, row)
-                for idx, row in ai_articles_df.iterrows()
-            ]
-
-            # Execute tasks concurrently
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            # Process results maintaining order
-            summaries = [None] * len(ai_articles_df)
-            for result in results:
-                if isinstance(result, Exception): # not currently returning exceptins from summarize_with_semaphore
-                    summarization_errors += 1
-                    continue
-                idx, summary_bullets = result
-                total_bullets += 1
-                summaries[ai_articles_df.index.get_loc(idx)] = summary_bullets
-
-            # Add summary column to DataFrame
-            ai_articles_df['summary'] = summaries
-
-            # Update the original headline_data with the new columns
-            for idx, row in ai_articles_df.iterrows():
-                # Find the corresponding article in state.headline_data
-                url = row['url']
-                for article in state.headline_data:
-                    if article.get('url') == url:
-                        article['text_path'] = row['text_path']
-                        article['summary'] = row['summary']
-                        article['summary_bullets'] = len([b for b in row['summary'] if b.strip()])
-                        article['summary_timestamp'] = datetime.now().isoformat()
-                        break
+            ai_articles_df['summary'] = await summary_agent.filter_dataframe(
+                ai_articles_df[['id', 'text_content']],
+                item_list_field='results_list',  # This tells it to extract the list from the batch response
+                value_field='summary',           # This tells it to get the 'summary' field from each ArticleSummary
+                item_id_field='id',              # This maps the responses back to the correct rows
+                chunk_size=1                     # send in batches of
+            )
+            # Clean up text_content column
+            ai_articles_df.drop('text_content', axis=1, inplace=True)
 
             # Calculate statistics
             articles_processed = len(ai_articles_df)
-            successful_summaries = articles_processed - summarization_errors - normalization_errors
-            avg_bullets_per_article = total_bullets / successful_summaries if successful_summaries > 0 else 0
+            successful_summaries = len([s for s in ai_articles_df['summary'] if s and s.strip() and not s.startswith("Error")])
+            summarization_errors = articles_processed - successful_summaries
+
+            # Update headline_df with summaries
+            headline_df['summary'] = ai_articles_df['summary']
+            # Store updated headline data in state
+            state.headline_data = headline_df.to_dict('records')
 
             # Complete the step
             state.complete_step(step_name)
@@ -904,9 +908,6 @@ class ExtractSummariesTool:
                 print(f"✅ Completed Step 4: Generated AI summaries for {successful_summaries}/{articles_processed} articles")
 
             status_msg = f"✅ Step 4 completed successfully! Generated AI-powered summaries for {successful_summaries}/{articles_processed} articles."
-            status_msg += f"\n📝 Average bullets per article: {avg_bullets_per_article:.1f}"
-            if normalization_errors > 0:
-                status_msg += f"\n⚠️  Normalization errors: {normalization_errors}"
             if summarization_errors > 0:
                 status_msg += f"\n⚠️  Summarization errors: {summarization_errors}"
             status_msg += f"\n💾 Summaries stored in headline DataFrame."
@@ -933,25 +934,154 @@ class ExtractSummariesTool:
 # - add repeated free-form topics to canonical prompts
 class ClusterByTopicTool:
     """Tool for Step 5: Cluster articles by topic
-    - use summaries
-    - extract free-form topics using prompt
-    - add repeated free-form topics to canonical prompts
-    - check for all canonical prompt sthat are matched
-    - use prompt to limit each summary to 7 topics that best match
-    - add topics to summary in headline_data
-    - cluster summaries using hdbscan
-    - for each cluster, send prompt to generate cluster title
-    - after completion summaries have been updated to prepend topics, clusters created and named, headline_df items have a cluster_id
+
+    Multi-stage topic analysis and clustering process:
+
+    1. Extract free-form topics: Use AI to identify up to 5 distinct topics from each article summary
+    2. Add frequently mentioned topics: Identify top 50 topics mentioned 3+ times from today's articles
+    3. Check canonical topics: Use cheap/fast nano model to classify each article against 150+ evergreen canonical topics
+    4. Clean up topics: Filter combined list (free-form + canonical) to <7 best matching topics per article
+    5. Create clusters: Group articles by their final cleaned topic lists
+
+    Stores extracted_topics, canonical_topics, and final topics_list in article data.
+    Creates topic-based clusters for newsletter organization.
     """
 
     def __init__(self, verbose: bool = False, logger: logging.Logger = None):
         self.verbose = verbose
         self.logger = logger
 
+    async def _classify_canonical_topic(self, headline_df: pd.DataFrame, topic: str) -> List[bool]:
+        """
+        Classify all summaries against a single canonical topic
+
+        Args:
+            headline_df: DataFrame with articles containing summaries
+            topic: Single canonical topic to classify against
+
+        Returns:
+            List of boolean values indicating relevance to the topic
+        """
+        # Get prompt and model from Langfuse
+        langfuse_client = LangfuseClient()
+        system_prompt, user_prompt, model = langfuse_client.get_prompt("newsagent/canonical_topic")
+
+        # Create LLMagent for canonical topic classification
+        canonical_agent = LLMagent(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            output_type=CanonicalTopicClassificationList,
+            model=model,
+            verbose=self.verbose,
+            logger=self.logger
+        )
+
+        # Filter to only articles with summaries
+        articles_with_summaries_mask = (
+            (headline_df['isAI'] == True) &
+            headline_df['summary'].notna() &
+            (headline_df['summary'] != '')
+        )
+
+        if not articles_with_summaries_mask.any():
+            return []
+
+        # Use filter_dataframe to classify against the canonical topic
+        relevance_series = await canonical_agent.filter_dataframe(
+            headline_df.loc[articles_with_summaries_mask, ['id', 'summary']],
+            value_field='relevant',
+            item_list_field='results_list',
+            item_id_field='id',
+            topic=topic  # Pass topic for template substitution
+        )
+
+        return relevance_series.tolist()
+
+    async def _cleanup_topics(self, headline_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Clean up and filter combined topics using AI to select best 3-7 topics
+
+        Args:
+            headline_df: DataFrame with articles containing extracted_topics, canonical_topics, and summaries
+
+        Returns:
+            DataFrame with cleaned topics_list column
+        """
+        # Get prompt and model from Langfuse
+        langfuse_client = LangfuseClient()
+        system_prompt, user_prompt, model = langfuse_client.get_prompt("newsagent/topic_cleanup")
+
+        # Create LLMagent for topic cleanup
+        cleanup_agent = LLMagent(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            output_type=TopicCleanupList,
+            model=model,
+            verbose=self.verbose,
+            logger=self.logger
+        )
+
+        # Filter to only articles with summaries and topics
+        articles_with_content_mask = (
+            (headline_df['isAI'] == True) &
+            headline_df['summary'].notna() &
+            (headline_df['summary'] != '') &
+            (headline_df['extracted_topics'].apply(lambda x: len(x) > 0 if isinstance(x, list) else False) |
+             headline_df['canonical_topics'].apply(lambda x: len(x) > 0 if isinstance(x, list) else False))
+        )
+
+        if not articles_with_content_mask.any():
+            # No articles to clean up, just initialize empty topics_list
+            headline_df['topics_list'] = [[] for _ in range(len(headline_df))]
+            return headline_df
+
+        # Prepare input with combined topics for cleanup
+        cleanup_input = []
+        for idx, row in headline_df[articles_with_content_mask].iterrows():
+            # Combine extracted and canonical topics
+            extracted = row.get('extracted_topics', []) if isinstance(row.get('extracted_topics', []), list) else []
+            canonical = row.get('canonical_topics', []) if isinstance(row.get('canonical_topics', []), list) else []
+            combined_topics = extracted + canonical
+
+            # Create input text with summary and candidate topics
+            input_text = f"**Article Summary:**\n{row['summary']}\n\n**Candidate Topics:**\n" + "\n".join([f"- {topic}" for topic in combined_topics])
+
+            cleanup_input.append({
+                'id': row['id'],
+                'summary': input_text  # Pass formatted input as 'summary' for template substitution
+            })
+
+        if not cleanup_input:
+            headline_df['topics_list'] = [[] for _ in range(len(headline_df))]
+            return headline_df
+
+        # Create DataFrame for cleanup processing
+        cleanup_df = pd.DataFrame(cleanup_input)
+
+        # Use filter_dataframe to clean up topics
+        cleaned_topics_series = await cleanup_agent.filter_dataframe(
+            cleanup_df,
+            value_field='topics_list',
+            item_list_field='results_list',
+            item_id_field='id'
+        )
+
+        # Initialize topics_list column
+        headline_df['topics_list'] = [[] for _ in range(len(headline_df))]
+
+        # Update with cleaned topics
+        articles_with_content_indices = headline_df[articles_with_content_mask].index.tolist()
+        for idx, cleaned_topics in zip(articles_with_content_indices, cleaned_topics_series):
+            if isinstance(cleaned_topics, list):
+                headline_df.at[idx, 'topics_list'] = cleaned_topics
+
+        return headline_df
+
     async def _cluster_by_topic(self, ctx, args: str) -> str:
         """Execute Step 5: Cluster By Topic using persistent state"""
         step_name = "step_05_cluster_by_topic"
-
+# todo: combine title and summary for topic extra
+# todo: show list of common topics
         # Access the persistent state
         state: NewsletterAgentState = ctx.context
 
@@ -986,51 +1116,201 @@ class ClusterByTopicTool:
             # Clear existing clusters if rerunning
             state.clusters = {}
 
-            # Mock clustering logic - in a real implementation, this would use NLP/ML
-            # to group articles by semantic similarity of their titles and summaries
-            predefined_topics = [
-                "LLM Advances", "AI Safety & Ethics", "Business AI Applications",
-                "Research Breakthroughs", "Industry News", "Other AI Topics"
+            # Step 1: Extract topics from summaries using AI
+            headline_df = pd.DataFrame(state.headline_data)
+
+            if self.verbose and self.logger:
+                self.logger.info(f"Starting topic extraction for clustering")
+
+            # Filter to only articles with summaries
+            articles_with_summaries_mask = (
+                (headline_df['isAI'] == True) &
+                headline_df['summary'].notna() &
+                (headline_df['summary'] != '')
+            )
+
+            if not articles_with_summaries_mask.any():
+                if self.logger:
+                    self.logger.warning("No articles with summaries found for topic extraction")
+                # Initialize empty extracted_topics column
+                headline_df['extracted_topics'] = [[] for _ in range(len(headline_df))]
+            else:
+                # Get prompt and model from Langfuse
+                langfuse_client = LangfuseClient()
+                system_prompt, user_prompt, model = langfuse_client.get_prompt("newsagent/extract_topics")
+
+                if self.verbose and self.logger:
+                    self.logger.info(f"Using model '{model}' for topic extraction")
+                    self.logger.info(f"Processing {articles_with_summaries_mask.sum()} articles for topic extraction")
+
+                # Create LLMagent for topic extraction
+                topic_agent = LLMagent(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    output_type=TopicExtractionList,
+                    model=model,
+                    verbose=self.verbose,
+                    logger=self.logger
+                )
+
+                # Extract topics using filter_dataframe
+                headline_df['extracted_topics'] = await topic_agent.filter_dataframe(
+                    headline_df.loc[articles_with_summaries_mask, ['id', 'summary']],
+                    value_field='topics_list',
+                    item_list_field='results_list',
+                    item_id_field='id'
+                )
+                # Handle NaN values in extracted_topics
+                headline_df['extracted_topics'] = headline_df['extracted_topics'].fillna('').apply(
+                    lambda x: [] if pd.isna(x) or x == '' else x
+                )
+
+                if self.verbose and self.logger:
+                    topics_extracted = headline_df['extracted_topics'].apply(lambda x: len(x) if isinstance(x, list) else 0).sum()
+                    self.logger.info(f"Successfully extracted {topics_extracted} total topics across articles")
+
+            # Update state.headline_data with extracted topics
+            for idx, row in headline_df.iterrows():
+                if idx < len(state.headline_data):
+                    state.headline_data[idx]['extracted_topics'] = row.get('extracted_topics', [])
+
+            # Step 1.5: Classify against canonical topics
+            if self.verbose and self.logger:
+                self.logger.info(f"Starting canonical topic classification for {len(CANONICAL_TOPICS)} topics")
+
+            # Create all canonical topic classification tasks
+            canonical_tasks = [
+                self._classify_canonical_topic(headline_df, topic)
+                for topic in CANONICAL_TOPICS
             ]
 
-            # Initialize empty clusters
-            for topic in predefined_topics:
-                state.clusters[topic] = []
+            # Run all canonical topic classifications concurrently
+            canonical_results = await asyncio.gather(*canonical_tasks, return_exceptions=True)
 
-            # Simple keyword-based clustering
-            topic_keywords = {
-                "LLM Advances": ["llm", "large language model", "gpt", "claude", "language model", "chatbot", "chat"],
-                "AI Safety & Ethics": ["safety", "ethics", "bias", "fairness", "responsible", "trust", "alignment"],
-                "Business AI Applications": ["business", "enterprise", "productivity", "automation", "workflow", "commercial"],
-                "Research Breakthroughs": ["research", "breakthrough", "paper", "study", "academic", "university", "science"],
-                "Industry News": ["company", "startup", "funding", "acquisition", "partnership", "launch", "release"],
-                "Other AI Topics": []  # Catch-all
-            }
+            # Process results and create canonical_topics column
+            headline_df['canonical_topics'] = [[] for _ in range(len(headline_df))]
 
-            for article in articles_with_summaries:
-                url = article.get('url', '')
-                title_lower = article.get('title', '').lower()
-                description_lower = article.get('description', '').lower()
+            # Filter to only articles with summaries for indexing
+            articles_with_summaries_mask = (
+                (headline_df['isAI'] == True) &
+                headline_df['summary'].notna() &
+                (headline_df['summary'] != '')
+            )
 
-                # Find best matching topic
-                best_topic = "Other AI Topics"  # Default
-                max_matches = 0
+            if articles_with_summaries_mask.any():
+                articles_with_summaries_indices = headline_df[articles_with_summaries_mask].index.tolist()
 
-                for topic, keywords in topic_keywords.items():
-                    if topic == "Other AI Topics":
+                for topic_idx, (topic, result) in enumerate(zip(CANONICAL_TOPICS, canonical_results)):
+                    if isinstance(result, Exception):
+                        if self.logger:
+                            self.logger.error(f"Error classifying canonical topic '{topic}': {result}")
                         continue
 
-                    matches = sum(1 for keyword in keywords
-                                if keyword in title_lower or keyword in description_lower)
+                    if isinstance(result, list) and len(result) == len(articles_with_summaries_indices):
+                        # Add topic to articles where it's relevant
+                        for article_idx, is_relevant in zip(articles_with_summaries_indices, result):
+                            if is_relevant:
+                                headline_df.at[article_idx, 'canonical_topics'].append(topic)
+                    elif self.logger:
+                        self.logger.warning(f"Unexpected result format for canonical topic '{topic}': {type(result)}")
 
-                    if matches > max_matches:
-                        max_matches = matches
-                        best_topic = topic
+            if self.verbose and self.logger:
+                total_canonical_matches = sum(len(topics) for topics in headline_df['canonical_topics'])
+                self.logger.info(f"Canonical topic classification complete: {total_canonical_matches} total topic matches")
+
+            # Update state.headline_data with canonical topics
+            for idx, row in headline_df.iterrows():
+                if idx < len(state.headline_data):
+                    state.headline_data[idx]['canonical_topics'] = row.get('canonical_topics', [])
+
+            # Step 1.75: Clean up and filter combined topics
+            if self.verbose and self.logger:
+                self.logger.info("Starting topic cleanup and filtering")
+
+            headline_df = await self._cleanup_topics(headline_df)
+
+            if self.verbose and self.logger:
+                final_topics_count = headline_df['topics_list'].apply(lambda x: len(x) if isinstance(x, list) else 0).sum()
+                self.logger.info(f"Topic cleanup complete: {final_topics_count} final topics selected")
+
+            # Update state.headline_data with final cleaned topics
+            for idx, row in headline_df.iterrows():
+                if idx < len(state.headline_data):
+                    state.headline_data[idx]['topics_list'] = row.get('topics_list', [])
+
+            # Step 2: Create clusters based on cleaned topics
+            # Collect all topics from articles with summaries
+            all_topics = []
+            for idx, row in headline_df.iterrows():
+                if row.get('topics_list') and isinstance(row.get('topics_list'), list):
+                    all_topics.extend([topic.strip() for topic in row.get('topics_list', []) if topic.strip()])
+
+            # Use Counter to find frequently mentioned topics (appearing 3+ times)
+            topic_counter = Counter(all_topics)
+
+            # Get topics mentioned 3+ times, sorted by frequency, take top 50
+            frequent_topics = [
+                topic for topic, count in topic_counter.most_common()
+                if count >= 3
+            ][:50]
+
+            # All unique topics that appear at least once
+            unique_topics = list(topic_counter.keys())
+
+            # Store frequent topics as common topics in state for future use
+            state.common_topics = frequent_topics
+
+            if self.verbose and self.logger:
+                total_frequent_mentions = sum(topic_counter[topic] for topic in frequent_topics)
+                self.logger.info(f"Found {len(frequent_topics)} frequently mentioned topics (3+ times) from {len(all_topics)} total topic instances")
+                self.logger.info(f"Total unique topics: {len(unique_topics)}")
+                self.logger.info(f"Top frequent topics represent {total_frequent_mentions} mentions")
+                if frequent_topics:
+                    # Show top 10 with their counts
+                    top_topics_with_counts = [(topic, topic_counter[topic]) for topic in frequent_topics[:10]]
+                    self.logger.info(f"Top frequent topics: {top_topics_with_counts}")
+                    if len(frequent_topics) > 10:
+                        self.logger.info(f"... and {len(frequent_topics) - 10} more")
+
+            # Use frequent topics for clustering, plus remaining unique topics
+            cluster_topics = frequent_topics + [topic for topic in unique_topics if topic not in frequent_topics]
+
+            # Initialize clusters with discovered topics (prioritize frequent topics)
+            for topic in cluster_topics:
+                state.clusters[topic] = []
+
+            # Always add "Other AI Topics" as catch-all
+            state.clusters["Other AI Topics"] = []
+
+            # If no frequent topics were found, log info
+            if not frequent_topics and self.logger:
+                self.logger.info("No frequently mentioned topics found (none appeared 3+ times), using individual topics for clustering")
+
+            # Step 3: Assign articles to clusters based on their extracted topics
+            for article in articles_with_summaries:
+                url = article.get('url', '')
+                article_topics = article.get('topics_list', [])
+
+                if not isinstance(article_topics, list):
+                    article_topics = []
+
+                # Assign to first matching topic, or "Other AI Topics" if no topics
+                best_topic = "Other AI Topics"  # Default
+
+                if article_topics:
+                    # Use the first topic as the primary cluster assignment
+                    first_topic = article_topics[0].strip() if article_topics[0] else None
+                    if first_topic and first_topic in state.clusters:
+                        best_topic = first_topic
 
                 # Add article URL to the appropriate cluster
-                state.clusters[best_topic].append(url)
+                if best_topic in state.clusters:
+                    state.clusters[best_topic].append(url)
+                else:
+                    # Fallback to "Other AI Topics"
+                    state.clusters["Other AI Topics"].append(url)
 
-                # Also update the article with cluster info
+                # Update the article with cluster info
                 article['cluster_topic'] = best_topic
                 article['cluster_timestamp'] = datetime.now().isoformat()
 
@@ -1051,10 +1331,15 @@ class ClusterByTopicTool:
             if self.verbose:
                 print(f"✅ Completed Step 5: Created {total_clusters} topic clusters")
 
+            # Calculate canonical topic stats
+            total_canonical_matches = sum(len(article.get('canonical_topics', [])) for article in state.headline_data)
+
             status_msg = f"✅ Step 5 completed successfully! Organized {total_articles} articles into {total_clusters} topic clusters."
             status_msg += f"\n📊 Cluster coherence score: {cluster_coherence_score:.1%}"
+            status_msg += f"\n🔄 Frequent topics found: {len(state.common_topics)} (top 50 topics appearing 3+ times)"
+            status_msg += f"\n🏛️ Canonical topic matches: {total_canonical_matches} across {len(CANONICAL_TOPICS)} canonical topics"
             status_msg += f"\n🏷️ Topics: {', '.join(state.clusters.keys())}"
-            status_msg += f"\n💾 Clusters stored in persistent state."
+            status_msg += f"\n💾 Clusters, common topics, and canonical classifications stored in persistent state."
             return status_msg
 
         except Exception as e:

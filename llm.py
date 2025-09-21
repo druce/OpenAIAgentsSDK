@@ -49,6 +49,12 @@ async def paginate_df_async(df: pd.DataFrame, chunk_size: int = 25):
           await asyncio.sleep(0)  # Allow other tasks to run
 
 
+async def paginate_list_async(l, chunk_size: int = 25):
+    """Async generator for list pagination."""
+    for i in range(0, len(l), chunk_size):
+        yield l[i:i + chunk_size]
+        await asyncio.sleep(0)  # Allow other tasks to run
+
 class LangfuseClient:
     """
     Client for retrieving prompts from Langfuse.
@@ -237,7 +243,9 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         Returns:
             Single result of the specified output type
         """
+        print(variables)
         user_message = self._format_prompts(variables)
+        print(user_message)
 
         if self.verbose:
             self.logger.info(f"User message: {user_message}")

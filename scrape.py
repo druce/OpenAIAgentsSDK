@@ -39,7 +39,7 @@ import trafilatura
 
 # from log_handler import log  # Replaced with standard logging
 from config import (DOWNLOAD_DIR, IGNORE_LIST, PAGES_DIR, FIREFOX_PROFILE_PATH,  # SCREENSHOT_DIR,
-                    MIN_TITLE_LEN, SLEEP_TIME, MAX_INPUT_TOKENS, DOMAIN_RATE_LIMIT,
+                    MIN_TITLE_LEN, SLEEP_TIME, MAX_TOKENS, DOMAIN_RATE_LIMIT,
                     SHORT_REQUEST_TIMEOUT)
 
 # Module-level logger for default logging
@@ -193,7 +193,7 @@ def clean_url(link: Union[str, Any]) -> Optional[str]:
     return s
 
 
-def trunc_tokens(long_prompt: str, model: str = 'gpt-4o', maxtokens: int = MAX_INPUT_TOKENS) -> str:
+def trunc_tokens(long_prompt: str, model: str = 'gpt-4o', maxtokens: int = MAX_TOKENS) -> str:
     """return prompt string, truncated to maxtokens"""
     # Initialize the encoding for the model you are using, e.g., 'gpt-4'
     try:
@@ -251,7 +251,7 @@ def normalize_html(path: Path | str, logger: Optional[logging.Logger] = None) ->
         - Social media descriptions from OpenGraph and Twitter meta tags
         - Main content using trafilatura library
 
-    All extracted content is concatenated and truncated to MAX_INPUT_TOKENS length.
+    All extracted content is concatenated and truncated to MAX_TOKENS length.
     """
     logger = logger or _logger
 
@@ -322,7 +322,7 @@ def normalize_html(path: Path | str, logger: Optional[logging.Logger] = None) ->
     plaintext = special_token_re.sub("", plaintext)
     visible_text = title_str + og_title + og_desc + plaintext
     visible_text = trunc_tokens(
-        visible_text, model='gpt-4o', maxtokens=MAX_INPUT_TOKENS)
+        visible_text, model='gpt-4o', maxtokens=MAX_TOKENS)
     return visible_text
 
 
