@@ -243,9 +243,9 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         Returns:
             Single result of the specified output type
         """
-        print(variables)
+        # print(variables)
         user_message = self._format_prompts(variables)
-        print(user_message)
+        # print(user_message)
 
         if self.verbose:
             self.logger.info(f"User message: {user_message}")
