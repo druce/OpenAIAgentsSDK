@@ -23,16 +23,18 @@ todo: function that takes a dataframe , list of input columns, name of output co
 import asyncio
 import json
 import logging
-from typing import Any, Dict, List, Type, Union, Optional
+from typing import Any, Dict, List, Type, Optional
 from pydantic import BaseModel
 import pandas as pd
 
 import openai
+from openai import AsyncOpenAI
 from tenacity import (
     retry,
     retry_if_exception_type,
     stop_after_attempt,
-    wait_exponential
+    wait_exponential,
+    before_sleep_log
 )
 
 from agents import Agent, Runner
@@ -79,6 +81,14 @@ class LangfuseClient:
         if self.logger:
             self.logger.info("Initialized LangfuseClient")
 
+    @retry(
+        retry=retry_if_exception_type((
+            Exception,  # Catch all exceptions for Langfuse API calls
+        )),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        before_sleep=before_sleep_log(_logger, logging.WARNING),
+    )
     def get_prompt(self, prompt_name: str) -> tuple[str, str, str]:
         """
         Retrieve a prompt from Langfuse and extract system/user prompts and model configuration.
@@ -94,11 +104,14 @@ class LangfuseClient:
             Exception: If prompt retrieval fails
         """
         try:
+            if self.logger:
+                self.logger.debug(f"Attempting to retrieve prompt '{prompt_name}' from Langfuse")
+
             # Get prompt from Langfuse
             lf_prompt = self.client.get_prompt(prompt_name)
 
             if self.logger:
-                self.logger.info(f"Retrieved prompt '{prompt_name}' from Langfuse")
+                self.logger.info(f"Successfully retrieved prompt '{prompt_name}' from Langfuse")
 
             # Validate prompt structure
             if not hasattr(lf_prompt, 'prompt') or not isinstance(lf_prompt.prompt, list):
@@ -232,6 +245,7 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         )),
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=1, min=1, max=30),
+        before_sleep=before_sleep_log(_logger, logging.WARNING),
     )
     async def prompt_dict(self, variables: Dict[str, Any]) -> Any:
         """
@@ -243,9 +257,8 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         Returns:
             Single result of the specified output type
         """
-        # print(variables)
         user_message = self._format_prompts(variables)
-        # print(user_message)
+        user_message = user_message.strip()
 
         if self.verbose:
             self.logger.info(f"User message: {user_message}")
@@ -265,7 +278,57 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         )),
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=1, min=1, max=30),
+        before_sleep=before_sleep_log(_logger, logging.WARNING),
     )
+    async def prompt_dict_chat(self, variables: Dict[str, Any]) -> Any:
+        """
+        Make a single LLM call using OpenAI chat completions API directly
+
+        Args:
+            variables: Dictionary of variables to substitute in prompt templates
+
+        Returns:
+            Single result of the specified output type
+        """
+        user_message = self._format_prompts(variables)
+        user_message = user_message.strip()
+
+        if self.verbose:
+            self.logger.info(f"User message: {user_message}")
+
+        # Get the OpenAI client - use the default one set up by the agents SDK
+        client = AsyncOpenAI()
+
+        # Prepare messages for chat completion
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": user_message}
+        ]
+
+        # Make the chat completion call with structured output
+        response = await client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "structured_response",
+                    "schema": self.output_type.model_json_schema()
+                }
+            }
+        )
+
+        # Parse the JSON response into the Pydantic model
+        response_text = response.choices[0].message.content
+        response_json = json.loads(response_text)
+        result = self.output_type.model_validate(response_json)
+
+        if self.verbose:
+            self.logger.info(f"Result: {result}")
+
+        return result
+
+
     async def run_prompt(self, **kwargs) -> Any:
         """
         Make a single LLM call with keyword argument variable substitution
@@ -276,17 +339,8 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         Returns:
             Single result of the specified output type
         """
-        user_message = self._format_prompts(kwargs)
-
-        if self.verbose:
-            self.logger.info(f"User message: {user_message}")
-
-        results = await Runner.run(self, user_message)
-
-        if self.verbose:
-            self.logger.info(f"Result: {results}")
-
-        return results.final_output if hasattr(results, 'final_output') else results
+        # Repackage kwargs into a dictionary and call prompt_dict_chat
+        return await self.prompt_dict_chat(kwargs)
 
 
     async def prompt_batch(self,
@@ -295,7 +349,8 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                           max_concurrency: int = 16,
                           retries: int = 3,
                           item_list_field: str = 'results_list',
-                          item_id_field: str = '') -> List[Any]:
+                          item_id_field: str = '',
+                          chat: bool = True) -> List[Any]:
         """
         Process a list of variable dictionaries using true batch calls.
 
@@ -309,6 +364,7 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             max_concurrency: Maximum number of concurrent requests
             retries: Number of retry attempts for failed requests
             item_id_field: Optional ID field name for validation. If provided, validates that each sent ID matches a received ID
+            chat: If True (default), use prompt_dict_chat; if False, use prompt_dict
 
         Returns:
             List of results maintaining original input order
@@ -331,7 +387,10 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                 try:
                     async with sem:
                         # Process the entire batch in a single API call
-                        result = await self.prompt_dict({'input_str': str(batch_variables)})
+                        if chat:
+                            result = await self.prompt_dict_chat({'input_str': str(batch_variables)})
+                        else:
+                            result = await self.prompt_dict({'input_str': str(batch_variables)})
                         batch_results = result
 
                         # Validate IDs if item_id_field is specified
@@ -411,7 +470,8 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                                input_vars: Optional[Dict[str, Any]] = None,
                                item_list_field: str = 'results_list',
                                item_id_field: str = 'id',
-                               retries: int = 3
+                               retries: int = 3,
+                               chat: bool = True
                               ) -> Any:
         """
         Process a single DataFrame asynchronously using Agent SDK.
@@ -428,6 +488,7 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             item_list_field: Name of the field in the response that contains the list of results
             item_id_field: Name of the ID field to validate matches between sent and received data
             retries: Number of retry attempts for validation failures
+            chat: If True (default), use prompt_dict_chat; if False, use prompt_dict
 
         Returns:
             Single result of the configured output_type (structured Pydantic object)
@@ -445,8 +506,11 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                 # add input_vars if provided
                 if input_vars is not None:
                     input_dict.update(input_vars)
-                # Use existing prompt_dict method with retry logic
-                result = await self.prompt_dict(input_dict)
+                # Use prompt_dict_chat or prompt_dict based on chat parameter
+                if chat:
+                    result = await self.prompt_dict_chat(input_dict)
+                else:
+                    result = await self.prompt_dict(input_dict)
                 # Validate item count and IDs if item_list_field is specified
                 if item_list_field:
                     if hasattr(result, item_list_field):
@@ -550,7 +614,8 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                                    input_vars: Optional[Dict[str, Any]] = None,
                                    item_list_field: str = 'results_list',
                                    item_id_field: str = 'id',
-                                   retries: int = 3) -> tuple[int, Any]:
+                                   retries: int = 3,
+                                   chat: bool = True) -> tuple[int, Any]:
         """
         Process a single chunk and return with its index for order preservation.
 
@@ -561,6 +626,7 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             item_list_field: Name of the field in response containing results list
             item_id_field: Name of the ID field to validate matches
             retries: Number of retry attempts for validation failures
+            chat: If True (default), use prompt_dict_chat; if False, use prompt_dict
 
         Returns:
             Tuple of (chunk_index, result) for order preservation
@@ -570,7 +636,8 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             input_vars=input_vars,
             item_list_field=item_list_field,
             item_id_field=item_id_field,
-            retries=retries
+            retries=retries,
+            chat=chat
         )
         return chunk_idx, result
 
@@ -582,7 +649,8 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                                    retries: int = 3,
                                    chunk_size: int = 25,
                                    return_series: bool = False,
-                                   value_field: str = 'output'
+                                   value_field: str = 'output',
+                                   chat: bool = True
                                    ) -> Any:
         """
         Process a DataFrame in chunks asynchronously using concurrent calls to filter_dataframe_chunk.
@@ -600,6 +668,7 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             chunk_size: Number of rows per chunk (default: 25)
             return_series: If True, return pandas Series for direct DataFrame assignment
             value_field: Field name to extract values from when return_series=True
+            chat: If True (default), use prompt_dict_chat; if False, use prompt_dict
 
         Returns:
             If return_series=True: pandas Series with values for DataFrame column assignment
@@ -623,7 +692,8 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                 input_vars=input_vars,
                 item_list_field=item_list_field,
                 item_id_field=item_id_field,
-                retries=retries
+                retries=retries,
+                chat=chat
             )
             for i, chunk in enumerate(chunks)
         ]
@@ -696,7 +766,7 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             input_df: DataFrame to process
             value_field: Field name to extract from results (default: 'output')
             **kwargs: All other arguments passed to filter_dataframe_batch
-                     (item_list_field, item_id_field, retries, chunk_size, etc.)
+                     (item_list_field, item_id_field, retries, chunk_size, chat, etc.)
 
         Returns:
             pandas Series with extracted values, indexed to match input_df

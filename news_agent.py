@@ -125,7 +125,22 @@ def setup_logging(session_id: str = "default", db_path: str = LOGDB) -> logging.
     return logger
 
 
+async def mycreate_task(delay_index: int, coro, delay_seconds: float = 0.1):
+    """
+    Create a task with a staggered delay based on index.
 
+    Args:
+        delay_index: Index used to calculate delay (delay_index * delay_seconds)
+        coro: Coroutine to execute after delay
+        delay_seconds: Base delay in seconds (default: 0.1)
+
+    Returns:
+        Result of the coroutine after the calculated delay
+    """
+    delay = delay_index * delay_seconds
+    if delay > 0:
+        await asyncio.sleep(delay)
+    return await coro
 # tools
 
 class WorkflowStatusTool:
@@ -165,6 +180,9 @@ class WorkflowStatusTool:
 
             if self.logger:
                 self.logger.info("Completed check_workflow_status")
+
+            # Serialize state after checking workflow status
+            state.serialize_to_db("check_workflow_status")
             return result
 
         except Exception as e:
@@ -268,6 +286,8 @@ class StateInspectionTool:
                 f"  Preview: {state.final_newsletter[:200]}..." if len(state.final_newsletter) > 200 else f"  Content: {state.final_newsletter}",
             ])
 
+        # Serialize state after inspecting state
+        state.serialize_to_db("inspect_state")
         return "\n".join(report_lines)
 
     def create_tool(self) -> FunctionTool:
@@ -358,6 +378,8 @@ class GatherUrlsTool:
                     print(f"⚠️  Intervention required: {len(successful_sources)} successful, {len(failed_sources)} failed")
                     print(f"Failed sources: {', '.join(failed_sources)}")
 
+                # Serialize state even in intervention case
+                state.serialize_to_db(step_name)
                 return f"⚠️  Intervention Required! Successfully fetched from {len(successful_sources)} sources but {len(failed_sources)} sources failed.\n\n{intervention_message}"
 
             # Store results in persistent state
@@ -387,6 +409,9 @@ class GatherUrlsTool:
             display(headline_df)
             if self.logger:
                 self.logger.info(f"Completed Step 1: Gathered {len(all_articles)} articles")
+
+            # Serialize state after completing step
+            state.serialize_to_db(step_name)
             return status_msg
 
         except Exception as e:
@@ -495,6 +520,9 @@ class FilterUrlsTool:
             status_msg += f"\n\n📊 Results stored in persistent state. Current step: {state.get_current_step()}"
             if self.logger:
                 self.logger.info(f"Completed Step 2: Filtered to {ai_related_count} AI-related articles")
+
+            # Serialize state after completing step
+            state.serialize_to_db(step_name)
             return status_msg
 
         except Exception as e:
@@ -667,6 +695,9 @@ class DownloadArticlesTool:
             status_msg += f"\n🔗 Content stored in persistent state."
             if self.logger:
                 self.logger.info(f"Completed Step 3: Downloaded {successful_downloads} articles")
+
+            # Serialize state after completing step
+            state.serialize_to_db(step_name)
             return status_msg
 
         except Exception as e:
@@ -935,6 +966,9 @@ class ExtractSummariesTool:
             if summarization_errors > 0:
                 status_msg += f"\n⚠️  Summarization errors: {summarization_errors}"
             status_msg += f"\n💾 Summaries stored in headline DataFrame."
+
+            # Serialize state after completing step
+            state.serialize_to_db(step_name)
             return status_msg
 
         except Exception as e:
@@ -1062,7 +1096,7 @@ class ClusterByTopicTool:
 
         # Create all canonical topic classification tasks
         canonical_tasks = [
-            self._classify_canonical_topic(articles_with_summaries, topic)
+            self._classify_canonical_topic(self,articles_with_summaries, topic)
             for topic in CANONICAL_TOPICS
         ]
 
@@ -1072,7 +1106,13 @@ class ClusterByTopicTool:
         canonical_topics_lists = [list() for _ in range(len(articles_with_summaries))]
 
         # Process canonical results
-        for topic, relevance_list in canonical_results:
+        for result in canonical_results:
+            if isinstance(result, Exception):
+                if self.logger:
+                    self.logger.warning(f"Topic classification failed: {result}")
+                continue
+
+            topic, relevance_list = result
             if isinstance(relevance_list, list):
                 for idx, is_relevant in enumerate(relevance_list):
                     if is_relevant:
@@ -1190,14 +1230,9 @@ class ClusterByTopicTool:
 
             # headline_df = await self._cleanup_topics(headline_df)
 
-            # if self.verbose and self.logger:
-            #     final_topics_count = headline_df['topics_list'].apply(lambda x: len(x) if isinstance(x, list) else 0).sum()
-            #     self.logger.info(f"Topic cleanup complete: {final_topics_count} final topics selected")
-
-            # # Update state.headline_data with final cleaned topics
-            # for idx, row in headline_df.iterrows():
-            #     if idx < len(state.headline_data):
-            #         state.headline_data[idx]['topics_list'] = row.get('topics_list', [])
+            if self.verbose and self.logger:
+                # final_topics_count = headline_df['topics_list'].apply(lambda x: len(x) if isinstance(x, list) else 0).sum()
+                self.logger.info(f"Topic cleanup complete: {final_topics_count} final topics selected")
 
             # # Step 2: Create clusters based on cleaned topics
             # # Collect all topics from articles with summaries
@@ -1286,7 +1321,6 @@ class ClusterByTopicTool:
             # total_articles = sum(len(articles) for articles in state.clusters.values())
             # cluster_coherence_score = 0.84  # Mock coherence score
 
-
             # Complete the step
             state.headline_data = headline_df.to_dict('records')
             state.complete_step(step_name)
@@ -1303,6 +1337,9 @@ class ClusterByTopicTool:
             status_msg += f"\n🏛️ Canonical topic matches: {total_canonical_matches} across {len(CANONICAL_TOPICS)} canonical topics"
             status_msg += f"\n🏷️ Topics: {', '.join(state.clusters.keys())}"
             status_msg += f"\n💾 Clusters, common topics, and canonical classifications stored in persistent state."
+
+            # Serialize state after completing step
+            state.serialize_to_db(step_name)
             return status_msg
 
         except Exception as e:
@@ -1417,6 +1454,9 @@ class RateArticlesTool:
             status_msg = f"✅ Step 6 completed successfully! Rated {articles_rated} articles with average rating {avg_rating:.1f}/10."
             status_msg += f"\n⭐ High quality articles (≥7.0): {high_quality_count}"
             status_msg += f"\n💾 Ratings stored in persistent state."
+
+            # Serialize state after completing step
+            state.serialize_to_db(step_name)
             return status_msg
 
         except Exception as e:
@@ -1538,6 +1578,9 @@ class SelectSectionsTool:
             status_msg = f"✅ Step 7 completed successfully! Organized content into {len(state.newsletter_sections)} sections with {articles_assigned} articles assigned."
             status_msg += f"\n📑 Sections: {', '.join(state.newsletter_sections.keys())}"
             status_msg += f"\n💾 Section plan stored in persistent state."
+
+            # Serialize state after completing step
+            state.serialize_to_db(step_name)
             return status_msg
 
         except Exception as e:
@@ -1669,6 +1712,9 @@ class DraftSectionsTool:
             status_msg = f"✅ Step 8 completed successfully! Drafted {sections_drafted} sections with {total_words} total words."
             status_msg += f"\n📝 Average words per section: {avg_words_per_section:.0f}"
             status_msg += f"\n💾 Section content stored in persistent state."
+
+            # Serialize state after completing step
+            state.serialize_to_db(step_name)
             return status_msg
 
         except Exception as e:
@@ -1781,6 +1827,9 @@ class FinalizeNewsletterTool:
             status_msg += f"\n⭐ Quality score: {final_quality_score:.1f}/10"
             status_msg += f"\n📰 Complete newsletter stored in persistent state"
             status_msg += f"\n✅ Workflow complete! All 9 steps finished successfully."
+
+            # Serialize state after completing step
+            state.serialize_to_db(step_name)
             return status_msg
 
         except Exception as e:
@@ -1808,7 +1857,9 @@ class NewsletterAgent(Agent[NewsletterAgentState]):
                  session_id: str = "newsletter_agent",
                  state: Optional[NewsletterAgentState] = None,
                  verbose: bool = False,
-                 logger: logging.Logger = None):
+                 logger: logging.Logger = None,
+                 timeout: float = 300.0,
+                 **kwargs):
         """
         Initialize the NewsletterAgent with persistent state
 
@@ -1817,7 +1868,15 @@ class NewsletterAgent(Agent[NewsletterAgentState]):
             state: Optional NewsletterAgentState to use. If None, creates new or loads from session
             verbose: Enable verbose logging
             logger: Optional logger instance (creates one if None)
+            timeout: Timeout in seconds for OpenAI API calls (default: 300.0)
         """
+        # Set up OpenAI client with custom timeout before initializing parent
+        api_key = os.getenv("OPENAI_API_KEY")
+        if api_key:
+            set_default_openai_client(AsyncOpenAI(
+                api_key=api_key,
+                timeout=timeout
+            ))
         self.session = SQLiteSession(session_id, "newsletter_agent.db")
         self.verbose = verbose
         self.logger = logger or setup_logging(session_id, LOGDB)
@@ -1828,28 +1887,33 @@ class NewsletterAgent(Agent[NewsletterAgentState]):
             if self.verbose:
                 self.logger.info(f"Using provided state with {len(state.headline_data)} articles")
         else:
+            self.logger.info(f"Trying to load state from existing session")
+
             # Try to load existing state from session
             try:
                 # The OpenAI Agents SDK Runner.run() saves context to session automatically
                 # We need to check if there's existing context for this session
                 if hasattr(self.session, 'get_context'):
+                    self.logger.info(f"Using existing session get_context")
                     existing_context = self.session.get_context()
                 elif hasattr(self.session, 'load_context'):
+                    self.logger.info(f"Using existing session load_context")
                     existing_context = self.session.load_context()
                 else:
-                    # Fallback: try to access session storage directly
+                    self.logger.info(f"fallback to getattr")
                     existing_context = getattr(self.session, '_context', None)
-                
+
                 if existing_context and isinstance(existing_context, NewsletterAgentState):
                     self.state = existing_context
                     if self.verbose:
                         self.logger.info(f"Restored state from session '{session_id}' with {len(self.state.headline_data)} articles at step {self.state.get_current_step()}")
                 else:
+                    self.logger.info(f"No existing context found, create new state")
                     # No existing context found, create new state
                     self.state = NewsletterAgentState()
                     if self.verbose:
                         self.logger.info(f"Created new NewsletterAgentState for session '{session_id}' (no existing context found)")
-                        
+
             except Exception as e:
                 # Fallback to new state if session loading fails
                 self.state = NewsletterAgentState()
@@ -1920,7 +1984,8 @@ Remember: Your state is persistent. You can safely resume from any point. Never 
                 SelectSectionsTool(self.verbose, self.logger).create_tool(),
                 DraftSectionsTool(self.verbose, self.logger).create_tool(),
                 FinalizeNewsletterTool(self.verbose, self.logger).create_tool(),
-            ]
+            ],
+            **kwargs
         )
 
         # Create tool dictionary
@@ -1932,7 +1997,7 @@ Remember: Your state is persistent. You can safely resume from any point. Never 
 
     def get_current_state_summary(self) -> str:
         """Get a summary of the current state for debugging and monitoring
-        
+
         Returns:
             Formatted string with key state information including session ID,
             current step, progress percentage, and data counts
@@ -1946,31 +2011,31 @@ Remember: Your state is persistent. You can safely resume from any point. Never 
                 f"Progress: {self.state.get_progress_percentage():.1f}%",
                 f"Workflow Complete: {self.state.all_complete()}",
             ]
-            
+
             # Add error info if present
             if self.state.has_errors():
                 summary_lines.append(f"⚠️  Has Errors: {self.state.workflow_status_message}")
-            
+
             # Data summary
             summary_lines.extend([
                 "",
                 "DATA SUMMARY:",
                 f"  Total articles: {len(self.state.headline_data)}",
             ])
-            
+
             if self.state.headline_data:
                 ai_related = sum(1 for a in self.state.headline_data if a.get('isAI') is True)
                 with_summaries = sum(1 for a in self.state.headline_data if a.get('summary'))
                 with_topics = sum(1 for a in self.state.headline_data if a.get('extracted_topics') or a.get('canonical_topics'))
                 sources = len(set(a.get('source', 'Unknown') for a in self.state.headline_data))
-                
+
                 summary_lines.extend([
                     f"  AI-related: {ai_related}",
                     f"  With summaries: {with_summaries}",
                     f"  With topics: {with_topics}",
                     f"  Sources: {sources}",
                 ])
-            
+
             # Processing results
             summary_lines.extend([
                 "",
@@ -1979,7 +2044,7 @@ Remember: Your state is persistent. You can safely resume from any point. Never 
                 f"  Newsletter sections: {len(self.state.newsletter_sections)}",
                 f"  Final newsletter: {'Generated' if self.state.final_newsletter else 'Not created'}",
             ])
-            
+
             # Common topics if available
             if hasattr(self.state, 'common_topics') and self.state.common_topics:
                 summary_lines.extend([
@@ -1987,9 +2052,9 @@ Remember: Your state is persistent. You can safely resume from any point. Never 
                     f"COMMON TOPICS ({len(self.state.common_topics)}):",
                     f"  {', '.join(self.state.common_topics[:5])}" + ("..." if len(self.state.common_topics) > 5 else "")
                 ])
-            
+
             return "\n".join(summary_lines)
-            
+
         except Exception as e:
             return f"Error generating state summary: {str(e)}"
 
@@ -2042,11 +2107,8 @@ async def main():
     if not api_key:
         raise ValueError("OPENAI_API_KEY environment variable not set")
 
-    # Set up OpenAI client for the agents SDK
-    set_default_openai_client(AsyncOpenAI(api_key=api_key))
-
-    # Create agent with persistent state
-    agent = NewsletterAgent(session_id="test_newsletter", verbose=True)
+    # Create agent with persistent state (timeout set in __init__)
+    agent = NewsletterAgent(session_id="test_newsletter", verbose=True, timeout=300.0)
 
     # User prompt to run complete workflow
     user_prompt = "Run all the workflow steps in order and create the newsletter"
