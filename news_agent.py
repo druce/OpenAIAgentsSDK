@@ -128,6 +128,8 @@ def setup_logging(session_id: str = "default", db_path: str = LOGDB) -> logging.
 async def mycreate_task(delay_index: int, coro, delay_seconds: float = 0.1):
     """
     Create a task with a staggered delay based on index.
+    was seeing some timeout errors, so added this to stagger the tasks
+    not currently using it, wraps tasks in a short delay to stagger them
 
     Args:
         delay_index: Index used to calculate delay (delay_index * delay_seconds)
@@ -141,6 +143,7 @@ async def mycreate_task(delay_index: int, coro, delay_seconds: float = 0.1):
     if delay > 0:
         await asyncio.sleep(delay)
     return await coro
+
 # tools
 
 class WorkflowStatusTool:
@@ -1096,7 +1099,7 @@ class ClusterByTopicTool:
 
         # Create all canonical topic classification tasks
         canonical_tasks = [
-            self._classify_canonical_topic(self,articles_with_summaries, topic)
+            self._classify_canonical_topic(articles_with_summaries, topic)
             for topic in CANONICAL_TOPICS
         ]
 
@@ -1143,13 +1146,13 @@ class ClusterByTopicTool:
         if self.verbose and self.logger:
             self.logger.info(f"Starting topic cleanup for {len(headline_df)} articles")
 
-        # Combine all topic sources into a single column
+        # Combine all topic sources into a single column removing duplicates
         headline_df['all_topics'] = headline_df.apply(
-            lambda row: (
+            lambda row: list(set(
                 (row.get('tags', []) if isinstance(row.get('tags'), list) else []) +
                 (row.get('extracted_topics', []) if isinstance(row.get('extracted_topics'), list) else []) +
                 (row.get('canonical_topics', []) if isinstance(row.get('canonical_topics'), list) else [])
-            ), axis=1
+            )), axis=1
         )
 
         # Create LLMagent for topic cleanup
@@ -1169,6 +1172,12 @@ class ClusterByTopicTool:
             item_list_field='results_list',
             item_id_field='id'
         )
+
+        # re-index
+        headline_df = headline_df.sort_values('id') \
+            .reset_index() \
+            .drop(columns=['id']) \
+            .rename(columns={'index': 'id'})
 
         return headline_df
 
@@ -1230,9 +1239,9 @@ class ClusterByTopicTool:
 
             # headline_df = await self._cleanup_topics(headline_df)
 
-            if self.verbose and self.logger:
+            # if self.verbose and self.logger:
                 # final_topics_count = headline_df['topics_list'].apply(lambda x: len(x) if isinstance(x, list) else 0).sum()
-                self.logger.info(f"Topic cleanup complete: {final_topics_count} final topics selected")
+                # self.logger.info(f"Topic cleanup complete: {final_topics_count} final topics selected")
 
             # # Step 2: Create clusters based on cleaned topics
             # # Collect all topics from articles with summaries
@@ -1325,18 +1334,18 @@ class ClusterByTopicTool:
             state.headline_data = headline_df.to_dict('records')
             state.complete_step(step_name)
 
-            if self.verbose:
-                print(f"✅ Completed Step 5: Created {total_clusters} topic clusters")
+            # if self.verbose:
+            #     print(f"✅ Completed Step 5: Created {total_clusters} topic clusters")
 
             # Calculate canonical topic stats
-            total_canonical_matches = sum(len(article.get('canonical_topics', [])) for article in state.headline_data)
+            # total_canonical_matches = sum(len(article.get('canonical_topics', [])) for article in state.headline_data)
 
-            status_msg = f"✅ Step 5 completed successfully! Organized {total_articles} articles into {total_clusters} topic clusters."
-            status_msg += f"\n📊 Cluster coherence score: {cluster_coherence_score:.1%}"
-            status_msg += f"\n🔄 Frequent topics found: {len(state.common_topics)} (top 50 topics appearing 3+ times)"
-            status_msg += f"\n🏛️ Canonical topic matches: {total_canonical_matches} across {len(CANONICAL_TOPICS)} canonical topics"
-            status_msg += f"\n🏷️ Topics: {', '.join(state.clusters.keys())}"
-            status_msg += f"\n💾 Clusters, common topics, and canonical classifications stored in persistent state."
+            status_msg = f"✅ Step 5 completed successfully! Organized {len(headline_df)} articles into topic clusters."
+            # status_msg += f"\n📊 Cluster coherence score: {cluster_coherence_score:.1%}"
+            # status_msg += f"\n🔄 Frequent topics found: {len(state.common_topics)} (top 50 topics appearing 3+ times)"
+            # status_msg += f"\n🏛️ Canonical topic matches: {total_canonical_matches} across {len(CANONICAL_TOPICS)} canonical topics"
+            # status_msg += f"\n🏷️ Topics: {', '.join(state.clusters.keys())}"
+            # status_msg += f"\n💾 Clusters, common topics, and canonical classifications stored in persistent state."
 
             # Serialize state after completing step
             state.serialize_to_db(step_name)
