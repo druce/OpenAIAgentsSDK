@@ -19,8 +19,15 @@ import dotenv
 import random
 from datetime import datetime, timedelta
 from pathlib import Path
-import pandas as pd
 from collections import Counter
+import sqlite3
+
+import shutil
+import pickle
+import numpy as np
+import pandas as pd
+from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
+import hdbscan
 
 from IPython.display import HTML, Image, Markdown, display
 
@@ -38,11 +45,12 @@ from fetch import Fetcher
 from scrape import scrape_urls_concurrent, normalize_html
 from llm import LLMagent, LangfuseClient
 from dedupe_by_cosine_similarity import process_dataframe_with_filtering
-from config import TEXT_DIR, CANONICAL_TOPICS
+from config import CANONICAL_TOPICS, DOWNLOAD_DIR, PAGES_DIR, TEXT_DIR, NEWSAGENTDB, LOGDB
 from bs4 import BeautifulSoup
 
+from db import Url
+
 # Global constants
-LOGDB = 'newsagent_logs.db'
 
 # Pydantic models for structured output
 class ArticleSummary(BaseModel):
@@ -205,8 +213,6 @@ class WorkflowStatusTool:
             },
             on_invoke_tool=self._check_workflow_status
         )
-
-
 class StateInspectionTool:
     """Tool to inspect detailed persistent state data"""
 
@@ -306,8 +312,6 @@ class StateInspectionTool:
             on_invoke_tool=self._inspect_state
         )
 
-
-
 class GatherUrlsTool:
     """Tool for Step 1: Gather URLs from news sources defined in sources.yaml using Fetcher
     - store headlines in persistent headline_data
@@ -316,6 +320,33 @@ class GatherUrlsTool:
     def __init__(self, verbose: bool = False, logger: logging.Logger = None):
         self.verbose = verbose
         self.logger = logger
+
+    def clean_download_dir(self, download_dir: str):
+        """Clean up download directory"""
+        if os.path.exists(download_dir):
+            if self.verbose:
+                print(f"  Cleaning up download directory: {download_dir}")
+            if self.logger:
+                self.logger.info(f"Cleaning download directory: {download_dir}")
+
+            # Remove all files and subdirectories in download_dir
+            try:
+                for item in os.listdir(download_dir):
+                    item_path = os.path.join(download_dir, item)
+                    if os.path.isfile(item_path):
+                        os.remove(item_path)
+                    elif os.path.isdir(item_path):
+                        shutil.rmtree(item_path)
+
+                if self.verbose:
+                    print(f"  Successfully cleaned download directory")
+                if self.logger:
+                    self.logger.info("Successfully cleaned download directory")
+            except Exception as cleanup_error:
+                if self.logger:
+                    self.logger.warning(f"Failed to clean download directory: {cleanup_error}")
+                if self.verbose:
+                    print(f"  Failed to clean download directory: {cleanup_error}")
 
     async def _fetch_urls(self, ctx, args: str) -> str:
         """Execute Step 1: Gather URLs using persistent state"""
@@ -338,9 +369,18 @@ class GatherUrlsTool:
             # Start the step using unified status system
             state.start_step(step_name)
 
-            # Use real RSS fetching from sources.yaml
+            # Clean up download directory if do_download flag is set
+            if state.do_download:
+                state.clean_download_dir(DOWNLOAD_DIR)
+                state.clean_download_dir(TEXT_DIR)
+                state.clean_download_dir(PAGES_DIR)
+
+            # Use RSS fetching from sources.yaml
+            sources_config = None
             async with Fetcher() as f:
                 sources_results = await f.fetch_all(do_download=state.do_download)
+                # Capture sources configuration for later reference (e.g., failed source URLs)
+                sources_config = dict(getattr(f, 'sources', {}) or {})
 
             # Process results and store in persistent state
             successful_sources = []
@@ -355,37 +395,40 @@ class GatherUrlsTool:
                 else:
                     failed_sources.append(result['source'])
 
-            # Check if we need user intervention (significant failures)
+            # Check if we need user intervention (something failed)
             total_sources = len(successful_sources) + len(failed_sources)
             success_rate = len(successful_sources) / total_sources if total_sources > 0 else 0
 
-            # Define intervention scenarios
-            requires_intervention = (
-                success_rate < 0.7 or  # Less than 70% success rate
-                any(source in ['Bloomberg', 'WSJ', 'Wall Street Journal', 'Reuters'] for source in failed_sources)
-            )
+            # Define intervention scenarios (currently unused but kept for clarity)
+            requires_intervention = success_rate < 1.0
 
-            if requires_intervention and failed_sources:
+            if failed_sources:
                 # Set error state with intervention message
                 intervention_message = f"Partial failure detected. {len(failed_sources)} sources failed: {', '.join(failed_sources)}. "
-                if any('Bloomberg' in source or 'WSJ' in source for source in failed_sources):
-                    intervention_message += "These sources typically require manual download due to access restrictions. "
-                intervention_message += f"Download HTML files manually to download/sources/ directory and resume with do_download=False."
+
+                # show urls for failed sources from state.sources
+                failed_source_urls = []
+                if state.sources:
+                    for src in failed_sources:
+                        cfg = state.sources.get(src) or {}
+                        url = cfg.get('rss') or cfg.get('url') or ''
+                        if url:
+                            failed_source_urls.append(f"{src}: {url}")
+                if failed_source_urls:
+                    intervention_message += f"Failed source URLs: {', '.join(failed_source_urls)}. "
+                intervention_message += f"Download HTML files manually to download/sources/ directory, clear error and restart with do_download=False."
 
                 state.error_step(step_name, intervention_message)
-
-                # Store partial results anyway
-                state.headline_data = all_articles
 
                 if self.verbose:
                     print(f"⚠️  Intervention required: {len(successful_sources)} successful, {len(failed_sources)} failed")
                     print(f"Failed sources: {', '.join(failed_sources)}")
+                    if failed_source_urls:
+                        print(f"Failed source URLs: {', '.join(failed_source_urls)}")
 
-                # Serialize state even in intervention case
-                state.serialize_to_db(step_name)
                 return f"⚠️  Intervention Required! Successfully fetched from {len(successful_sources)} sources but {len(failed_sources)} sources failed.\n\n{intervention_message}"
 
-            # Store results in persistent state
+            # Successfully fetched URLs, store results in persistent state
             headline_df = pd.DataFrame(all_articles)
             display(headline_df[["source", "url"]].groupby("source") \
                 .count() \
@@ -409,7 +452,15 @@ class GatherUrlsTool:
 
             status_msg += f"\n\n📊 Articles stored in persistent state: {len(state.headline_data)}"
             headline_df = pd.DataFrame(state.headline_data)
+
+            with sqlite3.connect(NEWSAGENTDB) as conn:
+                db.Url.create_table(conn)
+                for row in headline_df.itertuples():
+                    news_url = db.Url(row.url, '', row.title, row.isAI, datetime.now())
+                    news_url.insert(conn)
+
             display(headline_df)
+
             if self.logger:
                 self.logger.info(f"Completed Step 1: Gathered {len(all_articles)} articles")
 
@@ -490,6 +541,74 @@ class FilterUrlsTool:
 
             # Prepare headlines for batch classification
             headline_df = pd.DataFrame(state.headline_data)
+
+            # Filter out URLs that have already been seen (URL deduplication)
+            import sqlite3
+            original_count = len(headline_df)
+
+            try:
+                conn = sqlite3.connect(state.db_path)
+                Url.create_table(conn)  # Ensure table exists
+
+                # Check each URL against the urls table
+                new_urls_mask = []
+                for _, row in headline_df.iterrows():
+                    url_to_check = row.get('url', '') or row.get('orig_url', '')
+                    if url_to_check:
+                        existing_url = Url.get(conn, url_to_check)
+
+                        if existing_url is None:
+                            # URL not found in database - it's new
+                            new_urls_mask.append(True)
+                        elif state.process_since is not None:
+                            # URL exists, but check if it was seen before process_since
+                            if existing_url.created_at is None:
+                                # No created_at timestamp - treat as seen before process_since
+                                new_urls_mask.append(False)
+                            elif existing_url.created_at < state.process_since:
+                                # URL was seen before process_since cutoff - treat as duplicate
+                                new_urls_mask.append(False)
+                            else:
+                                # URL was seen after process_since - treat as new
+                                new_urls_mask.append(True)
+                        else:
+                            # URL exists and no process_since set - treat as duplicate
+                            new_urls_mask.append(False)
+                    else:
+                        new_urls_mask.append(True)  # Keep rows without URLs
+
+                conn.close()
+
+                # Filter DataFrame to only new URLs
+                headline_df = headline_df[new_urls_mask].copy()
+                duplicate_count = original_count - len(headline_df)
+
+                if duplicate_count > 0:
+                    if self.verbose:
+                        if state.process_since is not None:
+                            print(f"🔄 Filtered out {duplicate_count} URLs seen before {state.process_since.isoformat()}, processing {len(headline_df)} new URLs")
+                        else:
+                            print(f"🔄 Filtered out {duplicate_count} duplicate URLs, processing {len(headline_df)} new URLs")
+                    if self.logger:
+                        if state.process_since is not None:
+                            self.logger.info(f"URL deduplication with process_since: {duplicate_count} URLs filtered (seen before {state.process_since.isoformat()}), {len(headline_df)} new URLs remain")
+                        else:
+                            self.logger.info(f"URL deduplication: {duplicate_count} duplicates filtered, {len(headline_df)} new URLs remain")
+
+                # If no new URLs remain, complete step early
+                if headline_df.empty:
+                    state.complete_step(step_name)
+                    if state.process_since is not None:
+                        return f"✅ Step 2 completed! All {original_count} URLs were seen before {state.process_since.isoformat()} - no new content to process."
+                    else:
+                        return f"✅ Step 2 completed! All {original_count} URLs were duplicates - no new content to process."
+
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(f"URL deduplication failed: {e}. Proceeding without deduplication.")
+                if self.verbose:
+                    print(f"⚠️ URL deduplication failed: {e}. Proceeding with all URLs.")
+
             display(headline_df)
             filter_system_prompt, filter_user_prompt, model = \
                 LangfuseClient().get_prompt("newsagent/filter_urls")
@@ -515,14 +634,26 @@ class FilterUrlsTool:
 
             ai_related_count = sum(1 for article in state.headline_data if article.get('isAI') is True)
             total_count = len(state.headline_data)
+            duplicate_count = original_count - total_count if 'original_count' in locals() else 0
 
             if self.verbose:
-                print(f"✅ Completed Step 2: Filtered to {ai_related_count} AI-related headlines from {total_articles} total")
+                if duplicate_count > 0:
+                    print(f"✅ Completed Step 2: {duplicate_count} duplicates removed, {ai_related_count} AI-related from {total_count} processed ({total_articles} original)")
+                else:
+                    print(f"✅ Completed Step 2: Filtered to {ai_related_count} AI-related headlines from {total_articles} total")
 
-            status_msg = f"✅ Step 2 completed successfully! Filtered {total_articles} headlines to {ai_related_count} AI-related articles."
+            # Build status message with deduplication stats
+            if duplicate_count > 0:
+                status_msg = f"✅ Step 2 completed successfully! Removed {duplicate_count} duplicate URLs, classified {total_count} new articles, found {ai_related_count} AI-related."
+            else:
+                status_msg = f"✅ Step 2 completed successfully! Filtered {total_articles} headlines to {ai_related_count} AI-related articles."
             status_msg += f"\n\n📊 Results stored in persistent state. Current step: {state.get_current_step()}"
+
             if self.logger:
-                self.logger.info(f"Completed Step 2: Filtered to {ai_related_count} AI-related articles")
+                log_msg = f"Completed Step 2: {ai_related_count} AI-related articles"
+                if duplicate_count > 0:
+                    log_msg += f", {duplicate_count} duplicates removed"
+                self.logger.info(log_msg)
 
             # Serialize state after completing step
             state.serialize_to_db(step_name)
@@ -1010,6 +1141,87 @@ class ClusterByTopicTool:
         self.verbose = verbose
         self.logger = logger
 
+    def create_extended_summary(row):
+        parts = []
+
+        # Add title if present
+        if 'title' in row and row['title']:
+            parts.append(str(row['title']).strip())
+
+        # Add description if present
+        if 'description' in row and row['description']:
+            parts.append(str(row['description']).strip())
+
+        # Add topics if present (join with commas)
+        if 'topics' in row and row['topics']:
+            if isinstance(row['topics'], list):
+                topics_str = ", ".join(str(topic).strip() for topic in row['topics'] if topic)
+            else:
+                topics_str = str(row['topics']).strip()
+            if topics_str:
+                parts.append(topics_str)
+
+        # Add summary if present
+        if pd.notna(row.get('summary')) and row.get('summary'):
+            parts.append(str(row['summary']).strip())
+
+        return "\n\n".join(parts)
+
+
+    async def _get_embeddings_df(self, headline_data: pd.DataFrame, embedding_model: str = "text-embedding-3-large") -> pd.DataFrame:
+        """
+        Get embeddings for article summaries and return as DataFrame.
+
+        Args:
+            headline_data: DataFrame with articles containing summary column
+            embedding_model: OpenAI embedding model to use
+
+        Returns:
+            DataFrame with embeddings for each extended summary
+        """
+        from openai import OpenAI
+        from llm import paginate_df_async
+
+        if self.verbose and self.logger:
+            self.logger.info(f"Getting embeddings for {len(headline_data)} article summaries using {embedding_model}")
+
+        # Create extended_summary column by concatenating available fields
+        headline_data_copy = headline_data.copy()
+
+        headline_data_copy['extended_summary'] = headline_data_copy.apply(create_extended_summary, axis=1)
+
+        # Filter to articles with non-empty extended summaries
+        articles_with_summaries = headline_data_copy[
+            (headline_data_copy['extended_summary'].notna()) &
+            (headline_data_copy['extended_summary'] != '')
+        ].copy()
+
+        if articles_with_summaries.empty:
+            if self.logger:
+                self.logger.warning("No articles with extended summaries found for embedding")
+            return pd.DataFrame()
+
+        all_embeddings = []
+        client = OpenAI()
+
+        # Use paginate_df_async similar to dedupe_by_cosine_similarity.py
+        async for batch_df in paginate_df_async(articles_with_summaries, 25):
+            text_batch = batch_df["extended_summary"].to_list()
+            response = client.embeddings.create(input=text_batch, model=embedding_model)
+            batch_embeddings = [item.embedding for item in response.data]
+            all_embeddings.extend(batch_embeddings)
+
+        # Create DataFrame with embeddings, preserving original index
+        embedding_df = pd.DataFrame(
+            all_embeddings,
+            index=articles_with_summaries.index
+        )
+
+        if self.verbose and self.logger:
+            self.logger.info(f"Successfully generated {len(embedding_df)} embeddings with {len(embedding_df.columns)} dimensions")
+
+        return embedding_df
+
     async def _free_form_extraction(self, articles_with_summaries: pd.DataFrame) -> pd.DataFrame:
             """Extract topics from article summaries using AI"""
             # Step 1: Extract topics from summaries using AI
@@ -1173,12 +1385,6 @@ class ClusterByTopicTool:
             item_id_field='id'
         )
 
-        # re-index
-        headline_df = headline_df.sort_values('id') \
-            .reset_index() \
-            .drop(columns=['id']) \
-            .rename(columns={'index': 'id'})
-
         return headline_df
 
 
@@ -1224,26 +1430,7 @@ class ClusterByTopicTool:
 
             articles_with_summaries = await self._free_form_extraction(articles_with_summaries)
 
-            # Update state.headline_data with extracted topics
-            headline_df['extracted_topics'] = articles_with_summaries['extracted_topics']
-
-            articles_with_summaries = await self._canonical_topic_extraction(articles_with_summaries)
-
-            # Update state.headline_data with canonical topics
-            headline_df['canonical_topics'] = articles_with_summaries['canonical_topics']
-
-
-            # # Step 1.75: Clean up and filter combined topics
-            # if self.verbose and self.logger:
-            #     self.logger.info("Starting topic cleanup and filtering")
-
-            # headline_df = await self._cleanup_topics(headline_df)
-
-            # if self.verbose and self.logger:
-                # final_topics_count = headline_df['topics_list'].apply(lambda x: len(x) if isinstance(x, list) else 0).sum()
-                # self.logger.info(f"Topic cleanup complete: {final_topics_count} final topics selected")
-
-            # # Step 2: Create clusters based on cleaned topics
+            # here we could make a list of all topics and grab frequently mentioned ones and add to canonical topics
             # # Collect all topics from articles with summaries
             # all_topics = []
             # for idx, row in headline_df.iterrows():
@@ -1258,13 +1445,6 @@ class ClusterByTopicTool:
             #     topic for topic, count in topic_counter.most_common()
             #     if count >= 3
             # ][:50]
-
-            # # All unique topics that appear at least once
-            # unique_topics = list(topic_counter.keys())
-
-            # # Store frequent topics as common topics in state for future use
-            # state.common_topics = frequent_topics
-
             # if self.verbose and self.logger:
             #     total_frequent_mentions = sum(topic_counter[topic] for topic in frequent_topics)
             #     self.logger.info(f"Found {len(frequent_topics)} frequently mentioned topics (3+ times) from {len(all_topics)} total topic instances")
@@ -1276,6 +1456,19 @@ class ClusterByTopicTool:
             #         self.logger.info(f"Top frequent topics: {top_topics_with_counts}")
             #         if len(frequent_topics) > 10:
             #             self.logger.info(f"... and {len(frequent_topics) - 10} more")
+
+
+            articles_with_summaries = await self._canonical_topic_extraction(articles_with_summaries)
+
+            articles_with_summaries = await self._cleanup_topics(articles_with_summaries)
+
+            headline_df['topics'] = articles_with_summaries['topics']
+            headline_df=headline_df.drop(columns=['tags'])
+            # re-index
+            headline_df = headline_df.sort_values('id') \
+                .reset_index() \
+                .drop(columns=['id']) \
+                .rename(columns={'index': 'id'})
 
             # # Use frequent topics for clustering, plus remaining unique topics
             # cluster_topics = frequent_topics + [topic for topic in unique_topics if topic not in frequent_topics]

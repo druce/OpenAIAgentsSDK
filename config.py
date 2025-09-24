@@ -29,6 +29,9 @@ PAGES_DIR = os.path.join(DOWNLOAD_ROOT, 'html')
 TEXT_DIR = os.path.join(DOWNLOAD_ROOT, 'text')
 SCREENSHOT_DIR = os.path.join(DOWNLOAD_ROOT, 'screenshots')
 
+NEWSAGENTDB = 'newsletter_agent.db'
+LOGDB = 'newsagent_logs.db'
+
 DATA_ROOT = "data"
 CHROMA_DB_DIR = os.path.join(DATA_ROOT, "chromadb")
 CHROMA_DB_NAME = "chroma_articles"

@@ -35,6 +35,8 @@ aiofiles
 pillow
 matplotlib
 
+optuna
+
 feedparser
 aiohttp
 newsapi-python
