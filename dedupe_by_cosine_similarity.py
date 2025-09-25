@@ -1,3 +1,8 @@
+"""
+Dedupe by cosine similarity
+If a popular article AP or Reuters article is syndicated by multiple sources,
+near-identical text will show up as different URLs
+"""
 import pandas as pd
 import numpy as np
 import pickle
@@ -12,6 +17,8 @@ from typing import List, Any, Tuple, Dict, Optional
 from scrape import trunc_tokens
 # from config import MAX_TOKENS
 MAX_TOKENS = 8192
+SIMILARITY_THRESHOLD = 0.925
+
 from llm import paginate_df_async
 
 def read_and_truncate_files(text_paths: List[str]) -> List[str]:
@@ -124,7 +131,7 @@ def filter_similar_rows(df: pd.DataFrame, high_similarity_pairs: List[Tuple]) ->
     return filtered_df
 
 
-async def process_dataframe_with_filtering(df: pd.DataFrame, similarity_threshold: float = 0.925,
+async def process_dataframe_with_filtering(df: pd.DataFrame, similarity_threshold: float = SIMILARITY_THRESHOLD,
                                             embedding_model: str = 'text-embedding-3-large') -> pd.DataFrame:
 
     print(f"Starting with {len(df)} rows...")
@@ -198,25 +205,25 @@ def nearest_neighbor_sort(embedding_df: pd.DataFrame) -> List[int]:
     """Sort embeddings using nearest neighbor greedy approach"""
     embeddings = embedding_df.values
     n = len(embeddings)
-    
+
     if n <= 1:
         return list(range(n))
-    
+
     # Start with first point
     unvisited = set(range(1, n))
     path = [0]
     current = 0
-    
+
     while unvisited:
         # Find nearest unvisited point
         distances = [np.linalg.norm(embeddings[current] - embeddings[i]) for i in unvisited]
         nearest_idx = min(range(len(distances)), key=distances.__getitem__)
         nearest = list(unvisited)[nearest_idx]
-        
+
         path.append(nearest)
         unvisited.remove(nearest)
         current = nearest
-    
+
     return path
 
 def calculate_clustering_metrics(embeddings_array: np.ndarray, labels: np.ndarray, clusterer: Optional[Any] = None) -> Dict[str, Any]:
@@ -314,29 +321,29 @@ def print_clustering_summary(metrics: Dict[str, Any]):
     print(f"\n=== Clustering Summary ===")
     print(f"Number of clusters: {metrics.get('n_clusters', 'N/A')}")
     print(f"Noise points: {metrics.get('n_noise_points', 'N/A')} ({metrics.get('noise_ratio', 0):.1%})")
-    
+
     if 'avg_cluster_size' in metrics:
         print(f"Average cluster size: {metrics['avg_cluster_size']:.1f}")
         print(f"Cluster size range: {metrics.get('min_cluster_size', 'N/A')} - {metrics.get('max_cluster_size', 'N/A')}")
-    
+
     if 'silhouette_score' in metrics:
         print(f"Silhouette score: {metrics['silhouette_score']:.3f}")
-    
+
     if 'composite_score' in metrics:
         print(f"Composite score: {metrics['composite_score']:.3f}")
 
-def cluster_summaries(aidf: pd.DataFrame, data_root: str = ".", 
+def cluster_summaries(aidf: pd.DataFrame, data_root: str = ".",
                      embedding_model: str = 'text-embedding-3-large',
                      logger: Optional[logging.Logger] = None) -> pd.DataFrame:
     """
     Cluster news summaries using OpenAI embeddings and saved UMAP dimensionality reduction model.
-    
+
     Args:
         aidf: DataFrame with articles containing summary column
         data_root: Root directory containing umap_reducer.pkl
         embedding_model: OpenAI embedding model to use
         logger: Optional logger for progress messages
-        
+
     Returns:
         DataFrame with cluster assignments and sorting
     """
@@ -345,14 +352,14 @@ def cluster_summaries(aidf: pd.DataFrame, data_root: str = ".",
             logger.info(msg)
         else:
             print(msg)
-    
+
     log(f"Fetching embeddings for {len(aidf)} headlines")
     client = OpenAI()
-    
+
     # Create bullet points for embedding
     aidf = aidf.copy()
     aidf["bullet"] = aidf.apply(make_bullet, axis=1)
-    
+
     # Get bullet embeddings
     response = client.embeddings.create(
         input=aidf['bullet'].tolist(),
@@ -361,29 +368,29 @@ def cluster_summaries(aidf: pd.DataFrame, data_root: str = ".",
     embedding_df = pd.DataFrame(
         [e.model_dump()['embedding'] for e in response.data]
     )
-    
+
     # Greedy traveling salesman sort
     log("Sort with nearest_neighbor_sort")
     sorted_indices = nearest_neighbor_sort(embedding_df)
     aidf['sort_order'] = sorted_indices
-    
+
     # Load UMAP dimensionality reduction model
     log("Load UMAP dimensionality reduction model")
     umap_path = os.path.join(data_root, "umap_reducer.pkl")
-    
+
     if not os.path.exists(umap_path):
         log(f"Warning: UMAP model not found at {umap_path}. Skipping dimensionality reduction.")
         reduced_data = embedding_df.values.astype(np.float64)
     else:
         with open(umap_path, 'rb') as pklfile:
             reducer = pickle.load(pklfile)
-        
+
         log("Perform dimensionality reduction")
         # Force np64 or hdbscan complains
         reduced_data = reducer.transform(embedding_df.values).astype(np.float64)
         # Renormalize after dimensionality reduction
         reduced_data /= np.linalg.norm(reduced_data, axis=1, keepdims=True)
-    
+
     # Use HDBSCAN with best params
     log("Cluster with HDBSCAN")
     clusterer = hdbscan.HDBSCAN(
@@ -392,27 +399,27 @@ def cluster_summaries(aidf: pd.DataFrame, data_root: str = ".",
         metric="euclidean",
         cluster_selection_method="eom",
     )
-    
+
     labels = clusterer.fit_predict(reduced_data)
     aidf['cluster'] = labels
-    
+
     # Calculate metrics
     metrics = calculate_clustering_metrics(reduced_data, labels, clusterer)
     print_clustering_summary(metrics)
-    
+
     log(f"Found {len(aidf['cluster'].unique())-1} clusters")
-    
+
     # Assign unclustered items to cluster 999
     aidf.loc[aidf['cluster'] == -1, 'cluster'] = 999
-    
+
     # Sort first by clusters found by HDBSCAN, then by semantic ordering
     aidf = aidf.sort_values(['cluster', 'sort_order']).reset_index(drop=True)
     aidf = aidf.reset_index().drop(columns=["id"] if "id" in aidf.columns else [])
     aidf = aidf.rename(columns={'index': 'id'})
-    
+
     # Initialize cluster names
     aidf["cluster_name"] = ""
-    
+
     return aidf
 
 if __name__ == "__main__":

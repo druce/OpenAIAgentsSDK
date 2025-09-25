@@ -564,8 +564,6 @@ class FilterUrlsTool:
                             new_urls_mask.append(True)
                         elif state.process_since is not None:
                             # URL exists, but check if it was seen before process_since
-                            print(type(existing_url.created_at))
-                            print(existing_url.created_at)
                             if existing_url.created_at is not None and existing_url.created_at <= state.process_since:
                                 new_urls_mask.append(False)
                             else:
@@ -808,6 +806,38 @@ class DownloadArticlesTool:
             # Deduplicate by final_url, keeping the one with greater content_length
             ai_df['content_length'] = ai_df['content_length'].fillna(0)
             ai_df = ai_df.sort_values('content_length', ascending=False).drop_duplicates(subset=['final_url'], keep='first')
+
+            # Update URLs table with final_url and isAI information
+            urls_updated = 0
+            try:
+                with sqlite3.connect(NEWSAGENTDB) as conn:
+                    Url.create_table(conn)  # Ensure table exists
+                    for row in ai_df.itertuples():
+                        try:
+                            original_url = row.url
+                            final_url = getattr(row, 'final_url', original_url) or original_url
+                            is_ai = getattr(row, 'isAI', False)
+
+                            # Get existing URL record
+                            existing_url = Url.get(conn, original_url)
+                            if existing_url:
+                                # Update with final URL and AI classification
+                                existing_url.final_url = final_url
+                                existing_url.isAI = is_ai
+                                existing_url.update(conn)
+                                urls_updated += 1
+
+                        except Exception as e:
+                            if self.logger:
+                                self.logger.warning(f"Failed to update URL record for {original_url}: {e}")
+
+                if self.logger and urls_updated > 0:
+                    self.logger.info(f"Updated {urls_updated} URL records with final URLs and AI classification")
+
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(f"Failed to update URLs table: {e}")
+
             # dedupe by cosine similarity
             # several sources might syndicate same AP article, feedly and newsapi might show same article under different URL
             ai_df = await process_dataframe_with_filtering(ai_df)
