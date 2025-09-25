@@ -48,6 +48,7 @@ from dedupe_by_cosine_similarity import process_dataframe_with_filtering
 from config import CANONICAL_TOPICS, DOWNLOAD_DIR, PAGES_DIR, TEXT_DIR, NEWSAGENTDB, LOGDB
 from bs4 import BeautifulSoup
 
+import db
 from db import Url
 
 # Global constants
@@ -174,6 +175,7 @@ class WorkflowStatusTool:
 
             # Add data summary if we have articles
             if state.headline_data:
+
                 ai_related = sum(1 for a in state.headline_data if a.get('isAI') is True)
                 result += f"\n\nData Summary:\n"
                 result += f"  Total articles: {len(state.headline_data)}\n"
@@ -324,10 +326,8 @@ class GatherUrlsTool:
     def clean_download_dir(self, download_dir: str):
         """Clean up download directory"""
         if os.path.exists(download_dir):
-            if self.verbose:
-                print(f"  Cleaning up download directory: {download_dir}")
             if self.logger:
-                self.logger.info(f"Cleaning download directory: {download_dir}")
+                self.logger.info(f"Cleaning {download_dir}: ")
 
             # Remove all files and subdirectories in download_dir
             try:
@@ -337,16 +337,11 @@ class GatherUrlsTool:
                         os.remove(item_path)
                     elif os.path.isdir(item_path):
                         shutil.rmtree(item_path)
-
-                if self.verbose:
-                    print(f"  Successfully cleaned download directory")
                 if self.logger:
-                    self.logger.info("Successfully cleaned download directory")
+                    self.logger.info(f"Successfully cleaned {download_dir}")
             except Exception as cleanup_error:
                 if self.logger:
-                    self.logger.warning(f"Failed to clean download directory: {cleanup_error}")
-                if self.verbose:
-                    print(f"  Failed to clean download directory: {cleanup_error}")
+                    self.logger.warning(f"Failed to clean {download_dir}: {cleanup_error}")
 
     async def _fetch_urls(self, ctx, args: str) -> str:
         """Execute Step 1: Gather URLs using persistent state"""
@@ -371,9 +366,9 @@ class GatherUrlsTool:
 
             # Clean up download directory if do_download flag is set
             if state.do_download:
-                state.clean_download_dir(DOWNLOAD_DIR)
-                state.clean_download_dir(TEXT_DIR)
-                state.clean_download_dir(PAGES_DIR)
+                self.clean_download_dir(DOWNLOAD_DIR)
+                self.clean_download_dir(TEXT_DIR)
+                self.clean_download_dir(PAGES_DIR)
 
             # Use RSS fetching from sources.yaml
             sources_config = None
@@ -430,12 +425,13 @@ class GatherUrlsTool:
 
             # Successfully fetched URLs, store results in persistent state
             headline_df = pd.DataFrame(all_articles)
+            headline_df = headline_df.drop_duplicates(subset=['url'], keep='first')
+            headline_df['id'] = range(len(headline_df))
+
             display(headline_df[["source", "url"]].groupby("source") \
                 .count() \
                 .reset_index() \
                 .rename({'url': 'count'}))
-            # assign id
-            headline_df['id'] = headline_df.index
             state.headline_data = headline_df.to_dict('records')
 
             # Complete the step using unified status system
@@ -454,10 +450,14 @@ class GatherUrlsTool:
             headline_df = pd.DataFrame(state.headline_data)
 
             with sqlite3.connect(NEWSAGENTDB) as conn:
-                db.Url.create_table(conn)
+                Url.create_table(conn)
                 for row in headline_df.itertuples():
-                    news_url = db.Url(row.url, '', row.title, row.isAI, datetime.now())
-                    news_url.insert(conn)
+                    news_url = Url(row.url, '', row.title, None, datetime.now())
+                    try:
+                        news_url.insert(conn)
+                    except Exception as e:
+                        if self.logger and self.verbose:
+                            self.logger.error(f"Failed to insert URL: {str(e)} (might exist from previous run)")
 
             display(headline_df)
 
@@ -536,15 +536,17 @@ class FilterUrlsTool:
             # Read headlines from persistent state
             total_articles = len(state.headline_data)
 
-            if self.verbose:
-                print(f"🔍 Classifying {total_articles} headlines using LLM...")
+            if self.verbose and self.logger:
+                self.logger.info(f"🔍 Filtering {total_articles} headlines...")
 
             # Prepare headlines for batch classification
             headline_df = pd.DataFrame(state.headline_data)
 
             # Filter out URLs that have already been seen (URL deduplication)
-            import sqlite3
             original_count = len(headline_df)
+
+            if self.verbose and self.logger:
+                self.logger.info(f"🔍 Filtering {total_articles} for dupes.")
 
             try:
                 conn = sqlite3.connect(state.db_path)
@@ -562,20 +564,17 @@ class FilterUrlsTool:
                             new_urls_mask.append(True)
                         elif state.process_since is not None:
                             # URL exists, but check if it was seen before process_since
-                            if existing_url.created_at is None:
-                                # No created_at timestamp - treat as seen before process_since
-                                new_urls_mask.append(False)
-                            elif existing_url.created_at < state.process_since:
-                                # URL was seen before process_since cutoff - treat as duplicate
+                            print(type(existing_url.created_at))
+                            print(existing_url.created_at)
+                            if existing_url.created_at is not None and existing_url.created_at <= state.process_since:
                                 new_urls_mask.append(False)
                             else:
-                                # URL was seen after process_since - treat as new
                                 new_urls_mask.append(True)
                         else:
                             # URL exists and no process_since set - treat as duplicate
                             new_urls_mask.append(False)
                     else:
-                        new_urls_mask.append(True)  # Keep rows without URLs
+                        new_urls_mask.append(False)  # should never happen, no url to check
 
                 conn.close()
 
@@ -609,7 +608,9 @@ class FilterUrlsTool:
                 if self.verbose:
                     print(f"⚠️ URL deduplication failed: {e}. Proceeding with all URLs.")
 
-            display(headline_df)
+            if self.verbose and self.logger:
+                self.logger.info(f"🔍 Filtering {total_articles} headlines for AI relevance using LLM...")
+
             filter_system_prompt, filter_user_prompt, model = \
                 LangfuseClient().get_prompt("newsagent/filter_urls")
 

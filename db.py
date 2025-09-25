@@ -20,7 +20,7 @@ class Url:
                 initial_url TEXT PRIMARY KEY,
                 final_url TEXT NOT NULL,
                 title TEXT NOT NULL,
-                isAI BOOLEAN NOT NULL,
+                isAI BOOLEAN,
                 created_at TEXT
             )
         """)

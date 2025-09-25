@@ -273,9 +273,8 @@ class Fetcher:
             }
 
         try:
-            self._log(f"Fetching HTML from {source_key}: {url}", "fetch_html", "INFO")
-
             if do_download:
+                self._log(f"Fetching HTML from {source_key}: {url}", "fetch_html", "INFO")
                 # Get browser context
                 browser_context = await self._get_browser_context()
                 # Check if browser context is valid
@@ -294,7 +293,9 @@ class Fetcher:
                 _, file_path = await scrape_source(source_dict, browser_context, logger=self.logger)
 
             else:
+                self._log(f"Using existing HTML file from {source_key}: {url}", "fetch_html", "INFO")
                 filename = self.sources.get(source_key, {}).get('filename')
+                source_dict["sourcename"] = source_key
                 file_path = f'{DOWNLOAD_DIR}/{filename}.html'
 
             if not file_path:
