@@ -44,9 +44,10 @@ from log_handler import SQLiteLogHandler
 from fetch import Fetcher
 from scrape import scrape_urls_concurrent, normalize_html
 from llm import LLMagent, LangfuseClient
-from dedupe_by_cosine_similarity import process_dataframe_with_filtering
+from do_dedupe import process_dataframe_with_filtering
 from config import CANONICAL_TOPICS, DOWNLOAD_DIR, PAGES_DIR, TEXT_DIR, NEWSAGENTDB, LOGDB
 from bs4 import BeautifulSoup
+from do_cluster import do_clustering
 
 import db
 from db import Url
@@ -1238,7 +1239,7 @@ class ClusterByTopicTool:
         all_embeddings = []
         client = OpenAI()
 
-        # Use paginate_df_async similar to dedupe_by_cosine_similarity.py
+        # Use paginate_df_async similar to do_dedupe.py
         async for batch_df in paginate_df_async(articles_with_summaries, 25):
             text_batch = batch_df["extended_summary"].to_list()
             response = client.embeddings.create(input=text_batch, model=embedding_model)

@@ -23,7 +23,8 @@ todo: function that takes a dataframe , list of input columns, name of output co
 import asyncio
 import json
 import logging
-from typing import Any, Dict, List, Type, Optional
+import math
+from typing import Any, Dict, List, Type, Optional, Tuple
 from pydantic import BaseModel
 import pandas as pd
 
@@ -38,24 +39,25 @@ from tenacity import (
 )
 
 from agents import Agent, Runner
-from log_handler import sanitize_error_for_logging
 
 import langfuse
 
 _logger = logging.getLogger(__name__)
 
+
 async def paginate_df_async(df: pd.DataFrame, chunk_size: int = 25):
-      """Async generator for DataFrame pagination."""
-      for i in range(0, len(df), chunk_size):
-          yield df.iloc[i:i + chunk_size]
-          await asyncio.sleep(0)  # Allow other tasks to run
-
-
-async def paginate_list_async(l, chunk_size: int = 25):
-    """Async generator for list pagination."""
-    for i in range(0, len(l), chunk_size):
-        yield l[i:i + chunk_size]
+    """Async generator for DataFrame pagination."""
+    for i in range(0, len(df), chunk_size):
+        yield df.iloc[i:i + chunk_size]
         await asyncio.sleep(0)  # Allow other tasks to run
+
+
+async def paginate_list_async(lst, chunk_size: int = 25):
+    """Async generator for list pagination."""
+    for i in range(0, len(lst), chunk_size):
+        yield lst[i:i + chunk_size]
+        await asyncio.sleep(0)  # Allow other tasks to run
+
 
 class LangfuseClient:
     """
@@ -105,34 +107,40 @@ class LangfuseClient:
         """
         try:
             if self.logger:
-                self.logger.debug(f"Attempting to retrieve prompt '{prompt_name}' from Langfuse")
+                self.logger.debug(
+                    f"Attempting to retrieve prompt '{prompt_name}' from Langfuse")
 
             # Get prompt from Langfuse
             lf_prompt = self.client.get_prompt(prompt_name)
 
             if self.logger:
-                self.logger.info(f"Successfully retrieved prompt '{prompt_name}' from Langfuse")
+                self.logger.info(
+                    f"Successfully retrieved prompt '{prompt_name}' from Langfuse")
 
             # Validate prompt structure
             if not hasattr(lf_prompt, 'prompt') or not isinstance(lf_prompt.prompt, list):
-                raise ValueError(f"Invalid prompt format for '{prompt_name}': missing or invalid 'prompt' field")
+                raise ValueError(
+                    f"Invalid prompt format for '{prompt_name}': missing or invalid 'prompt' field")
 
             if len(lf_prompt.prompt) < 2:
-                raise ValueError(f"Invalid prompt format for '{prompt_name}': expected at least 2 prompt parts (system, user)")
+                raise ValueError(
+                    f"Invalid prompt format for '{prompt_name}': expected at least 2 prompt parts (system, user)")
 
             # Extract system and user prompts
             try:
                 system_prompt = lf_prompt.prompt[0]['content']
                 user_prompt = lf_prompt.prompt[1]['content']
             except (KeyError, IndexError) as e:
-                raise ValueError(f"Invalid prompt structure for '{prompt_name}': {e}")
+                raise ValueError(
+                    f"Invalid prompt structure for '{prompt_name}': {e}")
 
             # Extract configuration
             config = lf_prompt.config if hasattr(lf_prompt, 'config') else {}
             model = config.get("model", "gpt-5")
 
             if self.logger:
-                self.logger.info(f"Parsed prompt '{prompt_name}': model={model}, system_len={len(system_prompt)}, user_len={len(user_prompt)}")
+                self.logger.info(
+                    f"Parsed prompt '{prompt_name}': model={model}, system_len={len(system_prompt)}, user_len={len(user_prompt)}")
 
             return (system_prompt, user_prompt, model)
 
@@ -143,7 +151,7 @@ class LangfuseClient:
             raise Exception(error_msg) from e
 
     def create_llm_agent(self, prompt_name: str, output_type: Type[BaseModel],
-                        verbose: bool = False, logger: Optional[logging.Logger] = None) -> 'LLMagent':
+                         verbose: bool = False, logger: Optional[logging.Logger] = None) -> 'LLMagent':
         """
         Convenience method to create an LLMagent from a Langfuse prompt.
 
@@ -233,7 +241,8 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             formatted_user = self.user_prompt.format(**variables)
             return formatted_user
         except KeyError as e:
-            raise ValueError(f"Missing required variable in prompt template: {e}")
+            raise ValueError(
+                f"Missing required variable in prompt template: {e}")
         except Exception as e:
             raise ValueError(f"Error formatting prompts: {e}")
 
@@ -328,6 +337,138 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
 
         return result
 
+    def _supports_logprobs(self) -> bool:
+        """
+        Check if the current model supports logprobs functionality.
+
+        Returns:
+            bool: True if model supports logprobs, False otherwise
+        """
+        # Models that support logprobs
+        logprobs_supported_models = {
+            "gpt-4.1-mini", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-nano",
+            "gpt-4o", "gpt-4-turbo", "gpt-4", "gpt-3.5-turbo"
+        }
+
+        # Check exact match or partial match for versioned models
+        model_name = self.model.lower()
+        if model_name in logprobs_supported_models:
+            return True
+
+        # Check for partial matches (e.g., gpt-4.1-mini-2024-07-18)
+        for supported_model in logprobs_supported_models:
+            if model_name.startswith(supported_model):
+                return True
+
+        return False
+
+    def _extract_token_probabilities(self, logprobs_data: Dict, target_tokens: List[str]) -> Dict[str, float]:
+        """
+        Extract probabilities for specific target tokens from OpenAI logprobs response.
+
+        Args:
+            logprobs_data: Raw logprobs data from OpenAI API response
+            target_tokens: List of tokens to extract probabilities for (e.g., ["1", "0"])
+
+        Returns:
+            Dict mapping token to probability (e.g., {"1": 0.85, "0": 0.15})
+        """
+        if not logprobs_data or getattr(logprobs_data, 'content', None) is None:
+            raise ValueError(
+                "Invalid logprobs_data. Must contain 'content' key with non-None value.")
+
+        # Look at the first token's logprobs (for binary classification, answer should be first token)
+        first_token_logprobs = logprobs_data.content[0]
+
+        if not hasattr(first_token_logprobs, 'top_logprobs'):
+            raise ValueError(
+                "Invalid first_token_logprobs. Could not find 'top_logprobs' key or 'top_logprobs' is empty."
+            )
+
+        # Extract probabilities for target tokens
+        result = {}
+        top_logprobs = first_token_logprobs.top_logprobs
+
+        for target_token in target_tokens:
+            # Find matching token in top_logprobs
+            found_prob = 0.0
+            for token_info in top_logprobs:
+                if token_info.token == target_token:
+                    # Convert log probability to probability: p = e^(logprob)
+                    found_prob = math.exp(token_info.logprob)
+                    break
+            result[target_token] = found_prob
+
+        return result
+
+    @retry(
+        retry=retry_if_exception_type((
+            openai.APIConnectionError,
+            openai.APITimeoutError,
+            openai.InternalServerError
+        )),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=1, max=30),
+        before_sleep=before_sleep_log(_logger, logging.WARNING),
+    )
+    async def prompt_dict_chat_probs(self, variables: Dict[str, Any], top_logprobs: int = 5) -> Tuple[str, Dict]:
+        """
+        Make a single LLM call with logprobs enabled (no structured output).
+
+        This method skips structured output (json_schema) to enable logprobs functionality,
+        since OpenAI's structured outputs are incompatible with logprobs.
+
+        Args:
+            variables: Dictionary of variables to substitute in prompt templates
+            top_logprobs: Number of top tokens to return probabilities for (0-5)
+
+        Returns:
+            Tuple of (response_text, logprobs_data)
+
+        Raises:
+            ValueError: If model doesn't support logprobs
+        """
+        if not self._supports_logprobs():
+            supported_models = ["gpt-4.1-mini", "gpt-4o-mini",
+                                "gpt-4.1", "gpt-4o", "gpt-4-turbo"]
+            raise ValueError(
+                f"Model '{self.model}' does not support logprobs. "
+                f"Supported models: {supported_models}"
+            )
+
+        user_message = self._format_prompts(variables)
+        user_message = user_message.strip()
+
+        if self.verbose:
+            self.logger.info(f"User message (with logprobs): {user_message}")
+
+        # Get the OpenAI client
+        client = AsyncOpenAI()
+
+        # Prepare messages for chat completion
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": user_message}
+        ]
+
+        # Make the chat completion call with logprobs (NO structured output)
+        response = await client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            logprobs=True,
+            top_logprobs=top_logprobs
+        )
+
+        # Extract response text and logprobs
+        response_text = response.choices[0].message.content
+        logprobs_data = response.choices[0].logprobs
+
+        if self.verbose:
+            self.logger.info(f"Response text: {response_text}")
+            self.logger.info(
+                f"Logprobs available: {logprobs_data is not None}")
+
+        return response_text, logprobs_data
 
     async def run_prompt(self, **kwargs) -> Any:
         """
@@ -342,15 +483,55 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         # Repackage kwargs into a dictionary and call prompt_dict_chat
         return await self.prompt_dict_chat(kwargs)
 
+    async def run_prompt_with_probs(self, target_tokens: List[str] = ["1"], **kwargs) -> Dict[str, float]:
+        """
+        Make a single LLM call and return probabilities for specific target tokens.
+
+        This method is designed for binary classification tasks where you want to get
+        the probability of specific tokens (e.g., "1" for spam classification).
+
+        Args:
+            target_tokens: List of tokens to get probabilities for (default: ["1"])
+            **kwargs: Keyword arguments to substitute in prompt templates
+
+        Returns:
+            Dict mapping each target token to its probability (e.g., {"1": 0.85})
+
+        Example:
+            # For spam classification
+            agent = LLMagent(
+                system_prompt="Classify as spam or not spam",
+                user_prompt="Text: {text}\\nReturn only 1 for spam, 0 for not spam",
+                output_type=str,  # Not used for logprobs
+                model="gpt-4.1-mini"
+            )
+
+            probs = await agent.run_prompt_with_probs(
+                target_tokens=["1"],
+                text="Buy now limited time offer!!!"
+            )
+            spam_probability = probs["1"]  # e.g., 0.89
+        """
+        # Get raw response and logprobs
+        response_text, logprobs_data = await self.prompt_dict_chat_probs(kwargs)
+
+        # Extract probabilities for target tokens
+        probabilities = self._extract_token_probabilities(
+            logprobs_data, target_tokens)
+
+        if self.verbose:
+            self.logger.info(f"Token probabilities: {probabilities}")
+
+        return probabilities
 
     async def prompt_batch(self,
-                          variables_list: List[Dict[str, Any]],
-                          batch_size: int = 25,
-                          max_concurrency: int = 16,
-                          retries: int = 3,
-                          item_list_field: str = 'results_list',
-                          item_id_field: str = '',
-                          chat: bool = True) -> List[Any]:
+                           variables_list: List[Dict[str, Any]],
+                           batch_size: int = 25,
+                           max_concurrency: int = 16,
+                           retries: int = 3,
+                           item_list_field: str = 'results_list',
+                           item_id_field: str = '',
+                           chat: bool = True) -> List[Any]:
         """
         Process a list of variable dictionaries using true batch calls.
 
@@ -374,10 +555,11 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
 
         # Split into batches
         batches = [variables_list[i:i+batch_size]
-                  for i in range(0, len(variables_list), batch_size)]
+                   for i in range(0, len(variables_list), batch_size)]
 
         sem = asyncio.Semaphore(max_concurrency)
-        self.logger.info(f"Processing {len(batches)} batches with concurrency {max_concurrency}")
+        self.logger.info(
+            f"Processing {len(batches)} batches with concurrency {max_concurrency}")
 
         async def _process_batch(batch_idx: int, batch_variables: List[Dict[str, Any]]) -> tuple[int, List[Any]]:
             """Process a single batch with retry logic"""
@@ -395,16 +577,19 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
 
                         # Validate IDs if item_id_field is specified
                         if item_id_field:
-                            sent_ids = [var.get(item_id_field) for var in batch_variables]
+                            sent_ids = [var.get(item_id_field)
+                                        for var in batch_variables]
                             received_ids = []
 
                             for result in batch_results:
                                 if hasattr(result, item_id_field):
-                                    received_ids.append(getattr(result, item_id_field))
+                                    received_ids.append(
+                                        getattr(result, item_id_field))
                                 elif isinstance(result, dict) and item_id_field in result:
                                     received_ids.append(result[item_id_field])
                                 else:
-                                    raise ValueError(f"Result missing required ID field '{item_id_field}': {result}")
+                                    raise ValueError(
+                                        f"Result missing required ID field '{item_id_field}': {result}")
 
                             # Check if all sent IDs have corresponding received IDs
                             sent_set = set(sent_ids)
@@ -424,12 +609,15 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
 
                 except Exception as e:
                     last_exc = e
-                    self.logger.warning(f"Batch {batch_idx} attempt {attempt + 1}/{retries} failed: {e}")
+                    self.logger.warning(
+                        f"Batch {batch_idx} attempt {attempt + 1}/{retries} failed: {e}")
                     if attempt < retries - 1:
-                        await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                        # Exponential backoff
+                        await asyncio.sleep(2 ** attempt)
 
             # If all retries failed, raise the last exception
-            raise last_exc or RuntimeError(f"Unknown error processing batch {batch_idx}")
+            raise last_exc or RuntimeError(
+                f"Unknown error processing batch {batch_idx}")
 
         # Create tasks for all batches
         tasks = [
@@ -459,20 +647,20 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                     )
                 else:
                     return flattened_results
-            else: # return unflattened results
+            else:  # return unflattened results
                 return batch_results
-        else: # return unflattened results
+        else:  # return unflattened results
             return batch_results
 
-
     async def filter_dataframe_chunk(self,
-                               input_df: pd.DataFrame,
-                               input_vars: Optional[Dict[str, Any]] = None,
-                               item_list_field: str = 'results_list',
-                               item_id_field: str = 'id',
-                               retries: int = 3,
-                               chat: bool = True
-                              ) -> Any:
+                                     input_df: pd.DataFrame,
+                                     input_vars: Optional[Dict[str,
+                                                               Any]] = None,
+                                     item_list_field: str = 'results_list',
+                                     item_id_field: str = 'id',
+                                     retries: int = 3,
+                                     chat: bool = True
+                                     ) -> Any:
         """
         Process a single DataFrame asynchronously using Agent SDK.
 
@@ -519,9 +707,11 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                             received_count = len(result_list)
                             if received_count != expected_count:
                                 error_msg = f"Item count mismatch: expected {expected_count}, got {received_count}"
-                                self.logger.warning(f"Attempt {attempt + 1}/{retries}: {error_msg}")
+                                self.logger.warning(
+                                    f"Attempt {attempt + 1}/{retries}: {error_msg}")
                                 if attempt < retries - 1:
-                                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                                    # Exponential backoff
+                                    await asyncio.sleep(2 ** attempt)
                                     continue
                                 else:
                                     raise ValueError(error_msg)
@@ -533,12 +723,15 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
 
                                 for item in result_list:
                                     if hasattr(item, item_id_field):
-                                        received_ids.append(getattr(item, item_id_field))
+                                        received_ids.append(
+                                            getattr(item, item_id_field))
                                     elif isinstance(item, dict) and item_id_field in item:
-                                        received_ids.append(item[item_id_field])
+                                        received_ids.append(
+                                            item[item_id_field])
                                     else:
                                         error_msg = f"Result item missing required ID field '{item_id_field}': {item}"
-                                        self.logger.warning(f"Attempt {attempt + 1}/{retries}: {error_msg}")
+                                        self.logger.warning(
+                                            f"Attempt {attempt + 1}/{retries}: {error_msg}")
                                         if attempt < retries - 1:
                                             await asyncio.sleep(2 ** attempt)
                                             continue
@@ -554,7 +747,7 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                                     extra_ids = received_set - sent_set
 
                                     if missing_ids or extra_ids:
-                                        error_msg = f"ID presence mismatch:"
+                                        error_msg = "ID presence mismatch:"
                                         if missing_ids:
                                             error_msg += f" Missing IDs: {missing_ids}"
                                         if extra_ids:
@@ -562,60 +755,70 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                                     else:
                                         error_msg = f"ID order mismatch: sent {sent_ids} != received {received_ids}"
 
-                                    self.logger.warning(f"Attempt {attempt + 1}/{retries}: {error_msg}")
+                                    self.logger.warning(
+                                        f"Attempt {attempt + 1}/{retries}: {error_msg}")
                                     if attempt < retries - 1:
-                                        await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                                        # Exponential backoff
+                                        await asyncio.sleep(2 ** attempt)
                                         continue
                                     else:
                                         raise ValueError(error_msg)
 
                         else:
-                            raise ValueError(f"Field '{item_list_field}' is not a list: {type(result_list)}")
+                            raise ValueError(
+                                f"Field '{item_list_field}' is not a list: {type(result_list)}")
                     else:
-                        raise ValueError(f"Result missing required field '{item_list_field}': {result}")
+                        raise ValueError(
+                            f"Result missing required field '{item_list_field}': {result}")
 
                 return result
 
             except asyncio.TimeoutError as e:
                 last_exc = e
-                self.logger.error(f"Timeout error in filter_dataframe_chunk: {str(e)}")
+                self.logger.error(
+                    f"Timeout error in filter_dataframe_chunk: {str(e)}")
                 if attempt < retries - 1:
                     await asyncio.sleep(2 ** attempt)
                     continue
                 raise
             except (ConnectionError, TimeoutError) as e:
                 last_exc = e
-                self.logger.error(f"Network/timeout error in filter_dataframe_chunk: {str(e)}")
+                self.logger.error(
+                    f"Network/timeout error in filter_dataframe_chunk: {str(e)}")
                 if attempt < retries - 1:
                     await asyncio.sleep(2 ** attempt)
                     continue
                 raise
             except ValueError as e:
                 last_exc = e
-                self.logger.error(f"Invalid data in filter_dataframe_chunk: {str(e)}")
+                self.logger.error(
+                    f"Invalid data in filter_dataframe_chunk: {str(e)}")
                 if attempt < retries - 1:
                     await asyncio.sleep(2 ** attempt)
                     continue
                 raise
             except Exception as e:
                 last_exc = e
-                self.logger.error(f"Unexpected error in filter_dataframe_chunk: {str(e)}")
+                self.logger.error(
+                    f"Unexpected error in filter_dataframe_chunk: {str(e)}")
                 if attempt < retries - 1:
                     await asyncio.sleep(2 ** attempt)
                     continue
                 raise
 
         # If we get here, all retries failed
-        raise last_exc or RuntimeError(f"Unknown error after {retries} attempts")
+        raise last_exc or RuntimeError(
+            f"Unknown error after {retries} attempts")
 
     async def _process_indexed_chunk(self,
-                                   chunk_idx: int,
-                                   chunk_df: pd.DataFrame,
-                                   input_vars: Optional[Dict[str, Any]] = None,
-                                   item_list_field: str = 'results_list',
-                                   item_id_field: str = 'id',
-                                   retries: int = 3,
-                                   chat: bool = True) -> tuple[int, Any]:
+                                     chunk_idx: int,
+                                     chunk_df: pd.DataFrame,
+                                     input_vars: Optional[Dict[str,
+                                                               Any]] = None,
+                                     item_list_field: str = 'results_list',
+                                     item_id_field: str = 'id',
+                                     retries: int = 3,
+                                     chat: bool = True) -> tuple[int, Any]:
         """
         Process a single chunk and return with its index for order preservation.
 
@@ -642,16 +845,19 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         return chunk_idx, result
 
     async def filter_dataframe_batch(self,
-                                   input_df: pd.DataFrame,
-                                   input_vars: Optional[Dict[str, Any]] = None,
-                                   item_list_field: str = 'results_list',
-                                   item_id_field: str = 'id',
-                                   retries: int = 3,
-                                   chunk_size: int = 25,
-                                   return_series: bool = False,
-                                   value_field: str = 'output',
-                                   chat: bool = True
-                                   ) -> Any:
+                                     input_df: pd.DataFrame,
+                                     input_vars: Optional[Dict[str,
+                                                               Any]] = None,
+                                     item_list_field: str = 'results_list',
+                                     item_id_field: str = 'id',
+                                     retries: int = 3,
+                                     chunk_size: int = 25,
+                                     return_series: bool = False,
+                                     value_field: str = 'output',
+                                     chat: bool = True,
+                                     return_probabilities: bool = False,
+                                     target_tokens: List[str] = None
+                                     ) -> Any:
         """
         Process a DataFrame in chunks asynchronously using concurrent calls to filter_dataframe_chunk.
 
@@ -669,13 +875,44 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             return_series: If True, return pandas Series for direct DataFrame assignment
             value_field: Field name to extract values from when return_series=True
             chat: If True (default), use prompt_dict_chat; if False, use prompt_dict
+            return_probabilities: If True, return token probabilities instead of structured output
+            target_tokens: List of tokens to extract probabilities for (default: ["1"])
 
         Returns:
+            If return_probabilities=True: pandas Series with probabilities for target tokens
             If return_series=True: pandas Series with values for DataFrame column assignment
             Otherwise: Single concatenated result object (if item_list_field specified) or list of results
         """
         if input_df.empty:
             return []
+
+        # Handle probability extraction mode
+        if return_probabilities:
+            if target_tokens is None:
+                target_tokens = ["1"]
+
+            if not self._supports_logprobs():
+                raise ValueError(
+                    f"Model '{self.model}' does not support logprobs required for probability extraction"
+                )
+
+            # For probabilities, we process each row individually using run_prompt_with_probs
+            probabilities = []
+            for _, row in input_df.iterrows():
+                # Convert row to dict and merge with input_vars
+                row_vars = row.to_dict()
+                if input_vars:
+                    row_vars.update(input_vars)
+
+                # Get probabilities for this row
+                prob_dict = await self.run_prompt_with_probs(target_tokens=target_tokens, **row_vars)
+
+                # Extract probability for first target token
+                prob_value = prob_dict.get(target_tokens[0], 0.0)
+                probabilities.append(prob_value)
+
+            # Return as Series indexed to match input DataFrame
+            return pd.Series(probabilities, index=input_df.index)
 
         # Create chunks using the async generator
         chunks = []
@@ -717,11 +954,15 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                         if isinstance(result_list, list):
                             all_items.extend(result_list)
                         else:
-                            self.logger.error(f"Field '{item_list_field}' is not a list: {type(result_list)}")
-                            return [result for _, result in sorted_results]  # Fall back to returning raw results
+                            self.logger.error(
+                                f"Field '{item_list_field}' is not a list: {type(result_list)}")
+                            # Fall back to returning raw results
+                            return [result for _, result in sorted_results]
                     else:
-                        self.logger.error(f"Result missing field '{item_list_field}': {chunk_result}")
-                        return [result for _, result in sorted_results]  # Fall back to returning raw results
+                        self.logger.error(
+                            f"Result missing field '{item_list_field}': {chunk_result}")
+                        # Fall back to returning raw results
+                        return [result for _, result in sorted_results]
 
                 # Check if we should return Series for DataFrame assignment
                 if return_series:
@@ -744,17 +985,18 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
 
             except Exception as e:
                 self.logger.error(f"Error concatenating results: {e}")
-                return [result for _, result in sorted_results]  # Fall back to returning raw results
+                # Fall back to returning raw results
+                return [result for _, result in sorted_results]
         else:
             # No item_list_field specified, return list of results
             if return_series:
-                self.logger.warning("return_series=True but no item_list_field specified, returning raw results")
+                self.logger.warning(
+                    "return_series=True but no item_list_field specified, returning raw results")
             return [result for _, result in sorted_results]
 
-    async def filter_dataframe(self,
-                                    input_df: pd.DataFrame,
-                                    value_field: str = 'output',
-                                    **kwargs) -> pd.Series:
+    async def filter_dataframe(self, input_df: pd.DataFrame,
+                               value_field: str = 'output',
+                               **kwargs) -> pd.Series:
         """
         Process DataFrame and return values as Series for direct column assignment.
 
@@ -781,6 +1023,13 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                 value_field='confidence'
             )
 
+            # Get probabilities for binary classification
+            df["spam_probability"] = await agent.filter_dataframe(
+                df[['text']],
+                return_probabilities=True,
+                target_tokens=["1"]
+            )
+
             # With ID validation
             df["sentiment"] = await agent.filter_dataframe(
                 df[['text', 'id']],
@@ -791,19 +1040,26 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         # Call filter_dataframe_batch with all provided arguments
         result = await self.filter_dataframe_batch(input_df, **kwargs)
 
+        # If result is already a Series (from probability extraction), return it directly
+        if isinstance(result, pd.Series):
+            return result
+
         # Extract values from the structured result
         if hasattr(result, 'results_list'):
             # Standard case: structured object with results_list
-            values = [getattr(item, value_field) for item in result.results_list]
+            values = [getattr(item, value_field)
+                      for item in result.results_list]
         elif isinstance(result, list):
             # Fallback case: result is already a list of items
             values = [getattr(item, value_field) for item in result]
         else:
             # Unexpected result format
-            raise ValueError(f"Unexpected result format from filter_dataframe_batch: {type(result)}")
+            raise ValueError(
+                f"Unexpected result format from filter_dataframe_batch: {type(result)}")
 
         # Validate that we have the right number of values
         if len(values) != len(input_df):
-            raise ValueError(f"Value count mismatch: expected {len(input_df)}, got {len(values)}")
+            raise ValueError(
+                f"Value count mismatch: expected {len(input_df)}, got {len(values)}")
 
         return pd.Series(values, index=input_df.index)
