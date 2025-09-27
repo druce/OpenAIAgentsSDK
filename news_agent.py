@@ -2,11 +2,8 @@
 """
 Newsletter Agent for testing the complete workflow end-to-end.
 
-This agent follows the ClassifierAgent pattern from test_agent.ipynb and implements
-all 9 workflow steps defined in the WorkflowStatus object from utilities.py.
-Each step updates the workflow status properly.
-
-TODO: in summarize step, dedupe with chromadb before summarizing , mark as duplicate if so
+This agent implements all 9 workflow steps defined in the WorkflowStatus object.
+Each step updates the workflow status and serializes the state.
 
 """
 
@@ -17,29 +14,31 @@ import os
 import json
 import dotenv
 import random
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from collections import Counter
+# from collections import Counter
 import sqlite3
+import tldextract
 
 import shutil
-import pickle
-import numpy as np
+# import pickle
+# import numpy as np
 import pandas as pd
-from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
-import hdbscan
+# from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
+# import hdbscan
 
-from IPython.display import HTML, Image, Markdown, display
+from IPython.display import display  # HTML, Image, Markdown,
 
 from typing import Dict, Any, Optional, List
 from pydantic import BaseModel, Field
-from email.utils import parsedate_to_datetime
+# from email.utils import parsedate_to_datetime
+# from urllib.parse import urlparse
 
 from agents import (Agent, Runner, RunContextWrapper, FunctionTool,
-    Tool, SQLiteSession, set_default_openai_client)
+                    SQLiteSession, set_default_openai_client)
 
 from openai import AsyncOpenAI
-from newsletter_state import NewsletterAgentState, StepStatus
+from newsletter_state import NewsletterAgentState
 from log_handler import SQLiteLogHandler
 from fetch import Fetcher
 from scrape import scrape_urls_concurrent, normalize_html
@@ -49,12 +48,12 @@ from config import CANONICAL_TOPICS, DOWNLOAD_DIR, PAGES_DIR, TEXT_DIR, NEWSAGEN
 from bs4 import BeautifulSoup
 from do_cluster import do_clustering
 
-import db
+# import db
 from db import Url
 
-# Global constants
-
 # Pydantic models for structured output
+
+
 class ArticleSummary(BaseModel):
     """Model for AI-generated article summaries with exactly 3 bullet points"""
     id: int = Field(description="The article id")
@@ -62,40 +61,57 @@ class ArticleSummary(BaseModel):
         description="Bullet-point summary of the article"
     )
 
+
 class ArticleSummaryList(BaseModel):
     """List of AIClassification for batch processing"""
-    results_list: list[ArticleSummary] = Field(description="List of summary results")
+    results_list: list[ArticleSummary] = Field(
+        description="List of summary results")
 
 # output class for classifying headlines
+
+
 class AIClassification(BaseModel):
     """A single headline classification result"""
     id: int = Field("The news item id")
     input_str: str = Field(description="The original headline title")
-    output: bool = Field(description="Whether the headline title is AI-related")
+    output: bool = Field(
+        description="Whether the headline title is AI-related")
+
 
 class AIClassificationList(BaseModel):
     """List of AIClassification for batch processing"""
-    results_list: list[AIClassification] = Field(description="List of classification results")
+    results_list: list[AIClassification] = Field(
+        description="List of classification results")
 
 # Topic extraction models
+
+
 class TopicExtraction(BaseModel):
     """Topic extraction result for a single article"""
     id: int = Field(description="The article id")
-    topics_list: List[str] = Field(description="List of relevant topics discussed in the article")
+    topics_list: List[str] = Field(
+        description="List of relevant topics discussed in the article")
+
 
 class TopicExtractionList(BaseModel):
     """List of TopicExtraction for batch processing"""
-    results_list: list[TopicExtraction] = Field(description="List of topic extraction results")
+    results_list: list[TopicExtraction] = Field(
+        description="List of topic extraction results")
 
 # Canonical topic classification models
+
+
 class CanonicalTopicClassification(BaseModel):
     """Single article classification result for a canonical topic"""
     id: int = Field(description="The article id")
-    relevant: bool = Field(description="Whether the summary is relevant to the canonical topic")
+    relevant: bool = Field(
+        description="Whether the summary is relevant to the canonical topic")
+
 
 class CanonicalTopicClassificationList(BaseModel):
     """List of classification results for batch processing"""
-    results_list: list[CanonicalTopicClassification] = Field(description="List of classification results")
+    results_list: list[CanonicalTopicClassification] = Field(
+        description="List of classification results")
 
 
 def setup_logging(session_id: str = "default", db_path: str = LOGDB) -> logging.Logger:
@@ -156,6 +172,7 @@ async def mycreate_task(delay_index: int, coro, delay_seconds: float = 0.1):
 
 # tools
 
+
 class WorkflowStatusTool:
     """Tool to check current workflow status"""
 
@@ -172,13 +189,15 @@ class WorkflowStatusTool:
             state: NewsletterAgentState = ctx.context
 
             # Use the unified status reporting system
-            result = state.get_workflow_status_report("WORKFLOW STATUS (FROM PERSISTENT STATE)")
+            result = state.get_workflow_status_report(
+                "WORKFLOW STATUS (FROM PERSISTENT STATE)")
 
             # Add data summary if we have articles
             if state.headline_data:
 
-                ai_related = sum(1 for a in state.headline_data if a.get('isAI') is True)
-                result += f"\n\nData Summary:\n"
+                ai_related = sum(
+                    1 for a in state.headline_data if a.get('isAI') is True)
+                result += "\n\nData Summary:\n"
                 result += f"  Total articles: {len(state.headline_data)}\n"
                 result += f"  AI-related: {ai_related}\n"
                 result += f"  Clusters: {len(state.clusters)}\n"
@@ -187,7 +206,7 @@ class WorkflowStatusTool:
             # Add intervention guidance if workflow is in error state
             if state.has_errors():
                 failed_steps = state.get_failed_steps()
-                result += f"\n\n⚠️  INTERVENTION REQUIRED:\n"
+                result += "\n\n⚠️  INTERVENTION REQUIRED:\n"
                 result += f"  Failed steps: {', '.join(failed_steps)}\n"
                 if state.workflow_status_message:
                     result += f"  Instructions: {state.workflow_status_message}"
@@ -216,6 +235,8 @@ class WorkflowStatusTool:
             },
             on_invoke_tool=self._check_workflow_status
         )
+
+
 class StateInspectionTool:
     """Tool to inspect detailed persistent state data"""
 
@@ -239,7 +260,8 @@ class StateInspectionTool:
         ]
 
         if state.workflow_status_message:
-            report_lines.append(f"Status Message: {state.workflow_status_message}")
+            report_lines.append(
+                f"Status Message: {state.workflow_status_message}")
 
         report_lines.extend([
             f"Sources File: {state.sources_file}",
@@ -249,10 +271,14 @@ class StateInspectionTool:
         ])
 
         if state.headline_data:
-            ai_related = sum(1 for a in state.headline_data if a.get('isAI') is True)
-            with_content = sum(1 for a in state.headline_data if a.get('content'))
-            with_ratings = sum(1 for a in state.headline_data if a.get('quality_rating'))
-            with_clusters = sum(1 for a in state.headline_data if a.get('cluster_topic'))
+            ai_related = sum(
+                1 for a in state.headline_data if a.get('isAI') is True)
+            with_content = sum(
+                1 for a in state.headline_data if a.get('content'))
+            with_ratings = sum(
+                1 for a in state.headline_data if a.get('quality_rating'))
+            with_clusters = sum(
+                1 for a in state.headline_data if a.get('cluster_topic'))
 
             report_lines.extend([
                 f"  AI-related: {ai_related}",
@@ -287,7 +313,8 @@ class StateInspectionTool:
                 status = section_data.get('section_status', 'unknown')
                 word_count = section_data.get('word_count', 0)
                 article_count = section_data.get('article_count', 0)
-                report_lines.append(f"  {section_name}: {status}, {article_count} articles, {word_count} words")
+                report_lines.append(
+                    f"  {section_name}: {status}, {article_count} articles, {word_count} words")
 
         if state.final_newsletter:
             newsletter_words = len(state.final_newsletter.split())
@@ -295,7 +322,8 @@ class StateInspectionTool:
                 "",
                 "FINAL NEWSLETTER:",
                 f"  Length: {newsletter_words} words",
-                f"  Preview: {state.final_newsletter[:200]}..." if len(state.final_newsletter) > 200 else f"  Content: {state.final_newsletter}",
+                f"  Preview: {state.final_newsletter[:200]}..." if len(
+                    state.final_newsletter) > 200 else f"  Content: {state.final_newsletter}",
             ])
 
         # Serialize state after inspecting state
@@ -314,6 +342,7 @@ class StateInspectionTool:
             },
             on_invoke_tool=self._inspect_state
         )
+
 
 class GatherUrlsTool:
     """Tool for Step 1: Gather URLs from news sources defined in sources.yaml using Fetcher
@@ -342,7 +371,8 @@ class GatherUrlsTool:
                     self.logger.info(f"Successfully cleaned {download_dir}")
             except Exception as cleanup_error:
                 if self.logger:
-                    self.logger.warning(f"Failed to clean {download_dir}: {cleanup_error}")
+                    self.logger.warning(
+                        f"Failed to clean {download_dir}: {cleanup_error}")
 
     async def _fetch_urls(self, ctx, args: str) -> str:
         """Execute Step 1: Gather URLs using persistent state"""
@@ -358,7 +388,8 @@ class GatherUrlsTool:
         if state.is_step_complete("step_01_fetch_urls"):
             total_articles = len(state.headline_data)
             if self.logger:
-                self.logger.info(f"Step 1 already completed with {total_articles} articles")
+                self.logger.info(
+                    f"Step 1 already completed with {total_articles} articles")
             return f"Step 1 already completed! Found {total_articles} articles in persistent state."
 
         try:
@@ -393,8 +424,9 @@ class GatherUrlsTool:
                     failed_sources.append(result['source'])
 
             # Check if we need user intervention (something failed)
-            total_sources = len(successful_sources) + len(failed_sources)
-            success_rate = len(successful_sources) / total_sources if total_sources > 0 else 0
+            # total_sources = len(successful_sources) + len(failed_sources)
+            # success_rate = len(successful_sources) / \
+            #     total_sources if total_sources > 0 else 0
 
             # Define intervention scenarios (currently unused but kept for clarity)
             # requires_intervention = success_rate < 1.0
@@ -413,34 +445,38 @@ class GatherUrlsTool:
                             failed_source_urls.append(f"{src}: {url}")
                 if failed_source_urls:
                     intervention_message += f"Failed source URLs: {', '.join(failed_source_urls)}. "
-                intervention_message += f"Download HTML files manually to download/sources/ directory, clear error and restart with do_download=False."
+                intervention_message += "Download HTML files manually to download/sources/ directory, clear error and restart with do_download=False."
 
                 state.error_step(step_name, intervention_message)
 
                 if self.verbose:
-                    print(f"⚠️  Intervention required: {len(successful_sources)} successful, {len(failed_sources)} failed")
+                    print(
+                        f"⚠️  Intervention required: {len(successful_sources)} successful, {len(failed_sources)} failed")
                     print(f"Failed sources: {', '.join(failed_sources)}")
                     if failed_source_urls:
-                        print(f"Failed source URLs: {', '.join(failed_source_urls)}")
+                        print(
+                            f"Failed source URLs: {', '.join(failed_source_urls)}")
 
                 return f"⚠️  Intervention Required! Successfully fetched from {len(successful_sources)} sources but {len(failed_sources)} sources failed.\n\n{intervention_message}"
 
             # Successfully fetched URLs, store results in persistent state
             headline_df = pd.DataFrame(all_articles)
-            headline_df = headline_df.drop_duplicates(subset=['url'], keep='first')
+            headline_df = headline_df.drop_duplicates(
+                subset=['url'], keep='first')
             headline_df['id'] = range(len(headline_df))
 
-            display(headline_df[["source", "url"]].groupby("source") \
-                .count() \
-                .reset_index() \
-                .rename({'url': 'count'}))
+            display(headline_df[["source", "url"]].groupby("source")
+                    .count()
+                    .reset_index()
+                    .rename({'url': 'count'}))
             state.headline_data = headline_df.to_dict('records')
 
             # Complete the step using unified status system
             state.complete_step(step_name)
 
             if self.verbose:
-                print(f"✅ Completed Step 1: Gathered {len(all_articles)} URLs from {len(successful_sources)} RSS sources")
+                print(
+                    f"✅ Completed Step 1: Gathered {len(all_articles)} URLs from {len(successful_sources)} RSS sources")
                 if failed_sources:
                     print(f"⚠️  Failed sources: {', '.join(failed_sources)}")
 
@@ -454,17 +490,20 @@ class GatherUrlsTool:
             with sqlite3.connect(NEWSAGENTDB) as conn:
                 Url.create_table(conn)
                 for row in headline_df.itertuples():
-                    news_url = Url(row.url, '', row.title, None, datetime.now())
+                    news_url = Url(row.url, '', row.title,
+                                   None, datetime.now())
                     try:
                         news_url.insert(conn)
                     except Exception as e:
                         if self.logger and self.verbose:
-                            self.logger.error(f"Failed to insert URL: {str(e)} (might exist from previous run)")
+                            self.logger.error(
+                                f"Failed to insert URL: {str(e)} (might exist from previous run)")
 
             display(headline_df)
 
             if self.logger:
-                self.logger.info(f"Completed Step 1: Gathered {len(all_articles)} articles")
+                self.logger.info(
+                    f"Completed Step 1: Gathered {len(all_articles)} articles")
 
             # Serialize state after completing step
             state.serialize_to_db(step_name)
@@ -491,6 +530,7 @@ class GatherUrlsTool:
             },
             on_invoke_tool=self._fetch_urls
         )
+
 
 class FilterUrlsTool:
     """Tool for Step 2: Filter URLs to AI-related content
@@ -519,7 +559,8 @@ class FilterUrlsTool:
         state: NewsletterAgentState = ctx.context
         # Check if step already completed via persistent state
         if state.is_step_complete(step_name):
-            ai_related_count = sum(1 for article in state.headline_data if article.get('isAI') is True)
+            ai_related_count = sum(
+                1 for article in state.headline_data if article.get('isAI') is True)
             total_count = len(state.headline_data)
             return f"Step 2 already completed! Filtered {total_count} articles, {ai_related_count} identified as AI-related."
 
@@ -558,7 +599,8 @@ class FilterUrlsTool:
                 # Check each URL against the urls table
                 new_urls_mask = []
                 for _, row in headline_df.iterrows():
-                    url_to_check = row.get('url', '') or row.get('orig_url', '')
+                    url_to_check = row.get(
+                        'url', '') or row.get('orig_url', '')
                     if url_to_check:
                         existing_url = Url.get(conn, url_to_check)
 
@@ -575,7 +617,8 @@ class FilterUrlsTool:
                             # URL exists and no process_since set - treat as duplicate
                             new_urls_mask.append(False)
                     else:
-                        new_urls_mask.append(False)  # should never happen, no url to check
+                        # should never happen, no url to check
+                        new_urls_mask.append(False)
 
                 conn.close()
 
@@ -586,14 +629,18 @@ class FilterUrlsTool:
                 if duplicate_count > 0:
                     if self.verbose:
                         if state.process_since is not None:
-                            print(f"🔄 Filtered out {duplicate_count} URLs seen before {state.process_since.isoformat()}, processing {len(headline_df)} new URLs")
+                            print(
+                                f"🔄 Filtered out {duplicate_count} URLs seen before {state.process_since.isoformat()}, processing {len(headline_df)} new URLs")
                         else:
-                            print(f"🔄 Filtered out {duplicate_count} duplicate URLs, processing {len(headline_df)} new URLs")
+                            print(
+                                f"🔄 Filtered out {duplicate_count} duplicate URLs, processing {len(headline_df)} new URLs")
                     if self.logger:
                         if state.process_since is not None:
-                            self.logger.info(f"URL deduplication with process_since: {duplicate_count} URLs filtered (seen before {state.process_since.isoformat()}), {len(headline_df)} new URLs remain")
+                            self.logger.info(
+                                f"URL deduplication with process_since: {duplicate_count} URLs filtered (seen before {state.process_since.isoformat()}), {len(headline_df)} new URLs remain")
                         else:
-                            self.logger.info(f"URL deduplication: {duplicate_count} duplicates filtered, {len(headline_df)} new URLs remain")
+                            self.logger.info(
+                                f"URL deduplication: {duplicate_count} duplicates filtered, {len(headline_df)} new URLs remain")
 
                 # If no new URLs remain, complete step early
                 if headline_df.empty:
@@ -605,12 +652,15 @@ class FilterUrlsTool:
 
             except Exception as e:
                 if self.logger:
-                    self.logger.warning(f"URL deduplication failed: {e}. Proceeding without deduplication.")
+                    self.logger.warning(
+                        f"URL deduplication failed: {e}. Proceeding without deduplication.")
                 if self.verbose:
-                    print(f"⚠️ URL deduplication failed: {e}. Proceeding with all URLs.")
+                    print(
+                        f"⚠️ URL deduplication failed: {e}. Proceeding with all URLs.")
 
             if self.logger:
-                self.logger.info(f"🔍 Filtering {total_articles} headlines for AI relevance using LLM...")
+                self.logger.info(
+                    f"🔍 Filtering {total_articles} headlines for AI relevance using LLM...")
 
             filter_system_prompt, filter_user_prompt, model = \
                 LangfuseClient().get_prompt("newsagent/filter_urls")
@@ -634,15 +684,19 @@ class FilterUrlsTool:
             # Complete step using unified status system
             state.complete_step(step_name)
 
-            ai_related_count = sum(1 for article in state.headline_data if article.get('isAI') is True)
+            ai_related_count = sum(
+                1 for article in state.headline_data if article.get('isAI') is True)
             total_count = len(state.headline_data)
-            duplicate_count = original_count - total_count if 'original_count' in locals() else 0
+            duplicate_count = original_count - \
+                total_count if 'original_count' in locals() else 0
 
             if self.verbose:
                 if duplicate_count > 0:
-                    print(f"✅ Completed Step 2: {duplicate_count} duplicates removed, {ai_related_count} AI-related from {total_count} processed ({total_articles} original)")
+                    print(
+                        f"✅ Completed Step 2: {duplicate_count} duplicates removed, {ai_related_count} AI-related from {total_count} processed ({total_articles} original)")
                 else:
-                    print(f"✅ Completed Step 2: Filtered to {ai_related_count} AI-related headlines from {total_articles} total")
+                    print(
+                        f"✅ Completed Step 2: Filtered to {ai_related_count} AI-related headlines from {total_articles} total")
 
             # Build status message with deduplication stats
             if duplicate_count > 0:
@@ -711,7 +765,8 @@ class DownloadArticlesTool:
 
         # Check if step already completed via persistent state
         if state.is_step_complete(step_name):
-            ai_related_count = sum(1 for article in state.headline_data if article.get('isAI') is True)
+            ai_related_count = sum(
+                1 for article in state.headline_data if article.get('isAI') is True)
             total_count = len(state.headline_data)
             # todo: count downloaded articles with path configured
             # check if they exist in download directory
@@ -733,11 +788,10 @@ class DownloadArticlesTool:
             headline_df = pd.DataFrame(state.headline_data)
 
             # Filter for AI-related articles
-            ai_mask = headline_df['isAI'] == True
-            ai_df = headline_df[ai_mask].copy()
+            ai_df = headline_df.loc[headline_df['isAI'] == True].copy()
 
             if ai_df.empty:
-                return f"❌ No AI-related articles found to download. Please run step 2 first."
+                return "❌ No AI-related articles found to download. Please run step 2 first."
 
             # Prepare input for scrape_urls_concurrent: (index, url, title)
             scrape_inputs = []
@@ -749,7 +803,8 @@ class DownloadArticlesTool:
                 ))
 
             if self.logger:
-                self.logger.info(f"Starting concurrent scraping of {len(scrape_inputs)} AI-related articles")
+                self.logger.info(
+                    f"Starting concurrent scraping of {len(scrape_inputs)} AI-related articles")
 
             # Use real scraping with scrape_urls_concurrent
             scrape_results = await scrape_urls_concurrent(
@@ -765,8 +820,10 @@ class DownloadArticlesTool:
 
             # Create mapping from id to scrape results
             # Convert scrape results to DataFrame and merge with ai_df
-            scrape_df = pd.DataFrame(scrape_results, columns=['id', 'status', 'final_url', 'title', 'html_path', 'last_updated'])
-            ai_df = ai_df.merge(scrape_df[['id', 'status', 'final_url', 'html_path', 'last_updated']], on='id', how='left')
+            scrape_df = pd.DataFrame(scrape_results, columns=[
+                                     'id', 'status', 'final_url', 'title', 'html_path', 'last_updated'])
+            ai_df = ai_df.merge(scrape_df[[
+                                'id', 'status', 'final_url', 'html_path', 'last_updated']], on='id', how='left')
 
             os.makedirs(TEXT_DIR, exist_ok=True)
 
@@ -775,7 +832,8 @@ class DownloadArticlesTool:
                 if row.isAI is True and hasattr(row, 'html_path') and row.html_path:
                     try:
                         # Use normalize_html to extract clean text content
-                        content = normalize_html(row.html_path, logger=self.logger)
+                        content = normalize_html(
+                            row.html_path, logger=self.logger)
 
                         # Create text file path by replacing .html with .txt and moving to TEXT_DIR
                         html_file = Path(row.html_path)
@@ -789,15 +847,18 @@ class DownloadArticlesTool:
                         # Update DataFrame with text path and content length
                         ai_df.loc[row.Index, 'text_path'] = text_path
                         ai_df.loc[row.Index, 'content_length'] = len(content)
-                        ai_df['content_length'] = ai_df['content_length'].fillna(0).astype(int)
+                        ai_df['content_length'] = ai_df['content_length'].fillna(
+                            0).astype(int)
                         successful_downloads += 1
                         total_length += len(content)
 
                         if self.logger:
-                            self.logger.debug(f"Successfully extracted content to {text_path}: {len(content)} characters")
+                            self.logger.debug(
+                                f"Successfully extracted content to {text_path}: {len(content)} characters")
                     except Exception as e:
                         if self.logger:
-                            self.logger.warning(f"Failed to extract content from {row.html_path}: {e}")
+                            self.logger.warning(
+                                f"Failed to extract content from {row.html_path}: {e}")
                         ai_df.loc[row.Index, 'text_path'] = ''
                         ai_df.loc[row.Index, 'content_length'] = 0
                 else:
@@ -808,7 +869,26 @@ class DownloadArticlesTool:
             ai_df['text_path'] = ai_df['text_path'].fillna('')
             # Deduplicate by final_url, keeping the one with greater content_length
             ai_df['content_length'] = ai_df['content_length'].fillna(0)
-            ai_df = ai_df.sort_values('content_length', ascending=False).drop_duplicates(subset=['final_url'], keep='first')
+            ai_df = ai_df.sort_values('content_length', ascending=False).drop_duplicates(
+                subset=['final_url'], keep='first')
+
+            # Extract domain name from final_url
+            def extract_domain(url):
+                """Extract root domain from URL (e.g., 'bbc.co.uk', 'archive.is')"""
+                if not url or pd.isna(url):
+                    return ''
+                try:
+                    extracted = tldextract.extract(str(url))
+                    if extracted.domain:
+                        domain = f"{extracted.domain}.{extracted.suffix}"
+                    else:  # local hosts, ip addresses or other edge cases
+                        domain = extracted.subdomain
+                    return domain.lower()
+                except Exception:
+                    return ''
+
+            ai_df['domain'] = ai_df['final_url'].fillna(
+                ai_df['url']).apply(extract_domain)
 
             # Update URLs table with final_url and isAI information
             urls_updated = 0
@@ -818,7 +898,8 @@ class DownloadArticlesTool:
                     for row in ai_df.itertuples():
                         try:
                             original_url = row.url
-                            final_url = getattr(row, 'final_url', original_url) or original_url
+                            final_url = getattr(
+                                row, 'final_url', original_url) or original_url
                             is_ai = getattr(row, 'isAI', False)
 
                             # Get existing URL record
@@ -832,10 +913,12 @@ class DownloadArticlesTool:
 
                         except Exception as e:
                             if self.logger:
-                                self.logger.warning(f"Failed to update URL record for {original_url}: {e}")
+                                self.logger.warning(
+                                    f"Failed to update URL record for {original_url}: {e}")
 
                 if self.logger and urls_updated > 0:
-                    self.logger.info(f"Updated {urls_updated} URL records with final URLs and AI classification")
+                    self.logger.info(
+                        f"Updated {urls_updated} URL records with final URLs and AI classification")
 
             except Exception as e:
                 if self.logger:
@@ -846,8 +929,10 @@ class DownloadArticlesTool:
             ai_df = await process_dataframe_with_filtering(ai_df)
 
             # Calculate stats
-            download_success_rate = successful_downloads / len(ai_df) if not ai_df.empty else 0
-            avg_article_length = total_length / successful_downloads if successful_downloads > 0 else 0
+            download_success_rate = successful_downloads / \
+                len(ai_df) if not ai_df.empty else 0
+            avg_article_length = total_length / \
+                successful_downloads if successful_downloads > 0 else 0
 
             # Store updated headline data in state
             state.headline_data = ai_df.to_dict('records')
@@ -856,13 +941,15 @@ class DownloadArticlesTool:
             state.complete_step(step_name)
 
             if self.verbose:
-                print(f"✅ Completed Step 3: Downloaded {successful_downloads} AI-related articles")
+                print(
+                    f"✅ Completed Step 3: Downloaded {successful_downloads} AI-related articles")
 
             status_msg = f"✅ Step 3 {step_name} completed successfully! Downloaded {successful_downloads} AI-related articles with {download_success_rate:.0%} success rate."
             status_msg += f"\n📊 Average article length: {avg_article_length:.0f} characters"
-            status_msg += f"\n🔗 Content stored in persistent state."
+            status_msg += "\n🔗 Content stored in persistent state."
             if self.logger:
-                self.logger.info(f"Completed Step 3: Downloaded {successful_downloads} articles")
+                self.logger.info(
+                    f"Completed Step 3: Downloaded {successful_downloads} articles")
 
             # Serialize state after completing step
             state.serialize_to_db(step_name)
@@ -909,9 +996,9 @@ class ExtractSummariesTool:
             return content if content else ""
         except Exception as e:
             if self.logger:
-                self.logger.warning(f"Failed to read text file {text_path}: {e}")
+                self.logger.warning(
+                    f"Failed to read text file {text_path}: {e}")
             return ""
-
 
     def _extract_metadata(self, html_path: str) -> Dict[str, Any]:
         """Extract metadata description and tags from HTML file"""
@@ -951,7 +1038,8 @@ class ExtractSummariesTool:
 
             # 2. twitter:description
             if not description:
-                twitter_desc = soup.find("meta", attrs={"name": "twitter:description"})
+                twitter_desc = soup.find(
+                    "meta", attrs={"name": "twitter:description"})
                 if twitter_desc and twitter_desc.get("content"):
                     description = twitter_desc.get("content").strip()
 
@@ -976,16 +1064,19 @@ class ExtractSummariesTool:
             # 3. keywords meta tag
             keywords_tag = soup.find("meta", attrs={"name": "keywords"})
             if keywords_tag and keywords_tag.get("content"):
-                keywords = [k.strip() for k in keywords_tag.get("content").split(",")]
+                keywords = [k.strip()
+                            for k in keywords_tag.get("content").split(",")]
                 tags.extend(keywords)
 
             # 4. parsely-section
-            parsely_section = soup.find("meta", attrs={"name": "parsely-section"})
+            parsely_section = soup.find(
+                "meta", attrs={"name": "parsely-section"})
             if parsely_section and parsely_section.get("content"):
                 tags.append(parsely_section.get("content").strip())
 
             # 5. JSON-LD structured data keywords
-            json_ld_scripts = soup.find_all('script', type='application/ld+json')
+            json_ld_scripts = soup.find_all(
+                'script', type='application/ld+json')
             for script in json_ld_scripts:
                 try:
                     data = json.loads(script.string)
@@ -995,7 +1086,8 @@ class ExtractSummariesTool:
                             if isinstance(data['keywords'], list):
                                 tags.extend(data['keywords'])
                             elif isinstance(data['keywords'], str):
-                                tags.extend([k.strip() for k in data['keywords'].split(',')])
+                                tags.extend([k.strip()
+                                            for k in data['keywords'].split(',')])
                         if 'articleSection' in data:
                             tags.append(data['articleSection'])
                     elif isinstance(data, list):
@@ -1006,7 +1098,8 @@ class ExtractSummariesTool:
                                     if isinstance(item['keywords'], list):
                                         tags.extend(item['keywords'])
                                     elif isinstance(item['keywords'], str):
-                                        tags.extend([k.strip() for k in item['keywords'].split(',')])
+                                        tags.extend(
+                                            [k.strip() for k in item['keywords'].split(',')])
                                 if 'articleSection' in item:
                                     tags.append(item['articleSection'])
                 except (json.JSONDecodeError, KeyError, TypeError):
@@ -1014,7 +1107,8 @@ class ExtractSummariesTool:
 
             # Clean up tags: remove duplicates, empty strings, and normalize
             tags = flatten(tags)
-            tags = list(set([tag.strip() for tag in tags if tag and tag.strip()]))
+            tags = list(set([tag.strip()
+                        for tag in tags if tag and tag.strip()]))
 
             return {
                 "description": description,
@@ -1023,9 +1117,9 @@ class ExtractSummariesTool:
 
         except Exception as e:
             if self.logger:
-                self.logger.warning(f"Failed to extract metadata from {html_path}: {e}")
+                self.logger.warning(
+                    f"Failed to extract metadata from {html_path}: {e}")
             return {"description": "", "tags": []}
-
 
     async def _extract_summaries(self, ctx, args: str) -> str:
         """Execute Step 4: Extract Summaries using AI-powered summarization"""
@@ -1036,15 +1130,15 @@ class ExtractSummariesTool:
 
         # Check if step already completed via persistent state
         if state.is_step_complete(step_name):
-            return f"Step 4 already completed! Generated summaries."
+            return "Step 4 already completed! Generated summaries."
 
         # Check if step 3 is completed
         if not state.is_step_complete("step_03_download_articles"):
-            return f"❌ Cannot execute Step 4: Step 3 (Download Articles) must be completed first."
+            return "❌ Cannot execute Step 4: Step 3 (Download Articles) must be completed first."
 
         # Check if workflow is blocked by errors
         if state.has_errors():
-            return f"❌ Cannot execute Step 4: Workflow is blocked by errors. {state.workflow_status_message}"
+            return "❌ Cannot execute Step 4: Workflow is blocked by errors. {state.workflow_status_message}"
 
         try:
             # Update workflow status for UI tracking
@@ -1055,20 +1149,24 @@ class ExtractSummariesTool:
             headline_df = pd.DataFrame(state.headline_data)
             # Filter to AI-related articles with HTML content
             # TODO: filter to articles with text content with .str.len() > 0
-            ai_articles_mask = (headline_df.get('isAI') == True) & (headline_df['text_path'].notna())
+            ai_articles_mask = (headline_df.get('isAI') == True) & (
+                headline_df['text_path'].notna())
             if not ai_articles_mask.any():
-                return f"❌ No AI-related articles with HTML content found to summarize. Please run step 3 first."
+                return "❌ No AI-related articles with HTML content found to summarize. Please run step 3 first."
 
             ai_articles_df = headline_df[ai_articles_mask].copy()
 
             if self.logger:
-                self.logger.info(f"Processing {len(ai_articles_df)} AI articles for summarization")
+                self.logger.info(
+                    f"Processing {len(ai_articles_df)} AI articles for summarization")
 
             # Load text content into DataFrame
-            ai_articles_df['text_content'] = ai_articles_df['text_path'].apply(self._read_text_file)
+            ai_articles_df['text_content'] = ai_articles_df['text_path'].apply(
+                self._read_text_file)
 
             # Get prompt and model from Langfuse
-            system_prompt, user_prompt, model = LangfuseClient().get_prompt("newsagent/extract_summaries")
+            system_prompt, user_prompt, model = LangfuseClient(
+            ).get_prompt("newsagent/extract_summaries")
 
             if self.logger:
                 self.logger.info(f"Using model '{model}' for summarization")
@@ -1087,12 +1185,15 @@ class ExtractSummariesTool:
             # TODO: even though we pass text_content variable
             #  always needs input_text as prompt to pass the full dataframe
             if self.logger:
-                self.logger.info(f"Starting summarization for {len(ai_articles_df)} articles")
+                self.logger.info(
+                    f"Starting summarization for {len(ai_articles_df)} articles")
 
             ai_articles_df['summary'] = await summary_agent.filter_dataframe(
                 ai_articles_df[['id', 'text_content']],
-                item_list_field='results_list',  # This tells it to extract the list from the batch response
-                value_field='summary',           # This tells it to get the 'summary' field from each ArticleSummary
+                # This tells it to extract the list from the batch response
+                item_list_field='results_list',
+                # This tells it to get the 'summary' field from each ArticleSummary
+                value_field='summary',
                 item_id_field='id',              # This maps the responses back to the correct rows
                 chunk_size=1                     # send in batches of
             )
@@ -1101,21 +1202,28 @@ class ExtractSummariesTool:
 
             # Calculate statistics
             articles_processed = len(ai_articles_df)
-            successful_summaries = len([s for s in ai_articles_df['summary'] if s and s.strip() and not s.startswith("Error")])
+            successful_summaries = len(
+                [s for s in ai_articles_df['summary'] if s and s.strip() and not s.startswith("Error")])
             summarization_errors = articles_processed - successful_summaries
 
             # Update headline_df with summaries
             headline_df['summary'] = ai_articles_df['summary']
             if self.logger:
-                self.logger.info(f"Extracting metadata from HTML files for {len(ai_articles_df)} articles")
+                self.logger.info(
+                    f"Extracting metadata from HTML files for {len(ai_articles_df)} articles")
 
             # Extract metadata from HTML files
-            ai_articles_df['metadata'] = ai_articles_df['html_path'].apply(self._extract_metadata)
+            ai_articles_df['metadata'] = ai_articles_df['html_path'].apply(
+                self._extract_metadata)
             # Extract description and tags from metadata
-            ai_articles_df['description'] = ai_articles_df['metadata'].apply(lambda x: x.get('description', '') if isinstance(x, dict) else '')
-            ai_articles_df['description'] = ai_articles_df['description'].fillna('')
-            ai_articles_df['tags'] = ai_articles_df['metadata'].apply(lambda x: x.get('tags', []) if isinstance(x, dict) else [])
-            ai_articles_df['tags'] = ai_articles_df['tags'].fillna('').apply(lambda x: [] if x == '' else x)
+            ai_articles_df['description'] = ai_articles_df['metadata'].apply(
+                lambda x: x.get('description', '') if isinstance(x, dict) else '')
+            ai_articles_df['description'] = ai_articles_df['description'].fillna(
+                '')
+            ai_articles_df['tags'] = ai_articles_df['metadata'].apply(
+                lambda x: x.get('tags', []) if isinstance(x, dict) else [])
+            ai_articles_df['tags'] = ai_articles_df['tags'].fillna(
+                '').apply(lambda x: [] if x == '' else x)
             ai_articles_df.drop('metadata', axis=1, inplace=True)
 
             # Update headline_df with description and tags
@@ -1129,12 +1237,13 @@ class ExtractSummariesTool:
             state.complete_step(step_name)
 
             if self.verbose:
-                print(f"✅ Completed Step 4: Generated AI summaries for {successful_summaries}/{articles_processed} articles")
+                print(
+                    f"✅ Completed Step 4: Generated AI summaries for {successful_summaries}/{articles_processed} articles")
 
             status_msg = f"✅ Step 4 {step_name} completed successfully! Generated AI-powered summaries for {successful_summaries}/{articles_processed} articles."
             if summarization_errors > 0:
                 status_msg += f"\n⚠️  Summarization errors: {summarization_errors}"
-            status_msg += f"\n💾 Summaries stored in headline DataFrame."
+            status_msg += "\n💾 Summaries stored in headline DataFrame."
 
             # Serialize state after completing step
             state.serialize_to_db(step_name)
@@ -1156,6 +1265,7 @@ class ExtractSummariesTool:
             },
             on_invoke_tool=self._extract_summaries
         )
+
 
 class ClusterByTopicTool:
     """Tool for Step 5: Cluster articles by topic
@@ -1190,7 +1300,8 @@ class ClusterByTopicTool:
         # Add topics if present (join with commas)
         if 'topics' in row and row['topics']:
             if isinstance(row['topics'], list):
-                topics_str = ", ".join(str(topic).strip() for topic in row['topics'] if topic)
+                topics_str = ", ".join(str(topic).strip()
+                                       for topic in row['topics'] if topic)
             else:
                 topics_str = str(row['topics']).strip()
             if topics_str:
@@ -1201,7 +1312,6 @@ class ClusterByTopicTool:
             parts.append(str(row['summary']).strip())
 
         return "\n\n".join(parts)
-
 
     async def _get_embeddings_df(self, headline_data: pd.DataFrame, embedding_model: str = "text-embedding-3-large") -> pd.DataFrame:
         """
@@ -1218,12 +1328,14 @@ class ClusterByTopicTool:
         from llm import paginate_df_async
 
         if self.logger:
-            self.logger.info(f"Getting embeddings for {len(headline_data)} article summaries using {embedding_model}")
+            self.logger.info(
+                f"Getting embeddings for {len(headline_data)} article summaries using {embedding_model}")
 
         # Create extended_summary column by concatenating available fields
         headline_data_copy = headline_data.copy()
 
-        headline_data_copy['extended_summary'] = headline_data_copy.apply(self._create_extended_summary, axis=1)
+        headline_data_copy['extended_summary'] = headline_data_copy.apply(
+            self._create_extended_summary, axis=1)
 
         # Filter to articles with non-empty extended summaries
         articles_with_summaries = headline_data_copy[
@@ -1233,7 +1345,8 @@ class ClusterByTopicTool:
 
         if articles_with_summaries.empty:
             if self.logger:
-                self.logger.warning("No articles with extended summaries found for embedding")
+                self.logger.warning(
+                    "No articles with extended summaries found for embedding")
             return pd.DataFrame()
 
         all_embeddings = []
@@ -1242,7 +1355,8 @@ class ClusterByTopicTool:
         # Use paginate_df_async similar to do_dedupe.py
         async for batch_df in paginate_df_async(articles_with_summaries, 25):
             text_batch = batch_df["extended_summary"].to_list()
-            response = client.embeddings.create(input=text_batch, model=embedding_model)
+            response = client.embeddings.create(
+                input=text_batch, model=embedding_model)
             batch_embeddings = [item.embedding for item in response.data]
             all_embeddings.extend(batch_embeddings)
 
@@ -1253,52 +1367,56 @@ class ClusterByTopicTool:
         )
 
         if self.logger:
-            self.logger.info(f"Successfully generated {len(embedding_df)} embeddings with {len(embedding_df.columns)} dimensions")
+            self.logger.info(
+                f"Successfully generated {len(embedding_df)} embeddings with {len(embedding_df.columns)} dimensions")
 
         return embedding_df
 
     async def _free_form_extraction(self, articles_with_summaries: pd.DataFrame) -> pd.DataFrame:
-            """Extract topics from article summaries using AI"""
-            # Step 1: Extract topics from summaries using AI
-            if self.logger:
-                self.logger.info(f"Starting topic extraction for clustering")
+        """Extract topics from article summaries using AI"""
+        # Step 1: Extract topics from summaries using AI
+        if self.logger:
+            self.logger.info("Starting topic extraction for clustering")
 
-            # Get prompt and model from Langfuse
-            system_prompt, user_prompt, model = LangfuseClient().get_prompt("newsagent/extract_topics")
+        # Get prompt and model from Langfuse
+        system_prompt, user_prompt, model = LangfuseClient(
+        ).get_prompt("newsagent/extract_topics")
 
-            if self.logger:
-                self.logger.info(f"Using model '{model}' for topic extraction")
-                self.logger.info(f"Processing {len(articles_with_summaries)} articles for topic extraction")
+        if self.logger:
+            self.logger.info(f"Using model '{model}' for topic extraction")
+            self.logger.info(
+                f"Processing {len(articles_with_summaries)} articles for topic extraction")
 
-            # Create LLMagent for topic extraction
-            topic_agent = LLMagent(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                output_type=TopicExtractionList,
-                model=model,
-                verbose=self.verbose,
-                logger=self.logger
-            )
+        # Create LLMagent for topic extraction
+        topic_agent = LLMagent(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            output_type=TopicExtractionList,
+            model=model,
+            verbose=self.verbose,
+            logger=self.logger
+        )
 
-            # Extract topics using filter_dataframe
-            articles_with_summaries['extracted_topics'] = await topic_agent.filter_dataframe(
-                articles_with_summaries[['id', 'summary']],
-                value_field='topics_list',
-                item_list_field='results_list',
-                item_id_field='id',
-                chunk_size=10
-            )
-            # Handle NaN values in extracted_topics
-            articles_with_summaries['extracted_topics'] = articles_with_summaries['extracted_topics'].fillna('').apply(
-                lambda x: list() if not isinstance(x, list) else x
-            )
+        # Extract topics using filter_dataframe
+        articles_with_summaries['extracted_topics'] = await topic_agent.filter_dataframe(
+            articles_with_summaries[['id', 'summary']],
+            value_field='topics_list',
+            item_list_field='results_list',
+            item_id_field='id',
+            chunk_size=10
+        )
+        # Handle NaN values in extracted_topics
+        articles_with_summaries['extracted_topics'] = articles_with_summaries['extracted_topics'].fillna('').apply(
+            lambda x: list() if not isinstance(x, list) else x
+        )
 
-            if self.logger:
-                topics_extracted = articles_with_summaries['extracted_topics'].apply(lambda x: len(x) if isinstance(x, list) else 0).sum()
-                self.logger.info(f"Successfully extracted {topics_extracted} total topics across articles")
+        if self.logger:
+            topics_extracted = articles_with_summaries['extracted_topics'].apply(
+                lambda x: len(x) if isinstance(x, list) else 0).sum()
+            self.logger.info(
+                f"Successfully extracted {topics_extracted} total topics across articles")
 
-            return articles_with_summaries
-
+        return articles_with_summaries
 
     async def _classify_canonical_topic(self, headline_df: pd.DataFrame, topic: str) -> List[bool]:
         """
@@ -1313,7 +1431,8 @@ class ClusterByTopicTool:
         """
         # Get prompt and model from Langfuse
         langfuse_client = LangfuseClient()
-        system_prompt, user_prompt, model = langfuse_client.get_prompt("newsagent/canonical_topic")
+        system_prompt, user_prompt, model = langfuse_client.get_prompt(
+            "newsagent/canonical_topic")
 
         # Create LLMagent for canonical topic classification
         canonical_agent = LLMagent(
@@ -1321,7 +1440,7 @@ class ClusterByTopicTool:
             user_prompt=user_prompt,
             output_type=CanonicalTopicClassificationList,
             model=model,
-            verbose=False, #  too much output , always false
+            verbose=False,  # too much output , always false
             logger=self.logger
         )
 
@@ -1337,12 +1456,12 @@ class ClusterByTopicTool:
 
         return topic, relevance_series.tolist()
 
-
     async def _canonical_topic_extraction(self, articles_with_summaries: pd.DataFrame) -> pd.DataFrame:
         """Extract canonical topics from article summaries using AI"""
         # Classify against canonical topics
         if self.logger:
-            self.logger.info(f"Starting canonical topic classification for {len(CANONICAL_TOPICS)} topics")
+            self.logger.info(
+                f"Starting canonical topic classification for {len(CANONICAL_TOPICS)} topics")
 
         # Create all canonical topic classification tasks
         canonical_tasks = [
@@ -1353,13 +1472,15 @@ class ClusterByTopicTool:
         # Run all canonical topic classifications concurrently
         canonical_results = await asyncio.gather(*canonical_tasks, return_exceptions=True)
         # Initialize canonical_topics as list of empty lists
-        canonical_topics_lists = [list() for _ in range(len(articles_with_summaries))]
+        canonical_topics_lists = [list()
+                                  for _ in range(len(articles_with_summaries))]
 
         # Process canonical results
         for result in canonical_results:
             if isinstance(result, Exception):
                 if self.logger:
-                    self.logger.warning(f"Topic classification failed: {result}")
+                    self.logger.warning(
+                        f"Topic classification failed: {result}")
                 continue
 
             topic, relevance_list = result
@@ -1372,11 +1493,12 @@ class ClusterByTopicTool:
         articles_with_summaries['canonical_topics'] = canonical_topics_lists
 
         if self.logger:
-            total_canonical_matches = sum(len(topics) for topics in articles_with_summaries['canonical_topics'])
-            self.logger.info(f"Canonical topic classification complete: {total_canonical_matches} total topic matches")
+            total_canonical_matches = sum(
+                len(topics) for topics in articles_with_summaries['canonical_topics'])
+            self.logger.info(
+                f"Canonical topic classification complete: {total_canonical_matches} total topic matches")
 
         return articles_with_summaries
-
 
     async def _cleanup_topics(self, headline_df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -1388,17 +1510,20 @@ class ClusterByTopicTool:
         Returns:
             DataFrame with cleaned topics_list column
         """
-        system_prompt, user_prompt, model = LangfuseClient().get_prompt("newsagent/topic_cleanup")
+        system_prompt, user_prompt, model = LangfuseClient(
+        ).get_prompt("newsagent/topic_cleanup")
 
         if self.logger:
-            self.logger.info(f"Starting topic cleanup for {len(headline_df)} articles")
+            self.logger.info(
+                f"Starting topic cleanup for {len(headline_df)} articles")
 
         # Combine all topic sources into a single column removing duplicates
         headline_df['all_topics'] = headline_df.apply(
             lambda row: list(set(
                 (row.get('tags', []) if isinstance(row.get('tags'), list) else []) +
                 (row.get('extracted_topics', []) if isinstance(row.get('extracted_topics'), list) else []) +
-                (row.get('canonical_topics', []) if isinstance(row.get('canonical_topics'), list) else [])
+                (row.get('canonical_topics', []) if isinstance(
+                    row.get('canonical_topics'), list) else [])
             )), axis=1
         )
 
@@ -1422,7 +1547,6 @@ class ClusterByTopicTool:
 
         return headline_df
 
-
     async def _cluster_by_topic(self, ctx, args: str) -> str:
         """Execute Step 5: Cluster By Topic using persistent state"""
         step_name = "step_05_cluster_by_topic"
@@ -1435,12 +1559,13 @@ class ClusterByTopicTool:
         # Check if step already completed via persistent state
         if state.is_step_complete(step_name):
             cluster_count = len(state.clusters)
-            total_articles = sum(len(articles) for articles in state.clusters.values())
+            total_articles = sum(len(articles)
+                                 for articles in state.clusters.values())
             return f"Step 5 already completed! Created {cluster_count} topic clusters with {total_articles} articles."
 
         # Check if step 4 is completed
         if not state.is_step_complete("step_04_extract_summaries"):
-            return f"❌ Cannot execute Step 5: Step 4 (Extract Summaries) must be completed first."
+            return "❌ Cannot execute Step 5: Step 4 (Extract Summaries) must be completed first."
 
         # Check if workflow is blocked by errors
         if state.has_errors():
@@ -1459,7 +1584,7 @@ class ClusterByTopicTool:
                 (headline_df['summary'] != '')]
 
             if articles_with_summaries.empty:
-                return f"❌ No summarized articles found to cluster. Please run step 4 first."
+                return "❌ No summarized articles found to cluster. Please run step 4 first."
 
             # Clear existing clusters
             state.clusters = {}
@@ -1493,14 +1618,13 @@ class ClusterByTopicTool:
             #         if len(frequent_topics) > 10:
             #             self.logger.info(f"... and {len(frequent_topics) - 10} more")
 
-
             articles_with_summaries = await self._canonical_topic_extraction(articles_with_summaries)
 
             articles_with_summaries = await self._cleanup_topics(articles_with_summaries)
 
             headline_df['topics'] = articles_with_summaries['topics']
             if 'tags' in headline_df.columns:
-                headline_df=headline_df.drop(columns=['tags'])
+                headline_df = headline_df.drop(columns=['tags'])
 
             headline_df = await do_clustering(headline_df, logger=self.logger)
 
@@ -1569,17 +1693,19 @@ class RateArticlesTool:
 
         # Check if step already completed via persistent state
         if state.is_step_complete(step_name):
-            rated_articles = [article for article in state.headline_data if article.get('quality_rating')]
-            avg_rating = sum(article.get('quality_rating', 0) for article in rated_articles) / len(rated_articles) if rated_articles else 0
+            rated_articles = [
+                article for article in state.headline_data if article.get('quality_rating')]
+            avg_rating = sum(article.get('quality_rating', 0)
+                             for article in rated_articles) / len(rated_articles) if rated_articles else 0
             return f"Step 6 already completed! Rated {len(rated_articles)} articles with average rating {avg_rating:.1f}/10."
 
         # Check if step 5 is completed
         if not state.is_step_complete("step_05_cluster_by_topic"):
-            return f"❌ Cannot execute Step 6: Step 5 (Cluster By Topic) must be completed first."
+            return "❌ Cannot execute Step 6: Step 5 (Cluster By Topic) must be completed first."
 
         # Check if workflow is blocked by errors
         if state.has_errors():
-            return f"❌ Cannot execute Step 6: Workflow is blocked by errors. {state.workflow_status_message}"
+            return "❌ Cannot execute Step 6: Workflow is blocked by errors. {state.workflow_status_message}"
 
         try:
             # Update workflow status for UI tracking
@@ -1593,7 +1719,7 @@ class RateArticlesTool:
             ]
 
             if not clustered_articles:
-                return f"❌ No clustered articles found to rate. Please run step 5 first."
+                return "❌ No clustered articles found to rate. Please run step 5 first."
 
             # Rate each article based on mock criteria
             articles_rated = 0
@@ -1609,14 +1735,19 @@ class RateArticlesTool:
 
                 title_length = len(article.get('title', ''))
                 has_description = bool(article.get('description', ''))
-                source_quality = 8 if article.get('source') in ['Techmeme', 'Ars Technica', 'The Verge'] else 6
-                cluster_bonus = 2 if article.get('cluster_topic') != 'Other AI Topics' else 0
+                source_quality = 8 if article.get(
+                    'source') in ['Techmeme', 'Ars Technica', 'The Verge'] else 6
+                cluster_bonus = 2 if article.get(
+                    'cluster_topic') != 'Other AI Topics' else 0
 
                 # Calculate mock quality rating (1-10)
                 base_rating = 5
-                if title_length > 50: base_rating += 1
-                if has_description: base_rating += 1
-                rating = min(10, base_rating + (source_quality - 6) + cluster_bonus)
+                if title_length > 50:
+                    base_rating += 1
+                if has_description:
+                    base_rating += 1
+                rating = min(10, base_rating +
+                             (source_quality - 6) + cluster_bonus)
 
                 # Add some randomness to make it more realistic
                 rating = max(1, min(10, rating + random.uniform(-1, 1)))
@@ -1641,7 +1772,7 @@ class RateArticlesTool:
 
             status_msg = f"✅ Step 6 {step_name} completed successfully! Rated {articles_rated} articles with average rating {avg_rating:.1f}/10."
             status_msg += f"\n⭐ High quality articles (≥7.0): {high_quality_count}"
-            status_msg += f"\n💾 Ratings stored in persistent state."
+            status_msg += "\n💾 Ratings stored in persistent state."
 
             # Serialize state after completing step
             state.serialize_to_db(step_name)
@@ -1669,6 +1800,7 @@ class RateArticlesTool:
 # clean up categories to remove duplicates and merge similar themes and tighten names
 # assign articles to sections or other
 
+
 class SelectSectionsTool:
     """Tool for Step 7: Select newsletter sections
     select all stories with a minimum rating
@@ -1695,11 +1827,11 @@ class SelectSectionsTool:
 
         # Check if step 6 is completed
         if not state.is_step_complete("step_06_rate_articles"):
-            return f"❌ Cannot execute Step 7: Step 6 (Rate Articles) must be completed first."
+            return "❌ Cannot execute Step 7: Step 6 (Rate Articles) must be completed first."
 
         # Check if workflow is blocked by errors
         if state.has_errors():
-            return f"❌ Cannot execute Step 7: Workflow is blocked by errors. {state.workflow_status_message}"
+            return "❌ Cannot execute Step 7: Workflow is blocked by errors. {state.workflow_status_message}"
 
         try:
             # Update workflow status for UI tracking
@@ -1713,15 +1845,17 @@ class SelectSectionsTool:
             ]
 
             if not rated_articles:
-                return f"❌ No rated articles found to organize into sections. Please run step 6 first."
+                return "❌ No rated articles found to organize into sections. Please run step 6 first."
 
             # Clear existing sections if rerunning
             state.newsletter_sections = {}
 
             # Create newsletter sections based on topic clusters and ratings
             # Use existing topic clusters but prioritize high-quality articles
-            high_quality_articles = [a for a in rated_articles if a.get('quality_rating', 0) >= 7.0]
-            medium_quality_articles = [a for a in rated_articles if 5.0 <= a.get('quality_rating', 0) < 7.0]
+            high_quality_articles = [
+                a for a in rated_articles if a.get('quality_rating', 0) >= 7.0]
+            medium_quality_articles = [
+                a for a in rated_articles if 5.0 <= a.get('quality_rating', 0) < 7.0]
 
             # Group articles by cluster topic and select best ones for each section
             cluster_sections = {}
@@ -1738,8 +1872,10 @@ class SelectSectionsTool:
                     continue
 
                 # Sort articles by rating (highest first) and take top articles
-                sorted_articles = sorted(articles, key=lambda x: x.get('quality_rating', 0), reverse=True)
-                top_articles = sorted_articles[:5]  # Max 5 articles per section
+                sorted_articles = sorted(articles, key=lambda x: x.get(
+                    'quality_rating', 0), reverse=True)
+                # Max 5 articles per section
+                top_articles = sorted_articles[:5]
 
                 # Create section outline (will be filled in step 8)
                 section_content = {
@@ -1762,11 +1898,12 @@ class SelectSectionsTool:
             state.complete_step(step_name)
 
             if self.verbose:
-                print(f"✅ Completed Step 7: Created {len(state.newsletter_sections)} newsletter sections")
+                print(
+                    f"✅ Completed Step 7: Created {len(state.newsletter_sections)} newsletter sections")
 
             status_msg = f"✅ Step 7 {step_name} completed successfully! Organized content into {len(state.newsletter_sections)} sections with {articles_assigned} articles assigned."
             status_msg += f"\n📑 Sections: {', '.join(state.newsletter_sections.keys())}"
-            status_msg += f"\n💾 Section plan stored in persistent state."
+            status_msg += "\n💾 Section plan stored in persistent state."
 
             # Serialize state after completing step
             state.serialize_to_db(step_name)
@@ -1811,13 +1948,15 @@ class DraftSectionsTool:
 
         # Check if step already completed via persistent state
         if state.is_step_complete(step_name):
-            drafted_sections = [s for s in state.newsletter_sections.values() if s.get('content')]
-            total_words = sum(len(s.get('content', '').split()) for s in drafted_sections)
+            drafted_sections = [
+                s for s in state.newsletter_sections.values() if s.get('content')]
+            total_words = sum(len(s.get('content', '').split())
+                              for s in drafted_sections)
             return f"Step 8 already completed! Drafted {len(drafted_sections)} sections with {total_words} total words."
 
         # Check if step 7 is completed
         if not state.is_step_complete("step_07_select_sections"):
-            return f"❌ Cannot execute Step 8: Step 7 (Select Sections) must be completed first."
+            return "❌ Cannot execute Step 8: Step 7 (Select Sections) must be completed first."
 
         # Check if workflow is blocked by errors
         if state.has_errors():
@@ -1830,7 +1969,7 @@ class DraftSectionsTool:
 
             # Get section plans from persistent state
             if not state.newsletter_sections:
-                return f"❌ No newsletter sections found to draft. Please run step 7 first."
+                return "❌ No newsletter sections found to draft. Please run step 7 first."
 
             # Draft content for each section
             sections_drafted = 0
@@ -1857,11 +1996,13 @@ class DraftSectionsTool:
                     'Industry News': "The AI industry continues to evolve with new partnerships, funding rounds, and product launches."
                 }
 
-                intro = intro_templates.get(section_name, f"Here are the latest updates in {section_name.lower()}.")
+                intro = intro_templates.get(
+                    section_name, f"Here are the latest updates in {section_name.lower()}.")
                 section_content += f"{intro}\n\n"
 
                 # Add article summaries
-                for i, article in enumerate(articles[:3]):  # Top 3 articles per section
+                # Top 3 articles per section
+                for i, article in enumerate(articles[:3]):
                     article_url = article.get('url', '')
                     article_title = article.get('title', 'Unknown Title')
                     article_source = article.get('source', 'Unknown Source')
@@ -1869,8 +2010,8 @@ class DraftSectionsTool:
                     # Get the actual summary from article data if available
                     summary_bullets = article.get('summary', [
                         f"Key insights from this {section_name.lower()} article",
-                        f"Important implications for the AI community",
-                        f"Notable developments worth following"
+                        "Important implications for the AI community",
+                        "Notable developments worth following"
                     ])
 
                     section_content += f"### {article_title}\n"
@@ -1884,24 +2025,28 @@ class DraftSectionsTool:
                 # Store the drafted content
                 state.newsletter_sections[section_name]['content'] = section_content
                 state.newsletter_sections[section_name]['section_status'] = 'drafted'
-                state.newsletter_sections[section_name]['draft_timestamp'] = datetime.now().isoformat()
-                state.newsletter_sections[section_name]['word_count'] = len(section_content.split())
+                state.newsletter_sections[section_name]['draft_timestamp'] = datetime.now(
+                ).isoformat()
+                state.newsletter_sections[section_name]['word_count'] = len(
+                    section_content.split())
 
                 sections_drafted += 1
                 total_words += len(section_content.split())
 
             # Calculate average words per section
-            avg_words_per_section = total_words / sections_drafted if sections_drafted > 0 else 0
+            avg_words_per_section = total_words / \
+                sections_drafted if sections_drafted > 0 else 0
 
             # Complete the step
             state.complete_step(step_name)
 
             if self.verbose:
-                print(f"✅ Completed Step 8: Drafted {sections_drafted} sections")
+                print(
+                    f"✅ Completed Step 8: Drafted {sections_drafted} sections")
 
             status_msg = f"✅ Step 8 {step_name} completed successfully! Drafted {sections_drafted} sections with {total_words} total words."
             status_msg += f"\n📝 Average words per section: {avg_words_per_section:.0f}"
-            status_msg += f"\n💾 Section content stored in persistent state."
+            status_msg += "\n💾 Section content stored in persistent state."
 
             # Serialize state after completing step
             state.serialize_to_db(step_name)
@@ -1943,13 +2088,15 @@ class FinalizeNewsletterTool:
 
         # Check if step already completed via persistent state
         if state.is_step_complete(step_name):
-            newsletter_length = len(state.final_newsletter.split()) if state.final_newsletter else 0
-            sections_count = len([s for s in state.newsletter_sections.values() if s.get('content')])
+            newsletter_length = len(
+                state.final_newsletter.split()) if state.final_newsletter else 0
+            sections_count = len(
+                [s for s in state.newsletter_sections.values() if s.get('content')])
             return f"Step 9 already completed! Newsletter finalized with {sections_count} sections and {newsletter_length} words."
 
         # Check if step 8 is completed
         if not state.is_step_complete("step_08_draft_sections"):
-            return f"❌ Cannot execute Step 9: Step 8 (Draft Sections) must be completed first."
+            return "❌ Cannot execute Step 9: Step 8 (Draft Sections) must be completed first."
 
         # Check if workflow is blocked by errors
         if state.has_errors():
@@ -1967,14 +2114,14 @@ class FinalizeNewsletterTool:
             }
 
             if not drafted_sections:
-                return f"❌ No drafted sections found to finalize. Please run step 8 first."
+                return "❌ No drafted sections found to finalize. Please run step 8 first."
 
             # Create the final newsletter by combining all sections
             today = datetime.now().strftime("%B %d, %Y")
 
             newsletter_content = f"# AI News Digest - {today}\n\n"
-            newsletter_content += f"*Curated insights from the latest in artificial intelligence*\n\n"
-            newsletter_content += f"---\n\n"
+            newsletter_content += "*Curated insights from the latest in artificial intelligence*\n\n"
+            newsletter_content += "---\n\n"
 
             # Add table of contents
             newsletter_content += "## Table of Contents\n\n"
@@ -1991,7 +2138,7 @@ class FinalizeNewsletterTool:
             newsletter_content += "## About This Newsletter\n\n"
             newsletter_content += "This AI News Digest was automatically curated using our intelligent newsletter agent. "
             newsletter_content += f"We analyzed {len(state.headline_data)} articles from {len(set(a.get('source', '') for a in state.headline_data))} sources "
-            newsletter_content += f"to bring you the most relevant AI developments.\n\n"
+            newsletter_content += "to bring you the most relevant AI developments.\n\n"
             newsletter_content += f"*Generated on {today}*\n"
 
             # Store the final newsletter
@@ -2003,21 +2150,25 @@ class FinalizeNewsletterTool:
 
             # Mock quality score based on content metrics
             base_quality = 7.0
-            if sections_included >= 4: base_quality += 0.5
-            if newsletter_length >= 2000: base_quality += 0.5
-            if newsletter_length >= 3000: base_quality += 0.5
+            if sections_included >= 4:
+                base_quality += 0.5
+            if newsletter_length >= 2000:
+                base_quality += 0.5
+            if newsletter_length >= 3000:
+                base_quality += 0.5
             final_quality_score = min(10.0, base_quality)
 
             # Complete the step and mark workflow as complete
             state.complete_step(step_name)
 
             if self.verbose:
-                print(f"✅ Completed Step 9: Finalized newsletter ({newsletter_length} words)")
+                print(
+                    f"✅ Completed Step 9: Finalized newsletter ({newsletter_length} words)")
 
             status_msg = f"🎉 Step 9 {step_name} completed successfully! Newsletter finalized with {sections_included} sections and {newsletter_length} words."
             status_msg += f"\n⭐ Quality score: {final_quality_score:.1f}/10"
-            status_msg += f"\n📰 Complete newsletter stored in persistent state"
-            status_msg += f"\n✅ Workflow complete! All 9 steps finished successfully."
+            status_msg += "\n📰 Complete newsletter stored in persistent state"
+            status_msg += "\n✅ Workflow complete! All 9 steps finished successfully."
 
             # Serialize state after completing step
             state.serialize_to_db(step_name)
@@ -2076,40 +2227,45 @@ class NewsletterAgent(Agent[NewsletterAgentState]):
         if state is not None:
             self.state = state
             if self.verbose:
-                self.logger.info(f"Using provided state with {len(state.headline_data)} articles")
+                self.logger.info(
+                    f"Using provided state with {len(state.headline_data)} articles")
         else:
-            self.logger.info(f"Trying to load state from existing session")
+            self.logger.info("Trying to load state from existing session")
 
             # Try to load existing state from session
             try:
                 # The OpenAI Agents SDK Runner.run() saves context to session automatically
                 # We need to check if there's existing context for this session
                 if hasattr(self.session, 'get_context'):
-                    self.logger.info(f"Using existing session get_context")
+                    self.logger.info("Using existing session get_context")
                     existing_context = self.session.get_context()
                 elif hasattr(self.session, 'load_context'):
-                    self.logger.info(f"Using existing session load_context")
+                    self.logger.info("Using existing session load_context")
                     existing_context = self.session.load_context()
                 else:
-                    self.logger.info(f"fallback to getattr")
+                    self.logger.info("fallback to getattr")
                     existing_context = getattr(self.session, '_context', None)
 
                 if existing_context and isinstance(existing_context, NewsletterAgentState):
                     self.state = existing_context
                     if self.verbose:
-                        self.logger.info(f"Restored state from session '{session_id}' with {len(self.state.headline_data)} articles at step {self.state.get_current_step()}")
+                        self.logger.info(
+                            f"Restored state from session '{session_id}' with {len(self.state.headline_data)} articles at step {self.state.get_current_step()}")
                 else:
-                    self.logger.info(f"No existing context found, create new state")
+                    self.logger.info(
+                        "No existing context found, create new state")
                     # No existing context found, create new state
                     self.state = NewsletterAgentState()
                     if self.verbose:
-                        self.logger.info(f"Created new NewsletterAgentState for session '{session_id}' (no existing context found)")
+                        self.logger.info(
+                            f"Created new NewsletterAgentState for session '{session_id}' (no existing context found)")
 
             except Exception as e:
                 # Fallback to new state if session loading fails
                 self.state = NewsletterAgentState()
                 if self.verbose:
-                    self.logger.warning(f"Could not load session state for '{session_id}': {e}. Created new NewsletterAgentState.")
+                    self.logger.warning(
+                        f"Could not load session state for '{session_id}': {e}. Created new NewsletterAgentState.")
 
         # System prompt that guides tool selection based on workflow status
         system_prompt = """
@@ -2174,7 +2330,8 @@ Remember: Your state is persistent. You can safely resume from any point. Never 
                 RateArticlesTool(self.verbose, self.logger).create_tool(),
                 SelectSectionsTool(self.verbose, self.logger).create_tool(),
                 DraftSectionsTool(self.verbose, self.logger).create_tool(),
-                FinalizeNewsletterTool(self.verbose, self.logger).create_tool(),
+                FinalizeNewsletterTool(
+                    self.verbose, self.logger).create_tool(),
             ],
             **kwargs
         )
@@ -2183,7 +2340,8 @@ Remember: Your state is persistent. You can safely resume from any point. Never 
         self._tool_dict = {tool.name: tool for tool in self.tools}
 
         if self.verbose:
-            print(f"Initialized NewsletterAgent with persistent state and 9-step workflow")
+            print(
+                "Initialized NewsletterAgent with persistent state and 9-step workflow")
             print(f"Session ID: {session_id}")
 
     def get_current_state_summary(self) -> str:
@@ -2205,7 +2363,8 @@ Remember: Your state is persistent. You can safely resume from any point. Never 
 
             # Add error info if present
             if self.state.has_errors():
-                summary_lines.append(f"⚠️  Has Errors: {self.state.workflow_status_message}")
+                summary_lines.append(
+                    f"⚠️  Has Errors: {self.state.workflow_status_message}")
 
             # Data summary
             summary_lines.extend([
@@ -2215,10 +2374,14 @@ Remember: Your state is persistent. You can safely resume from any point. Never 
             ])
 
             if self.state.headline_data:
-                ai_related = sum(1 for a in self.state.headline_data if a.get('isAI') is True)
-                with_summaries = sum(1 for a in self.state.headline_data if a.get('summary'))
-                with_topics = sum(1 for a in self.state.headline_data if a.get('extracted_topics') or a.get('canonical_topics'))
-                sources = len(set(a.get('source', 'Unknown') for a in self.state.headline_data))
+                ai_related = sum(
+                    1 for a in self.state.headline_data if a.get('isAI') is True)
+                with_summaries = sum(
+                    1 for a in self.state.headline_data if a.get('summary'))
+                with_topics = sum(1 for a in self.state.headline_data if a.get(
+                    'extracted_topics') or a.get('canonical_topics'))
+                sources = len(set(a.get('source', 'Unknown')
+                              for a in self.state.headline_data))
 
                 summary_lines.extend([
                     f"  AI-related: {ai_related}",
@@ -2241,7 +2404,8 @@ Remember: Your state is persistent. You can safely resume from any point. Never 
                 summary_lines.extend([
                     "",
                     f"COMMON TOPICS ({len(self.state.common_topics)}):",
-                    f"  {', '.join(self.state.common_topics[:5])}" + ("..." if len(self.state.common_topics) > 5 else "")
+                    f"  {', '.join(self.state.common_topics[:5])}" + (
+                        "..." if len(self.state.common_topics) > 5 else "")
                 ])
 
             return "\n".join(summary_lines)
@@ -2264,7 +2428,8 @@ Remember: Your state is persistent. You can safely resume from any point. Never 
 
         if target_tool is None:
             available_tools = list(self._tool_dict.keys())
-            raise ValueError(f"Unknown tool: {tool_name}. Available: {available_tools}")
+            raise ValueError(
+                f"Unknown tool: {tool_name}. Available: {available_tools}")
 
         # Create proper context using the same pattern as the SDK
         ctx = RunContextWrapper(self.state)
@@ -2299,7 +2464,8 @@ async def main():
         raise ValueError("OPENAI_API_KEY environment variable not set")
 
     # Create agent with persistent state (timeout set in __init__)
-    agent = NewsletterAgent(session_id="test_newsletter", verbose=True, timeout=300.0)
+    agent = NewsletterAgent(session_id="test_newsletter",
+                            verbose=True, timeout=300.0)
 
     # User prompt to run complete workflow
     user_prompt = "Run all the workflow steps in order and create the newsletter"
@@ -2314,7 +2480,7 @@ async def main():
 
     print("=" * 80)
     print(f"⏱️  Total execution time: {duration:.2f}s")
-    print(f"📊 Final result:")
+    print("📊 Final result:")
     print(result)
 
 

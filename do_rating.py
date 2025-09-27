@@ -8,13 +8,24 @@ from datetime import datetime, timezone, timedelta
 from config import NEWSAGENTDB
 # from db import Article
 import logging
-import random
+# import random
 import asyncio
 from pydantic import BaseModel, Field
 
-from llm import LLMagent, LangfuseClient, paginate_df_async
+from llm import LLMagent, LangfuseClient  # , paginate_df_async
 
 _logger = logging.getLogger(__name__)
+
+
+class StoryRating(BaseModel):
+    """StoryRating class for generic structured output rating"""
+    id: int = Field(description="The id of the story")
+    rating: int = Field(description="An integer rating of the story")
+
+
+class StoryRatings(BaseModel):
+    """StoryRatings class for structured output filtering of a list of Story"""
+    items: List[StoryRating] = Field(description="List of StoryRating")
 
 
 def update_ratings_with_choix(all_battles: List[Tuple[int, int]], num_items: int, logger=_logger) -> np.ndarray:
@@ -50,43 +61,107 @@ def update_ratings_with_choix(all_battles: List[Tuple[int, int]], num_items: int
         return np.zeros(num_items)
 
 
-async def run_battles(batch, logger=_logger):
+def swiss_pairing(headline_df: pd.DataFrame, battle_history: np.ndarray,
+                  batch_size: int = 5) -> List[Tuple[int, int]]:
     """
-    Run a batch of battles using the LLM model.
-    Gets results ranking articles, which we can send to Bradley-Terry
+    Create Swiss-style pairings for Bradley-Terry battles.
 
     Args:
-        batch: DataFrame containing articles to be battled.
+        headline_df: DataFrame sorted by current rating (best first)
+        battle_history: NxN matrix where [i,j]=1 means i vs j already battled
+        batch_size: Number of stories per battle round
 
     Returns:
-        List of (id1, id2) pairs that were played this round.
+        List of (story1_id, story2_id) pairs for this round
     """
-    system, user, model = LangfuseClient().get_prompt("newsagent/battle_prompt")
+    used_this_round = set()
+    pairs = []
 
-    battle_agent = LLMagent(
-        system_prompt=system,
-        user_prompt=user,
-        output_type=QualityAssessment,
-        model=model,
-        verbose=False,
-        logger=logger
-    )
+    # Sort by current rating (highest first)
+    sorted_df = headline_df.sort_values(
+        'bradley_terry', ascending=False).reset_index(drop=True)
 
-    itemlist = await battle_agent.filter_batch(
-        batch,
-        value_field='low_quality',
-        item_list_field='results_list',
-        item_id_field='id',
-        chunk_size=25,
-        return_probabilities=True
-    )
+    for i, row in sorted_df.iterrows():
+        if row['id'] in used_this_round or len(pairs) >= batch_size:
+            continue
 
-    return [item.id for item in itemlist.items]
+        story1_id = row['id']
+
+        # Find best available opponent (highest rated, not yet battled)
+        for j, opponent_row in sorted_df.iterrows():
+            opponent_id = opponent_row['id']
+
+            if (opponent_id != story1_id and
+                opponent_id not in used_this_round and
+                    battle_history[story1_id, opponent_id] == 0):
+
+                pairs.append((story1_id, opponent_id))
+                used_this_round.add(story1_id)
+                used_this_round.add(opponent_id)
+                break
+
+    return pairs
+
+
+async def run_battle_pair(story1: str, story2: str, agent,
+                          semaphore: asyncio.Semaphore) -> int:
+    """
+    Battle two stories and return winner ID.
+
+    Returns:
+        0 if story1 wins, 1 if story2 wins
+    """
+    async with semaphore:
+        prompt = f"""Compare these two stories and determine which is higher quality:
+
+Story A: {story1}
+
+Story B: {story2}
+
+Return only "A" if Story A is better, or "B" if Story B is better."""
+
+        result = await agent.run_prompt(prompt)
+        return 0 if result.strip().upper() == 'A' else 1
+
+
+async def process_battle_round(pairs: List[Tuple[int, int]],
+                               headline_df: pd.DataFrame,
+                               agent,
+                               max_concurrent: int = 10,
+                               logger=_logger) -> List[Tuple[int, int]]:
+    """
+    Process all battle pairs concurrently and return winner/loser tuples.
+    """
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    # Create battle tasks
+    tasks = []
+    for story1_id, story2_id in pairs:
+        story1_text = headline_df.loc[headline_df['id']
+                                      == story1_id, 'input_str'].iloc[0]
+        story2_text = headline_df.loc[headline_df['id']
+                                      == story2_id, 'input_str'].iloc[0]
+        task = run_battle_pair(story1_text, story2_text, agent, semaphore)
+        tasks.append((task, story1_id, story2_id))
+
+    # Execute all battles concurrently
+    results = []
+    for task, story1_id, story2_id in tasks:
+        winner_idx = await task
+        if winner_idx == 0:
+            results.append((story1_id, story2_id))  # story1 wins
+        else:
+            results.append((story2_id, story1_id))  # story2 wins
+
+        logger.info(
+            f"Battle: {story1_id} vs {story2_id} -> winner: {story1_id if winner_idx == 0 else story2_id}")
+
+    return results
 
 
 async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFrame:
     """
-    Runs Bradley-Terry rating using the `choix` library.
+    Enhanced Bradley-Terry rating with Swiss pairing and async battles.
 
     Args:
         headline_df (pd.DataFrame): DataFrame containing articles to be ranked.
@@ -94,17 +169,12 @@ async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFra
     Returns:
         pd.DataFrame: DataFrame with additional 'bradley_terry' column containing the computed ratings.
     """
+    logger.info("Running Bradley-Terry rating with Swiss pairing")
 
-    logger.info("running Bradley-Terry rating")
-
-    # arbitrary n_rounds, around 10 rounds for 100
-    # could just continue until ranking_change_sum < number of articles, avg change < 1
-    # or until first increase, from e.g. 2 rounds ago, indicating we are converging
-    n_rounds = max(2, math.ceil(math.log(len(headline_df))*3-2))
-    default_batch_size = 5
-    min_batch_size = 2
-    target_batches = 10
-    jitter_percent = 3.5
+    # Setup
+    n_rounds = max(2, math.ceil(math.log(len(headline_df)) * 3 - 2))
+    batch_size = 5
+    max_concurrent = 10
 
     # must ensure canonical sort because prompt will return ids in order
     headline_df = headline_df.sort_values("id")
@@ -116,63 +186,71 @@ async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFra
     previous_rankings = headline_df['bradley_terry'].rank(
         method='min', ascending=False).astype(int)
 
-    batch_size = max(min_batch_size, min(
-        default_batch_size, len(headline_df) // target_batches))
+    # Battle history matrix (N x N)
+    n_stories = len(headline_df)
+    battle_history = np.zeros((n_stories, n_stories), dtype=int)
+
+    # Setup battle agent
+    system, user, model = LangfuseClient().get_prompt("newsagent/battle_prompt")
+    battle_agent = LLMagent(
+        system_prompt=system,
+        user_prompt=user,
+        model=model,
+        verbose=False,
+        logger=logger
+    )
 
     all_battles = []
     all_results = []
+
     for round_num in range(1, n_rounds + 1):
         logger.info(f"\n--- Running round {round_num}/{n_rounds} ---")
 
-        # sort by current rating + jitter for balanced matchups but also some randomness
-        battle_df = headline_df.copy()
+        # Swiss pairing
+        pairs = swiss_pairing(headline_df, battle_history, batch_size)
+        logger.info(f"Generated {len(pairs)} battle pairs")
 
-        # don't want to battle eg same top 5 each time, add randomness to sort rating, sort order, batch size
-        # if you have batch size of 5 and 101 articles, bottom one possibly always skipped
-        # or 102 articles, bottom two possibly always just battle each other.
-        # Jitter helps but is it enough? don't want to jitter so much that it's not a true reflection of relative quality
-        # randomize ascending/descending order and randomize bumping batch size by 1. maybe overkill but regularizes.
-        jitter_multipliers = [
-            1 + random.uniform(-jitter_percent/100, jitter_percent/100) for _ in range(len(battle_df))]
-        battle_df['jittered_rating'] = battle_df['bradley_terry'] * \
-            jitter_multipliers
-        # to add more jitter randomize sort order by rating, set ascending to random 0 or 1
-        battle_df = battle_df.sort_values(
-            'jittered_rating', ascending=np.random.randint(0, 2)).drop('jittered_rating', axis=1)
+        if not pairs:
+            logger.info("No more valid pairings available")
+            break
 
-        # Paginate into batches, randomize batch size by 1
+        # Process battles concurrently
+        battle_results = await process_battle_round(pairs, headline_df, battle_agent, max_concurrent, logger)
 
-        batches = paginate_df_async(
-            battle_df[["id", "input_str"]], maxpagelen=max(min_batch_size, batch_size + np.random.randint(0, 3)-1))
+        # Update battle history and results
+        for winner_id, loser_id in battle_results:
+            all_battles.append((winner_id, loser_id))
+            battle_history[winner_id, loser_id] = 1
+            battle_history[loser_id, winner_id] = 1
 
-        # run_battles for the round (async in parallel)
-        tasks = [run_battles(batch) for batch in batches]
-        # append results to all_battles
-        for battle_result in await asyncio.gather(*tasks):
-            for i in range(0, len(battle_result)-1):
-                for j in range(i+1, len(battle_result)):
-                    all_battles.append((battle_result[i], battle_result[j]))
-
-        # run bradley_terry on results so far
+        # Update ratings
         headline_df['bradley_terry'] = update_ratings_with_choix(
-            all_battles, len(headline_df))
+            all_battles, len(headline_df), logger)
         headline_df["bt_z"] = (headline_df["bradley_terry"] - headline_df["bradley_terry"].mean()) / \
             headline_df["bradley_terry"].std(ddof=0)
 
+        # Check convergence
         new_rankings = headline_df['bradley_terry'].rank(
             method='min', ascending=False).astype(int)
-        # sum absolute changes in rankings
-        logger.info(f"After round {round_num}/{n_rounds}: ")
         ranking_changes = (previous_rankings != new_rankings).sum()
-        logger.info(f"Number of ranking changes: {ranking_changes}")
         ranking_change_sum = np.abs(previous_rankings - new_rankings).sum()
         avg_change = ranking_change_sum / len(headline_df)
+
+        logger.info(f"After round {round_num}/{n_rounds}: ")
+        logger.info(f"Number of ranking changes: {ranking_changes}")
         logger.info(
             f"Sum of absolute ranking changes: {ranking_change_sum:.1f} (avg rank chg {avg_change:.2f})")
+
         all_results.append(avg_change)
-        if len(all_results) > 4 and (all_results[-1] + all_results[-2]) > (all_results[-3] + all_results[-4]):
+
+        # Convergence detection
+        if avg_change < 0.1:  # Convergence threshold
+            logger.info("Converged - stopping early")
+            break
+        elif len(all_results) > 4 and (all_results[-1] + all_results[-2]) > (all_results[-3] + all_results[-4]):
             logger.info("Increase in avg rank change, converging")
             break
+
         previous_rankings = new_rankings
 
     return headline_df
@@ -216,7 +294,7 @@ async def fn_rate_articles(headline_df: pd.DataFrame, model_medium, logger: Opti
     5. Add points for reputation
     """
     rating_df = headline_df.copy().fillna({
-        'article_len': 1,
+        'content_length': 1,
         'reputation': 0,
         'on_topic': 0,
         'importance': 0,
@@ -260,14 +338,14 @@ async def fn_rate_articles(headline_df: pd.DataFrame, model_medium, logger: Opti
         quality_agent = LLMagent(
             system_prompt=system,
             user_prompt=user,
-            output_type=QualityAssessment,
+            output_type=StoryRatings,
             model=model,
             verbose=False,
             logger=logger
         )
 
         rating_df['low_quality'] = await quality_agent.filter_dataframe(
-            rating_df[['id', 'input_str']],
+            rating_df[['id', 'input_text']],
             value_field='low_quality',
             item_list_field='results_list',
             item_id_field='id',
@@ -288,19 +366,19 @@ async def fn_rate_articles(headline_df: pd.DataFrame, model_medium, logger: Opti
 
     # Topic relevance assessment
     try:
-        system, user, model = LangfuseClient().get_prompt("newsagent/rate_relevance")
+        system, user, model = LangfuseClient().get_prompt("newsagent/rate_on_topic")
 
         topic_agent = LLMagent(
             system_prompt=system,
             user_prompt=user,
-            output_type=TopicRelevance,
+            output_type=StoryRatings,
             model=model,
             verbose=False,
             logger=logger
         )
 
-        rating_df['relevant'] = await topic_agent.filter_dataframe(
-            rating_df[['id', 'input_str']],
+        rating_df['on_topic'] = await topic_agent.filter_dataframe(
+            rating_df[['id', 'input_text']],
             value_field='on_topic',
             item_list_field='results_list',
             item_id_field='id',
@@ -313,11 +391,11 @@ async def fn_rate_articles(headline_df: pd.DataFrame, model_medium, logger: Opti
             logger.warning(
                 f"Failed to get topic relevance prompt from Langfuse: {e}")
         # Fallback: assume all articles are on topic
-        rating_df['relevant'] = 1
+        rating_df['on_topic'] = 1
 
-    counts = rating_df["relevant"].value_counts().to_dict()
+    counts = rating_df["on_topic"].value_counts().to_dict()
     if logger:
-        logger.info(f"relevant articles: {counts}")
+        logger.info(f"on topic articles: {counts}")
 
     # Importance assessment
     if logger:
@@ -329,18 +407,19 @@ async def fn_rate_articles(headline_df: pd.DataFrame, model_medium, logger: Opti
         importance_agent = LLMagent(
             system_prompt=system,
             user_prompt=user,
-            output_type=ImportanceAssessment,
+            output_type=StoryRatings,
             model=model,
             verbose=False,
             logger=logger
         )
 
         rating_df['important'] = await importance_agent.filter_dataframe(
-            rating_df[['id', 'input_str']],
+            rating_df[['id', 'input_text']],
             value_field='important',
             item_list_field='results_list',
             item_id_field='id',
-            chunk_size=25
+            chunk_size=25,
+            return_probabilities=True
         )
 
     except Exception as e:
@@ -368,14 +447,14 @@ async def fn_rate_articles(headline_df: pd.DataFrame, model_medium, logger: Opti
     # bonus for longer articles
     # len < 1000 -> 0
     # len > 10000 -> 1
-    rating_df['adjusted_len'] = np.log10(rating_df['article_len']) - 3
+    rating_df['adjusted_len'] = np.log10(rating_df['content_length']) - 3
     rating_df['adjusted_len'] = rating_df['adjusted_len'].clip(
         lower=0, upper=2)
 
     rating_df['rating'] = rating_df['reputation'] \
         + rating_df['adjusted_len'] \
         + rating_df['on_topic'] \
-        + rating_df['importance'] \
+        + rating_df['important'] \
         - rating_df['low_quality'] \
         + rating_df['bt_z'] \
         + rating_df['recency_score']
