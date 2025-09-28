@@ -898,6 +898,8 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
 
             # For probabilities, we process each row individually using run_prompt_with_probs
             probabilities = []
+            # Process all rows asynchronously
+            tasks = []
             for _, row in input_df.iterrows():
                 # Convert row to dict and merge with input_vars
                 row_vars = row.to_dict()
@@ -905,11 +907,15 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                     row_vars.update(input_vars)
 
                 # Get probabilities for this row
-                prob_dict = await self.run_prompt_with_probs(target_tokens=target_tokens, **row_vars)
+                tasks.append(self.run_prompt_with_probs(
+                    target_tokens=target_tokens, **row_vars))
 
-                # Extract probability for first target token
-                prob_value = prob_dict.get(target_tokens[0], 0.0)
-                probabilities.append(prob_value)
+            # Wait for all tasks to complete
+            prob_dicts = await asyncio.gather(*tasks)
+
+            # Extract probability for first target token from each dict
+            probabilities = [prob_dict.get(
+                target_tokens[0], 0.0) for prob_dict in prob_dicts]
 
             # Return as Series indexed to match input DataFrame
             return pd.Series(probabilities, index=input_df.index)

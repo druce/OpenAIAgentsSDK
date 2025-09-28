@@ -47,7 +47,8 @@ class Url:
 
     def delete(self, conn: sqlite3.Connection):
         """Delete this URL record from the database"""
-        conn.execute("DELETE FROM urls WHERE initial_url = ?", (self.initial_url,))
+        conn.execute("DELETE FROM urls WHERE initial_url = ?",
+                     (self.initial_url,))
         conn.commit()
 
     @classmethod
@@ -105,19 +106,20 @@ class Article:
     source: str
     title: str
     published: Optional[datetime]
-    rss_summary: str
+    rss_summary: Optional[str]
     isAI: bool
-    status: str
-    html_path: str
+    status: Optional[str]
+    html_path: Optional[str]
     last_updated: Optional[datetime]
-    text_path: str
+    text_path: Optional[str]
     content_length: int
-    summary: str
-    description: str
+    summary: Optional[str]
+    description: Optional[str]
     rating: float
-    cluster_label: str
+    cluster_label: Optional[str]
     domain: str
     site_name: str
+    reputation: Optional[float]
     date: Optional[datetime]
 
     @classmethod
@@ -130,19 +132,20 @@ class Article:
                 source TEXT NOT NULL,
                 title TEXT NOT NULL,
                 published TEXT,
-                rss_summary TEXT NOT NULL,
+                rss_summary TEXT,
                 isAI BOOLEAN NOT NULL,
-                status TEXT NOT NULL,
-                html_path TEXT NOT NULL,
+                status TEXT,
+                html_path TEXT,
                 last_updated TEXT,
-                text_path TEXT NOT NULL,
+                text_path TEXT,
                 content_length INTEGER NOT NULL,
-                summary TEXT NOT NULL,
-                description TEXT NOT NULL,
+                summary TEXT,
+                description TEXT,
                 rating REAL NOT NULL,
-                cluster_label TEXT NOT NULL,
+                cluster_label TEXT,
                 domain TEXT NOT NULL,
                 site_name TEXT NOT NULL,
+                reputation REAL,
                 date TEXT
             )
         """)
@@ -151,8 +154,8 @@ class Article:
     def insert(self, conn: sqlite3.Connection):
         """Insert this Article record into the database"""
         conn.execute("""
-            INSERT INTO articles (final_url, url, source, title, published, rss_summary, isAI, status, html_path, last_updated, text_path, content_length, summary, description, rating, cluster_label, domain, site_name, date)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO articles (final_url, url, source, title, published, rss_summary, isAI, status, html_path, last_updated, text_path, content_length, summary, description, rating, cluster_label, domain, site_name, reputation, date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             self.final_url, self.url, self.source, self.title,
             self.published.isoformat() if self.published else None,
@@ -160,6 +163,7 @@ class Article:
             self.last_updated.isoformat() if self.last_updated else None,
             self.text_path, self.content_length, self.summary, self.description,
             self.rating, self.cluster_label, self.domain, self.site_name,
+            self.reputation,
             self.date.isoformat() if self.date else None
         ))
         conn.commit()
@@ -167,7 +171,7 @@ class Article:
     def update(self, conn: sqlite3.Connection):
         """Update this Article record in the database"""
         conn.execute("""
-            UPDATE articles SET url = ?, source = ?, title = ?, published = ?, rss_summary = ?, isAI = ?, status = ?, html_path = ?, last_updated = ?, text_path = ?, content_length = ?, summary = ?, description = ?, rating = ?, cluster_label = ?, domain = ?, site_name = ?, date = ?
+            UPDATE articles SET url = ?, source = ?, title = ?, published = ?, rss_summary = ?, isAI = ?, status = ?, html_path = ?, last_updated = ?, text_path = ?, content_length = ?, summary = ?, description = ?, rating = ?, cluster_label = ?, domain = ?, site_name = ?, reputation = ?, date = ?
             WHERE final_url = ?
         """, (
             self.url, self.source, self.title,
@@ -176,20 +180,22 @@ class Article:
             self.last_updated.isoformat() if self.last_updated else None,
             self.text_path, self.content_length, self.summary, self.description,
             self.rating, self.cluster_label, self.domain, self.site_name,
+            self.reputation,
             self.date.isoformat() if self.date else None, self.final_url
         ))
         conn.commit()
 
     def delete(self, conn: sqlite3.Connection):
         """Delete this Article record from the database"""
-        conn.execute("DELETE FROM articles WHERE final_url = ?", (self.final_url,))
+        conn.execute("DELETE FROM articles WHERE final_url = ?",
+                     (self.final_url,))
         conn.commit()
 
     @classmethod
     def get(cls, conn: sqlite3.Connection, final_url: str) -> Optional['Article']:
         """Get an Article record by final_url"""
         cursor = conn.execute("""
-            SELECT final_url, url, source, title, published, rss_summary, isAI, status, html_path, last_updated, text_path, content_length, summary, description, rating, cluster_label, domain, site_name, date
+            SELECT final_url, url, source, title, published, rss_summary, isAI, status, html_path, last_updated, text_path, content_length, summary, description, rating, cluster_label, domain, site_name, reputation, date
             FROM articles WHERE final_url = ?
         """, (final_url,))
         row = cursor.fetchone()
@@ -204,7 +210,8 @@ class Article:
                 isAI=bool(row[6]),
                 status=row[7],
                 html_path=row[8],
-                last_updated=datetime.fromisoformat(row[9]) if row[9] else None,
+                last_updated=datetime.fromisoformat(
+                    row[9]) if row[9] else None,
                 text_path=row[10],
                 content_length=row[11],
                 summary=row[12],
@@ -213,7 +220,8 @@ class Article:
                 cluster_label=row[15],
                 domain=row[16],
                 site_name=row[17],
-                date=datetime.fromisoformat(row[18]) if row[18] else None
+                reputation=row[18],
+                date=datetime.fromisoformat(row[19]) if row[19] else None
             )
         return None
 
@@ -221,7 +229,7 @@ class Article:
     def get_all(cls, conn: sqlite3.Connection) -> list['Article']:
         """Get all Article records"""
         cursor = conn.execute("""
-            SELECT final_url, url, source, title, published, rss_summary, isAI, status, html_path, last_updated, text_path, content_length, summary, description, rating, cluster_label, domain, site_name, date FROM articles
+            SELECT final_url, url, source, title, published, rss_summary, isAI, status, html_path, last_updated, text_path, content_length, summary, description, rating, cluster_label, domain, site_name, reputation, date FROM articles
         """)
         rows = cursor.fetchall()
         return [cls(
@@ -243,14 +251,15 @@ class Article:
             cluster_label=row[15],
             domain=row[16],
             site_name=row[17],
-            date=datetime.fromisoformat(row[18]) if row[18] else None
+            reputation=row[18],
+            date=datetime.fromisoformat(row[19]) if row[19] else None
         ) for row in rows]
 
     def upsert(self, conn: sqlite3.Connection):
         """Insert or update this Article record"""
         conn.execute("""
-            INSERT INTO articles (final_url, url, source, title, published, rss_summary, isAI, status, html_path, last_updated, text_path, content_length, summary, description, rating, cluster_label, domain, site_name, date)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO articles (final_url, url, source, title, published, rss_summary, isAI, status, html_path, last_updated, text_path, content_length, summary, description, rating, cluster_label, domain, site_name, reputation, date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(final_url) DO UPDATE SET
                 url = excluded.url,
                 source = excluded.source,
@@ -269,6 +278,7 @@ class Article:
                 cluster_label = excluded.cluster_label,
                 domain = excluded.domain,
                 site_name = excluded.site_name,
+                reputation = excluded.reputation,
                 date = excluded.date
         """, (
             self.final_url, self.url, self.source, self.title,
@@ -277,6 +287,7 @@ class Article:
             self.last_updated.isoformat() if self.last_updated else None,
             self.text_path, self.content_length, self.summary, self.description,
             self.rating, self.cluster_label, self.domain, self.site_name,
+            self.reputation,
             self.date.isoformat() if self.date else None
         ))
         conn.commit()
@@ -318,7 +329,8 @@ class Site:
 
     def delete(self, conn: sqlite3.Connection):
         """Delete this Site record from the database"""
-        conn.execute("DELETE FROM sites WHERE domain_name = ?", (self.domain_name,))
+        conn.execute("DELETE FROM sites WHERE domain_name = ?",
+                     (self.domain_name,))
         conn.commit()
 
     @classmethod

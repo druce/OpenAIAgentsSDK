@@ -18,6 +18,8 @@ from datetime import datetime
 from pathlib import Path
 # from collections import Counter
 import sqlite3
+
+from httpx import head
 import tldextract
 
 import shutil
@@ -44,12 +46,13 @@ from fetch import Fetcher
 from scrape import scrape_urls_concurrent, normalize_html
 from llm import LLMagent, LangfuseClient
 from do_dedupe import process_dataframe_with_filtering
+from do_rating import fn_rate_articles
 from config import CANONICAL_TOPICS, DOWNLOAD_DIR, PAGES_DIR, TEXT_DIR, NEWSAGENTDB, LOGDB
 from bs4 import BeautifulSoup
 from do_cluster import do_clustering
 
 # import db
-from db import Url
+from db import Url, Site
 
 # Pydantic models for structured output
 
@@ -112,6 +115,21 @@ class CanonicalTopicClassificationList(BaseModel):
     """List of classification results for batch processing"""
     results_list: list[CanonicalTopicClassification] = Field(
         description="List of classification results")
+
+# Site name generation models
+
+
+class SiteNameGeneration(BaseModel):
+    """Single domain to site name mapping result"""
+    id: int = Field(description="The site id")
+    domain: str = Field(description="The domain name")
+    site_name: str = Field(description="Canonical site name for the domain")
+
+
+class SiteNameGenerationList(BaseModel):
+    """List of SiteNameGeneration for batch processing"""
+    results_list: list[SiteNameGeneration] = Field(
+        description="List of site name generation results")
 
 
 def setup_logging(session_id: str = "default", db_path: str = LOGDB) -> logging.Logger:
@@ -582,6 +600,12 @@ class FilterUrlsTool:
 
             if self.logger:
                 self.logger.info(f"🔍 Filtering {total_articles} headlines...")
+                if state.process_since:
+                    self.logger.info(
+                        f"🔄 Checking for duplicates seen before {state.process_since.isoformat()}")
+                else:
+                    self.logger.info(
+                        "🔄 Checking for duplicates (all urls without date restrictions)")
 
             # Prepare headlines for batch classification
             headline_df = pd.DataFrame(state.headline_data)
@@ -593,54 +617,47 @@ class FilterUrlsTool:
                 self.logger.info(f"🔍 Filtering {total_articles} for dupes.")
 
             try:
-                conn = sqlite3.connect(state.db_path)
-                Url.create_table(conn)  # Ensure table exists
-
-                # Check each URL against the urls table
-                new_urls_mask = []
-                for _, row in headline_df.iterrows():
-                    url_to_check = row.get(
-                        'url', '') or row.get('orig_url', '')
-                    if url_to_check:
+                with sqlite3.connect(state.db_path) as conn:
+                    Url.create_table(conn)  # Ensure table exists
+                    # Check each URL against the urls table
+                    dupe_df = headline_df.copy()
+                    dupe_df['is_new'] = True
+                    for _, row in dupe_df.itertuples():
+                        url_to_check = row.url
+                        print("checking", url_to_check)
+                        if not url_to_check:  # should never happen
+                            continue
                         existing_url = Url.get(conn, url_to_check)
-
-                        if existing_url is None:
-                            # URL not found in database - it's new
-                            new_urls_mask.append(True)
-                        elif state.process_since is not None:
-                            # URL exists, but check if it was seen before process_since
-                            if existing_url.created_at is not None and existing_url.created_at <= state.process_since:
-                                new_urls_mask.append(False)
-                            else:
-                                new_urls_mask.append(True)
-                        else:
-                            # URL exists and no process_since set - treat as duplicate
-                            new_urls_mask.append(False)
-                    else:
-                        # should never happen, no url to check
-                        new_urls_mask.append(False)
-
-                conn.close()
+                        if existing_url is None:  # not found
+                            print("not found")
+                            continue
+                        if state.process_since:
+                            if existing_url.created_at is not None and existing_url.created_at > state.process_since:
+                                # URL exists but seen after process_since - treat as new
+                                print("found after cutoff")
+                                continue
+                        # found url, no cutoff set, or seen prior to cutoff - treat as duplicate
+                        print("found before cutoff")
+                        dupe_df.at[row.Index, 'is_new'] = False
 
                 # Filter DataFrame to only new URLs
-                headline_df = headline_df[new_urls_mask].copy()
+                headline_df = headline_df.loc[dupe_df['is_new']]
                 duplicate_count = original_count - len(headline_df)
 
-                if duplicate_count > 0:
-                    if self.verbose:
-                        if state.process_since is not None:
-                            print(
-                                f"🔄 Filtered out {duplicate_count} URLs seen before {state.process_since.isoformat()}, processing {len(headline_df)} new URLs")
-                        else:
-                            print(
-                                f"🔄 Filtered out {duplicate_count} duplicate URLs, processing {len(headline_df)} new URLs")
-                    if self.logger:
-                        if state.process_since is not None:
-                            self.logger.info(
-                                f"URL deduplication with process_since: {duplicate_count} URLs filtered (seen before {state.process_since.isoformat()}), {len(headline_df)} new URLs remain")
-                        else:
-                            self.logger.info(
-                                f"URL deduplication: {duplicate_count} duplicates filtered, {len(headline_df)} new URLs remain")
+                if self.verbose:
+                    if state.process_since is not None:
+                        print(
+                            f"🔄 Filtered out {duplicate_count} URLs seen before {state.process_since.isoformat()}, processing {len(headline_df)} new URLs")
+                    else:
+                        print(
+                            f"🔄 Filtered out {duplicate_count} duplicate URLs, processing {len(headline_df)} new URLs")
+                if self.logger:
+                    if state.process_since is not None:
+                        self.logger.info(
+                            f"URL deduplication with process_since: {duplicate_count} URLs filtered (seen before {state.process_since.isoformat()}), {len(headline_df)} new URLs remain")
+                    else:
+                        self.logger.info(
+                            f"URL deduplication: {duplicate_count} duplicates filtered, {len(headline_df)} new URLs remain")
 
                 # If no new URLs remain, complete step early
                 if headline_df.empty:
@@ -890,6 +907,126 @@ class DownloadArticlesTool:
             ai_df['domain'] = ai_df['final_url'].fillna(
                 ai_df['url']).apply(extract_domain)
 
+            # Lookup site information from sites table
+            unique_domains = ai_df['domain'].dropna().unique().tolist()
+            domain_reputation_map = {}
+            domain_site_name_map = {}
+
+            if unique_domains:
+                try:
+                    with sqlite3.connect(NEWSAGENTDB) as conn:
+                        Site.create_table(conn)  # Ensure sites table exists
+
+                        # Use SQL IN clause for efficient batch lookup
+                        placeholders = ','.join(['?'] * len(unique_domains))
+                        cursor = conn.execute(f"""
+                            SELECT domain_name, site_name, reputation
+                            FROM sites
+                            WHERE domain_name IN ({placeholders})
+                        """, unique_domains)
+
+                        # Create mapping dicts from query results
+                        for domain_name, site_name, reputation in cursor.fetchall():
+                            domain_site_name_map[domain_name] = site_name
+                            domain_reputation_map[domain_name] = reputation
+
+                except Exception as e:
+                    if self.logger:
+                        self.logger.warning(
+                            f"Failed to lookup site information: {e}")
+
+            # Map values to ai_df, filling missing domains with defaults
+            ai_df['site_name'] = ai_df['domain'].map(
+                domain_site_name_map).fillna('')
+            ai_df['reputation'] = ai_df['domain'].map(
+                domain_reputation_map).fillna(0)
+
+            if self.logger:
+                found_domains = len(domain_reputation_map)
+                total_domains = len(unique_domains)
+                self.logger.info(
+                    f"Populated site information for {len(ai_df)} articles: {found_domains}/{total_domains} domains found in sites table")
+
+            # Generate site names for domains with empty site_name using LLM
+            domains_to_process = ai_df.loc[ai_df['site_name']
+                                           == '']['domain'].drop_duplicates()
+
+            if len(domains_to_process):
+                if self.logger:
+                    self.logger.info(
+                        f"Generating site names for {len(domains_to_process)} domains using LLM")
+
+                # Get prompt from Langfuse
+                system_prompt, user_prompt, model = LangfuseClient().get_prompt("newsagent/sitename")
+
+                # Create LLM agent for site name generation
+                sitename_agent = LLMagent(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    output_type=SiteNameGenerationList,
+                    model=model,
+                    verbose=self.verbose,
+                    logger=self.logger
+                )
+
+                # Create DataFrame for processing (just domain names)
+                domains_df = pd.DataFrame(
+                    {'domain': domains_to_process.tolist()})
+                domains_df['id'] = range(len(domains_df))
+
+                try:
+                    # Generate site names using LLM with batch size of 25
+                    domains_df['sitenames'] = await sitename_agent.filter_dataframe(
+                        domains_df[['id', 'domain']],
+                        value_field='site_name',
+                        item_id_field='id',
+                        chunk_size=25
+                    )
+
+                    # Create mapping of domain to generated site name
+                    domain_to_sitename = dict(
+                        zip(domains_df['domain'], domains_df['sitenames']))
+
+                except Exception as e:
+                    if self.logger:
+                        self.logger.warning(
+                            f"Failed to generate site names using LLM: {e}")
+                    # Fallback: use domain as site_name
+                    domain_to_sitename = {
+                        domain: domain for domain in domains_to_process}
+
+                # Update ai_df with generated site names (or fallback domain names)
+                ai_df.loc[ai_df['site_name'] == '', 'site_name'] = ai_df.loc[ai_df['site_name'] == '', 'domain'].apply(
+                    lambda x: domain_to_sitename.get(x, x))
+
+                # Insert new site records into database
+                try:
+                    with sqlite3.connect(NEWSAGENTDB) as conn:
+                        Site.create_table(conn)  # Ensure sites table exists
+
+                        for domain, site_name in domain_to_sitename.items():
+                            if site_name and site_name.strip():  # Only insert non-empty site names
+                                site_record = Site(
+                                    domain_name=domain,
+                                    site_name=site_name.strip(),
+                                    reputation=0.0  # Default reputation
+                                )
+                                try:
+                                    site_record.upsert(conn)
+                                except Exception as e:
+                                    if self.logger:
+                                        self.logger.warning(
+                                            f"Failed to insert site record for {domain}: {e}")
+
+                        if self.logger:
+                            self.logger.info(
+                                f"Inserted {len([s for s in domain_to_sitename.values() if s and s.strip()])} new site records")
+
+                except Exception as e:
+                    if self.logger:
+                        self.logger.warning(
+                            f"Failed to update sites table: {e}")
+
             # Update URLs table with final_url and isAI information
             urls_updated = 0
             try:
@@ -918,7 +1055,7 @@ class DownloadArticlesTool:
 
                 if self.logger and urls_updated > 0:
                     self.logger.info(
-                        f"Updated {urls_updated} URL records with final URLs and AI classification")
+                        f"Updated {urls_updated} URL records with final URLs")
 
             except Exception as e:
                 if self.logger:
@@ -1712,57 +1849,31 @@ class RateArticlesTool:
             state.start_step(step_name)
             print(f"▶ Starting Step 6: {step_name}")
 
-            # Get clustered articles from persistent state
-            clustered_articles = [
+            # Get AI-related articles from persistent state
+            ai_articles = [
                 article for article in state.headline_data
-                if article.get('isAI') is True and article.get('cluster_topic')
+                if article.get('isAI') is True
             ]
 
-            if not clustered_articles:
-                return "❌ No clustered articles found to rate. Please run step 5 first."
+            if not ai_articles:
+                return "❌ No AI-related articles found to rate. Please run previous steps first."
 
-            # Rate each article based on mock criteria
-            articles_rated = 0
-            total_rating = 0
-            high_quality_count = 0
+            # Convert to DataFrame for processing
+            headline_df = pd.DataFrame(ai_articles)
 
-            for article in clustered_articles:
-                # Mock rating logic - in reality, this would use AI to evaluate:
-                # - Content quality, originality, depth
-                # - Source credibility
-                # - Relevance to AI community
-                # - Timeliness and newsworthiness
+            # Call fn_rate_articles from do_rating.py
+            if self.logger:
+                self.logger.info(f"Rating {len(headline_df)} AI articles using fn_rate_articles")
 
-                title_length = len(article.get('title', ''))
-                has_description = bool(article.get('description', ''))
-                source_quality = 8 if article.get(
-                    'source') in ['Techmeme', 'Ars Technica', 'The Verge'] else 6
-                cluster_bonus = 2 if article.get(
-                    'cluster_topic') != 'Other AI Topics' else 0
+            rated_df = await fn_rate_articles(headline_df, logger=self.logger)
 
-                # Calculate mock quality rating (1-10)
-                base_rating = 5
-                if title_length > 50:
-                    base_rating += 1
-                if has_description:
-                    base_rating += 1
-                rating = min(10, base_rating +
-                             (source_quality - 6) + cluster_bonus)
-
-                # Add some randomness to make it more realistic
-                rating = max(1, min(10, rating + random.uniform(-1, 1)))
-
-                # Store rating in article data
-                article['quality_rating'] = round(rating, 1)
-                article['rating_timestamp'] = datetime.now().isoformat()
-
-                articles_rated += 1
-                total_rating += rating
-                if rating >= 7.0:
-                    high_quality_count += 1
+            # Convert back to dict format and update state
+            state.headline_data = rated_df.to_dict('records')
 
             # Calculate stats
-            avg_rating = total_rating / articles_rated if articles_rated > 0 else 0
+            articles_rated = len(rated_df)
+            avg_rating = rated_df['rating'].mean() if not rated_df.empty else 0
+            high_quality_count = len(rated_df[rated_df['rating'] >= 7.0]) if not rated_df.empty else 0
 
             # Complete the step
             state.complete_step(step_name)

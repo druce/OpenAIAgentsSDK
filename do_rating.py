@@ -6,7 +6,7 @@ import pandas as pd
 import sqlite3
 from datetime import datetime, timezone, timedelta
 from config import NEWSAGENTDB
-# from db import Article
+from db import Article
 import logging
 # import random
 import asyncio
@@ -15,6 +15,24 @@ from pydantic import BaseModel, Field
 from llm import LLMagent, LangfuseClient  # , paginate_df_async
 
 _logger = logging.getLogger(__name__)
+
+
+# class QualityAssessment(BaseModel):
+#     """Assessment of article quality"""
+#     low_quality: bool = Field(
+#         description="Whether the article is low quality (spam, clickbait, etc.)")
+
+
+# class TopicRelevance(BaseModel):
+#     """Assessment of article topic relevance"""
+#     on_topic: bool = Field(
+#         description="Whether the article is on topic for AI/tech news")
+
+
+# class ImportanceAssessment(BaseModel):
+#     """Assessment of article importance"""
+#     important: bool = Field(
+#         description="Whether the article covers important developments")
 
 
 class StoryRating(BaseModel):
@@ -26,6 +44,17 @@ class StoryRating(BaseModel):
 class StoryRatings(BaseModel):
     """StoryRatings class for structured output filtering of a list of Story"""
     items: List[StoryRating] = Field(description="List of StoryRating")
+
+
+class StoryOrder(BaseModel):
+    """StoryOrder class for generic structured output rating"""
+    id: int = Field(description="The id of the story")
+
+
+class StoryOrderList(BaseModel):
+    """List of StoryOrder for structured output"""
+    items: List[StoryOrder] = Field(
+        description="List of StoryOrder")
 
 
 def update_ratings_with_choix(all_battles: List[Tuple[int, int]], num_items: int, logger=_logger) -> np.ndarray:
@@ -61,15 +90,14 @@ def update_ratings_with_choix(all_battles: List[Tuple[int, int]], num_items: int
         return np.zeros(num_items)
 
 
-def swiss_pairing(headline_df: pd.DataFrame, battle_history: np.ndarray,
-                  batch_size: int = 5) -> List[Tuple[int, int]]:
+def swiss_pairing(headline_df: pd.DataFrame, battle_history: np.ndarray) -> List[Tuple[int, int]]:
     """
     Create Swiss-style pairings for Bradley-Terry battles.
+    Returns all valid pairs based on current ranking.
 
     Args:
         headline_df: DataFrame sorted by current rating (best first)
         battle_history: NxN matrix where [i,j]=1 means i vs j already battled
-        batch_size: Number of stories per battle round
 
     Returns:
         List of (story1_id, story2_id) pairs for this round
@@ -82,17 +110,18 @@ def swiss_pairing(headline_df: pd.DataFrame, battle_history: np.ndarray,
         'bradley_terry', ascending=False).reset_index(drop=True)
 
     for i, row in sorted_df.iterrows():
-        if row['id'] in used_this_round or len(pairs) >= batch_size:
+        if row['id'] in used_this_round:
             continue
 
         story1_id = row['id']
 
         # Find best available opponent (highest rated, not yet battled)
-        for j, opponent_row in sorted_df.iterrows():
+        # Start from i+1 to avoid self-pairing and ensure unique pairs
+        for j in range(i + 1, len(sorted_df)):
+            opponent_row = sorted_df.iloc[j]
             opponent_id = opponent_row['id']
 
-            if (opponent_id != story1_id and
-                opponent_id not in used_this_round and
+            if (opponent_id not in used_this_round and
                     battle_history[story1_id, opponent_id] == 0):
 
                 pairs.append((story1_id, opponent_id))
@@ -138,9 +167,9 @@ async def process_battle_round(pairs: List[Tuple[int, int]],
     tasks = []
     for story1_id, story2_id in pairs:
         story1_text = headline_df.loc[headline_df['id']
-                                      == story1_id, 'input_str'].iloc[0]
+                                      == story1_id, 'input_text'].iloc[0]
         story2_text = headline_df.loc[headline_df['id']
-                                      == story2_id, 'input_str'].iloc[0]
+                                      == story2_id, 'input_text'].iloc[0]
         task = run_battle_pair(story1_text, story2_text, agent, semaphore)
         tasks.append((task, story1_id, story2_id))
 
@@ -173,18 +202,16 @@ async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFra
 
     # Setup
     n_rounds = max(2, math.ceil(math.log(len(headline_df)) * 3 - 2))
-    batch_size = 5
     max_concurrent = 10
 
     # must ensure canonical sort because prompt will return ids in order
-    headline_df = headline_df.sort_values("id")
+    headline_df = headline_df.sort_values("rating", ascending=False)
     headline_df = headline_df.reset_index(drop=True)
     headline_df['id'] = headline_df.index
 
     # Initialize Bradley-Terry ratings and rankings
-    headline_df['bradley_terry'] = 0.0
-    previous_rankings = headline_df['bradley_terry'].rank(
-        method='min', ascending=False).astype(int)
+    headline_df['bradley_terry'] = 1-(headline_df["id"]+1)/1000
+    previous_rankings = (headline_df["id"]+1).to_list()
 
     # Battle history matrix (N x N)
     n_stories = len(headline_df)
@@ -196,10 +223,10 @@ async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFra
         system_prompt=system,
         user_prompt=user,
         model=model,
+        output_type=StoryOrder,
         verbose=False,
         logger=logger
     )
-
     all_battles = []
     all_results = []
 
@@ -207,12 +234,21 @@ async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFra
         logger.info(f"\n--- Running round {round_num}/{n_rounds} ---")
 
         # Swiss pairing
-        pairs = swiss_pairing(headline_df, battle_history, batch_size)
+        pairs = swiss_pairing(headline_df, battle_history)
         logger.info(f"Generated {len(pairs)} battle pairs")
 
         if not pairs:
             logger.info("No more valid pairings available")
             break
+
+        all_ids = []
+        for pair in pairs:
+            all_ids.extend(list(pair))
+        all_ids_set = set(all_ids)
+
+        for row in headline_df.itertuples():
+            if row.id not in all_ids_set:
+                all_ids.append(row.index)
 
         # Process battles concurrently
         battle_results = await process_battle_round(pairs, headline_df, battle_agent, max_concurrent, logger)
@@ -256,25 +292,7 @@ async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFra
     return headline_df
 
 
-class QualityAssessment(BaseModel):
-    """Assessment of article quality"""
-    low_quality: bool = Field(
-        description="Whether the article is low quality (spam, clickbait, etc.)")
-
-
-class TopicRelevance(BaseModel):
-    """Assessment of article topic relevance"""
-    on_topic: bool = Field(
-        description="Whether the article is on topic for AI/tech news")
-
-
-class ImportanceAssessment(BaseModel):
-    """Assessment of article importance"""
-    important: bool = Field(
-        description="Whether the article covers important developments")
-
-
-async def fn_rate_articles(headline_df: pd.DataFrame, model_medium, logger: Optional[logging.Logger] = None) -> pd.DataFrame:
+async def fn_rate_articles(headline_df: pd.DataFrame, logger: Optional[logging.Logger] = None, minimum_story_rating: float = -1.0) -> pd.DataFrame:
     """
     Calculate ratings for articles using LLM-based assessments and Bradley-Terry ranking.
 
@@ -309,8 +327,7 @@ async def fn_rate_articles(headline_df: pd.DataFrame, model_medium, logger: Opti
     rating_df['summary'] = rating_df['summary'].astype(str)
     rating_df['summary'] = rating_df['summary'].fillna("")
 
-    rating_df['input_str'] = rating_df['title'] + "\n" + rating_df['summary']
-
+    rating_df['input_text'] = rating_df['title'] + "\n" + rating_df['summary']
     if logger:
         logger.info("Rating recency")
     # add points for recency
@@ -447,7 +464,8 @@ async def fn_rate_articles(headline_df: pd.DataFrame, model_medium, logger: Opti
     # bonus for longer articles
     # len < 1000 -> 0
     # len > 10000 -> 1
-    rating_df['adjusted_len'] = np.log10(rating_df['content_length']) - 3
+    rating_df['adjusted_len'] = rating_df['content_length'].clip(lower=1)
+    rating_df['adjusted_len'] = np.log10(rating_df['adjusted_len']) - 3
     rating_df['adjusted_len'] = rating_df['adjusted_len'].clip(
         lower=0, upper=2)
 
@@ -459,17 +477,15 @@ async def fn_rate_articles(headline_df: pd.DataFrame, model_medium, logger: Opti
         + rating_df['bt_z'] \
         + rating_df['recency_score']
     # Filter out low rated articles
-    # Note: MINIMUM_STORY_RATING should be defined in config or passed as parameter
-    MINIMUM_STORY_RATING = -1.0  # Default threshold
 
     low_rated_count = len(
-        rating_df[rating_df['rating'] < MINIMUM_STORY_RATING])
+        rating_df[rating_df['rating'] < minimum_story_rating])
     if logger:
         logger.info(f"Low rated articles: {low_rated_count}")
-        for row in rating_df[rating_df['rating'] < MINIMUM_STORY_RATING].itertuples():
+        for row in rating_df[rating_df['rating'] < minimum_story_rating].itertuples():
             logger.info(f"low rated article: {row.title} {row.rating}")
 
-    rating_df = rating_df[rating_df['rating'] >= MINIMUM_STORY_RATING].copy()
+    rating_df = rating_df[rating_df['rating'] >= minimum_story_rating].copy()
 
     # sort by rating
     rating_df = rating_df.sort_values('rating', ascending=False)
@@ -479,33 +495,62 @@ async def fn_rate_articles(headline_df: pd.DataFrame, model_medium, logger: Opti
     if logger:
         logger.info(f"articles after rating: {len(rating_df)}")
 
-    # Redo bullets with topics and rating (placeholder function)
-    # Note: make_bullet function should be imported or defined
+    # Insert articles into database using Article schema
+    if logger:
+        logger.info(f"Inserting {len(rating_df)} articles into database")
+
     try:
-        from utilities import make_bullet
-        rating_df["bullet"] = rating_df.apply(make_bullet, axis=1)
-    except ImportError:
+        with sqlite3.connect(NEWSAGENTDB) as conn:
+            Article.create_table(conn)  # Ensure articles table exists
+
+            articles_inserted = 0
+            for _, row in rating_df.iterrows():
+                try:
+                    # Create Article instance with available data
+                    article = Article(
+                        final_url=row.get('final_url', row.get('url', '')),
+                        url=row.get('url', ''),
+                        source=row.get('source', row.get('src', '')),
+                        title=row.get('title', ''),
+                        published=pd.to_datetime(row.get('published')) if pd.notna(
+                            row.get('published')) else None,
+                        rss_summary=row.get('rss_summary', ''),
+                        # Assume True since these went through AI filtering
+                        isAI=bool(row.get('isAI', True)),
+                        status=row.get('status', 'rated'),
+                        html_path=row.get('html_path', ''),
+                        last_updated=pd.to_datetime(row.get('last_updated')) if pd.notna(
+                            row.get('last_updated')) else None,
+                        text_path=row.get('text_path', ''),
+                        content_length=int(row.get('content_length', 0)),
+                        summary=row.get('summary', ''),
+                        description=row.get('description', ''),
+                        rating=float(row.get('rating', 0.0)),
+                        cluster_label=row.get(
+                            'cluster_label', row.get('cluster_name', '')),
+                        domain=row.get('domain', row.get('hostname', '')),
+                        site_name=row.get('site_name', ''),
+                        reputation=float(row.get('reputation', 0.0)) if pd.notna(
+                            row.get('reputation')) else None,
+                        date=pd.to_datetime(row.get('date')) if pd.notna(
+                            row.get('date')) else None
+                    )
+
+                    # Use upsert to avoid conflicts on duplicate final_url
+                    article.upsert(conn)
+                    articles_inserted += 1
+
+                except Exception as e:
+                    if logger:
+                        logger.warning(
+                            f"Failed to insert article {row.get('title', 'Unknown')}: {e}")
+
+            if logger:
+                logger.info(
+                    f"Successfully inserted {articles_inserted}/{len(rating_df)} articles")
+
+    except Exception as e:
         if logger:
-            logger.warning(
-                "make_bullet function not available, setting empty bullets")
-        rating_df["bullet"] = ""
-
-    # insert into db to keep a record and eventually train models on summaries
-    # Only keep the columns you want to insert
-    cols = ['url', 'src', 'site_name', 'hostname',
-            'title', 'final_url', 'bullet', 'rating']
-    records = rating_df[cols].to_records(index=False)
-    rows = list(records)
-
-    conn = sqlite3.connect(NEWSAGENTDB)
-    cursor = conn.cursor()
-    insert_sql = """
-    INSERT INTO daily_summaries
-    (url, src, site_name, hostname, title, actual_url, bullet, rating)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """
-    cursor.executemany(insert_sql, rows)
-    conn.commit()
-    conn.close()
+            logger.error(f"Database insertion failed: {e}")
 
     return rating_df

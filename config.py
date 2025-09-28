@@ -10,18 +10,18 @@ DOMAIN_RATE_LIMIT = 5.0
 
 FIREFOX_PROFILE_PATH = os.getenv('FIREFOX_PROFILE_PATH')
 if not FIREFOX_PROFILE_PATH:
-      raise ValueError(
-          "Firefox profile not found. Please:\n"
-          "1. Install Firefox, and\n"
-          "2. Set FIREFOX_PROFILE_PATH in .env file"
-      )
+    raise ValueError(
+        "Firefox profile not found. Please:\n"
+        "1. Install Firefox, and\n"
+        "2. Set FIREFOX_PROFILE_PATH in .env file"
+    )
 
 if not os.path.exists(FIREFOX_PROFILE_PATH):
-      raise ValueError(
-          f"Firefox profile {FIREFOX_PROFILE_PATH} not found. Please:\n"
-          "1. Install Firefox, and\n"
-          "2. Set FIREFOX_PROFILE_PATH in .env file"
-      )
+    raise ValueError(
+        f"Firefox profile {FIREFOX_PROFILE_PATH} not found. Please:\n"
+        "1. Install Firefox, and\n"
+        "2. Set FIREFOX_PROFILE_PATH in .env file"
+    )
 
 DOWNLOAD_ROOT = "download"
 DOWNLOAD_DIR = os.path.join(DOWNLOAD_ROOT, "sources")
@@ -47,12 +47,12 @@ OUTPUT_DIR = "out"
 DOMAIN_SKIPLIST = ['finbold.com', 'philarchive.org']
 # ignore for download only
 IGNORE_LIST = ["www.bloomberg.com", "bloomberg.com",
-                   "cnn.com", "www.cnn.com",
-                   "wsj.com", "www.wsj.com"]
+               "cnn.com", "www.cnn.com",
+               "wsj.com", "www.wsj.com"]
 
 MIN_TITLE_LEN = 28
 SLEEP_TIME = 10
-MAX_TOKENS=8192  # for embeddings
+MAX_TOKENS = 8192  # for embeddings
 
 MODEL_FAMILY = {'gpt-4o-2024-11-20': 'openai',
                 'gpt-4o-mini': 'openai',

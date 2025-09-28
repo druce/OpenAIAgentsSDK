@@ -50,6 +50,7 @@ _logger = logging.getLogger(__name__)
 _browser_context_cache = None
 _browser_lock = None
 
+
 @dataclass
 class DomainState:
     """State tracking for individual domains in rate limiting.
@@ -65,6 +66,7 @@ class DomainState:
         if self.lock is None:
             self.lock = asyncio.Lock()
 
+
 class RateLimiter:
     """Rate limiter for domain-based request throttling.
 
@@ -77,6 +79,7 @@ class RateLimiter:
         delay_seconds: Minimum delay in seconds between requests to the same domain.
                       Defaults to DOMAIN_RATE_LIMIT from config.
     """
+
     def __init__(self, delay_seconds: float = DOMAIN_RATE_LIMIT):
         self.delay = delay_seconds
         self.domains: Dict[str, DomainState] = defaultdict(DomainState)
@@ -108,8 +111,6 @@ class RateLimiter:
                 return True, 0.0
             else:
                 return False, self.delay - time_since_last
-
-
 
 
 def get_og_tags(source: str, logger: Optional[logging.Logger] = None) -> Dict[str, str]:
@@ -300,9 +301,9 @@ def normalize_html(path: Path | str, logger: Optional[logging.Logger] = None) ->
             # Extract the Twitter description
             og_desc_tag = soup.find(
                 "meta", attrs={"name": "twitter:description"})
-        og_desc = og_desc_tag.get("content").strip() + \
-            "\n" if og_desc_tag else ""
-        og_desc = 'Social card description: ' + og_desc if og_desc else ""
+        og_desc = og_desc_tag.get("content", "") if og_desc_tag else ""
+        og_desc = 'Social card description: ' + \
+            og_desc.strip() + "\n" if og_desc else ""
     except (AttributeError, KeyError, TypeError) as exc:
         og_desc = ""
         logger.warning(f"Error extracting og:description: {exc}")
@@ -541,7 +542,8 @@ async def scrape_urls_concurrent(
         # Atomically check and acquire domain slot - if blocked, return immediately
         can_proceed, wait_time = await rate_limiter.try_acquire_domain_slot(domain)
         if not can_proceed:
-            logger.info(f"Rate limiting domain {domain}, will retry later (need to wait {wait_time:.1f}s)")
+            logger.info(
+                f"Rate limiting domain {domain}, will retry later (need to wait {wait_time:.1f}s)")
             return (idx, 'ratelimit', url, title, "", None)
 
         # Proceed with scraping (domain slot already acquired atomically)
@@ -585,7 +587,8 @@ async def scrape_urls_concurrent(
             idx, url, title = current_url_tuple
             domain = urlparse(url).netloc
 
-            logger.info(f"Worker {worker_id} fetching {current_progress} of {total_urls} {url}")
+            logger.info(
+                f"Worker {worker_id} fetching {current_progress} of {total_urls} {url}")
 
             # Process URL with semaphore limiting concurrency
             async with semaphore:
@@ -600,7 +603,8 @@ async def scrape_urls_concurrent(
                 async with progress_lock:
                     processed_count -= 1
 
-                logger.info(f"Worker {worker_id} re-queued rate-limited URL: {url}")
+                logger.info(
+                    f"Worker {worker_id} re-queued rate-limited URL: {url}")
 
                 # Add cooling-off delay to prevent tight loop when many same-domain URLs remain
                 await asyncio.sleep(2.0)
@@ -610,11 +614,13 @@ async def scrape_urls_concurrent(
                 async with progress_lock:
                     completed_results[idx] = result
 
-                logger.info(f"Worker {worker_id} completed {url} with status: {result[1]}")
+                logger.info(
+                    f"Worker {worker_id} completed {url} with status: {result[1]}")
 
     # Concurrent processing with worker pool
     async with async_playwright() as p:
-        logger.info(f"Launching browser for {len(urls)} URLs with {concurrency} concurrent workers")
+        logger.info(
+            f"Launching browser for {len(urls)} URLs with {concurrency} concurrent workers")
         browser = await get_browser(p, reuse=True)
 
         # Create and start worker tasks
@@ -630,11 +636,13 @@ async def scrape_urls_concurrent(
         await browser.close()
 
     # Convert completed_results dict to sorted list by original index
-    all_results = [completed_results[idx] for idx in sorted(completed_results.keys())]
+    all_results = [completed_results[idx]
+                   for idx in sorted(completed_results.keys())]
 
     success_count = sum(1 for r in all_results if r[1] == 'success')
     error_count = len(all_results) - success_count
-    logger.info(f"Completed scraping {len(all_results)} URLs: {success_count} successful, {error_count} failed")
+    logger.info(
+        f"Completed scraping {len(all_results)} URLs: {success_count} successful, {error_count} failed")
 
     return all_results
 
@@ -648,14 +656,14 @@ async def scrape_urls_concurrent(
 
 
 async def scrape_url(url: str,
-                    title: str,
-                    browser_context: Optional[BrowserContext] = None,
-                    click_xpath: Optional[str] = None,
-                    scrolls: int = 0,
-                    scroll_div: str = "",
-                    initial_sleep: float = SLEEP_TIME,
-                    destination: str = PAGES_DIR,
-                    logger: Optional[logging.Logger] = None) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+                     title: str,
+                     browser_context: Optional[BrowserContext] = None,
+                     click_xpath: Optional[str] = None,
+                     scrolls: int = 0,
+                     scroll_div: str = "",
+                     initial_sleep: float = SLEEP_TIME,
+                     destination: str = PAGES_DIR,
+                     logger: Optional[logging.Logger] = None) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
     scrapes a URL using a Playwright browser context.
 
@@ -785,7 +793,8 @@ async def scrape_url(url: str,
         # Validate and normalize last_updated to Zulu datetime
         if last_updated and isinstance(last_updated, str):
             try:
-                logger.debug(f"Attempting to parse last_updated: '{last_updated}' (type: {type(last_updated)})")
+                logger.debug(
+                    f"Attempting to parse last_updated: '{last_updated}' (type: {type(last_updated)})")
                 dt = date_parser.parse(last_updated)
                 logger.debug(f"Parsed datetime: {dt}")
                 if dt.tzinfo is None:
@@ -796,14 +805,16 @@ async def scrape_url(url: str,
                 last_updated = dt_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
                 logger.debug(f"Formatted last_updated: {last_updated}")
             except Exception as e:
-                logger.warning(f"Could not parse last_updated '{last_updated}': {type(e).__name__}: {e}")
+                logger.warning(
+                    f"Could not parse last_updated '{last_updated}': {type(e).__name__}: {e}")
                 # set to 1 day ago
                 try:
                     last_updated = (datetime.datetime.now(
                         datetime.timezone.utc) - datetime.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
                     logger.debug(f"Set fallback last_updated: {last_updated}")
                 except Exception as fallback_e:
-                    logger.error(f"Failed to create fallback datetime: {type(fallback_e).__name__}: {fallback_e}")
+                    logger.error(
+                        f"Failed to create fallback datetime: {type(fallback_e).__name__}: {fallback_e}")
                     last_updated = None
 
         # Save HTML
@@ -868,10 +879,12 @@ def parse_source_file(source_dict: Dict[str, Any], logger: Optional[logging.Logg
     exclude = source_dict.get("exclude")
     include = source_dict.get("include")
     minlength = source_dict.get("minlength", MIN_TITLE_LEN)
-    logger.debug(f"minlength from source_dict: {repr(source_dict.get('minlength'))}, MIN_TITLE_LEN: {repr(MIN_TITLE_LEN)}, final minlength: {repr(minlength)}")
+    logger.debug(
+        f"minlength from source_dict: {repr(source_dict.get('minlength'))}, MIN_TITLE_LEN: {repr(MIN_TITLE_LEN)}, final minlength: {repr(minlength)}")
     # Ensure minlength is never None for comparison operations
     if minlength is None:
-        logger.warning(f"minlength was None! source_dict minlength: {repr(source_dict.get('minlength'))}, MIN_TITLE_LEN: {repr(MIN_TITLE_LEN)}")
+        logger.warning(
+            f"minlength was None! source_dict minlength: {repr(source_dict.get('minlength'))}, MIN_TITLE_LEN: {repr(MIN_TITLE_LEN)}")
         minlength = 28  # Default minimum title length
 
     link_list = []
@@ -986,6 +999,6 @@ async def scrape_source(source_dict: Dict[str, Any], browser_context: Optional[B
 
     # Open the page and scrape the HTML
     file_path, _, _ = await scrape_url(url, filename, browser_context,
-                                      click_xpath, scrolls, scroll_div, initial_sleep, destination=DOWNLOAD_DIR, logger=logger)
+                                       click_xpath, scrolls, scroll_div, initial_sleep, destination=DOWNLOAD_DIR, logger=logger)
     source_dict['latest'] = file_path
     return (sourcename, file_path)
