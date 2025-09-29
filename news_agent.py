@@ -13,13 +13,13 @@ import logging
 import os
 import json
 import dotenv
-import random
+# import random
 from datetime import datetime
 from pathlib import Path
 # from collections import Counter
 import sqlite3
 
-from httpx import head
+# from httpx import head
 import tldextract
 
 import shutil
@@ -45,11 +45,11 @@ from log_handler import SQLiteLogHandler
 from fetch import Fetcher
 from scrape import scrape_urls_concurrent, normalize_html
 from llm import LLMagent, LangfuseClient
-from do_dedupe import process_dataframe_with_filtering
-from do_rating import fn_rate_articles
 from config import CANONICAL_TOPICS, DOWNLOAD_DIR, PAGES_DIR, TEXT_DIR, NEWSAGENTDB, LOGDB
 from bs4 import BeautifulSoup
+from do_dedupe import process_dataframe_with_filtering
 from do_cluster import do_clustering
+from do_rating import fn_rate_articles, bradley_terry
 
 # import db
 from db import Url, Site
@@ -614,7 +614,8 @@ class FilterUrlsTool:
             original_count = len(headline_df)
 
             if self.logger:
-                self.logger.info(f"🔍 Filtering {total_articles} for dupes.")
+                self.logger.info(
+                    f"🔍 Filtering {total_articles} articles for dupes.")
 
             try:
                 with sqlite3.connect(state.db_path) as conn:
@@ -622,7 +623,7 @@ class FilterUrlsTool:
                     # Check each URL against the urls table
                     dupe_df = headline_df.copy()
                     dupe_df['is_new'] = True
-                    for _, row in dupe_df.itertuples():
+                    for row in dupe_df.itertuples():
                         url_to_check = row.url
                         print("checking", url_to_check)
                         if not url_to_check:  # should never happen
@@ -1850,22 +1851,33 @@ class RateArticlesTool:
             print(f"▶ Starting Step 6: {step_name}")
 
             # Get AI-related articles from persistent state
-            ai_articles = [
-                article for article in state.headline_data
-                if article.get('isAI') is True
-            ]
-
-            if not ai_articles:
-                return "❌ No AI-related articles found to rate. Please run previous steps first."
-
-            # Convert to DataFrame for processing
-            headline_df = pd.DataFrame(ai_articles)
+            headline_df = state.headline_df
 
             # Call fn_rate_articles from do_rating.py
             if self.logger:
-                self.logger.info(f"Rating {len(headline_df)} AI articles using fn_rate_articles")
+                self.logger.info(
+                    f"Rating {len(headline_df)} AI articles using fn_rate_articles")
 
+            # simple rating
             rated_df = await fn_rate_articles(headline_df, logger=self.logger)
+            # Bradley-Terry rating
+            rated_df = await bradley_terry(rated_df, logger=self.logger)
+            rated_df['bradley_terry'] += 2.5  # from around 0  to around 5
+            rated_df['rating'] = rated_df['rating'] + rated_df['bradley_terry']
+            rated_df['rating'] = rated_df['rating'].clip(lower=0, upper=10)
+
+            # Filter out low rated articles
+            minimum_story_rating = 0.0
+            low_rated_count = len(
+                rated_df[rated_df['rating'] < minimum_story_rating])
+            if self.logger:
+                self.logger.info(f"Low rated articles: {low_rated_count}")
+                for row in rated_df[rated_df['rating'] < minimum_story_rating].itertuples():
+                    self.logger.info(
+                        f"low rated article: {row.title} {row.rating}")
+
+            rated_df = rated_df[rated_df['rating']
+                                >= minimum_story_rating].copy()
 
             # Convert back to dict format and update state
             state.headline_data = rated_df.to_dict('records')
@@ -1873,7 +1885,8 @@ class RateArticlesTool:
             # Calculate stats
             articles_rated = len(rated_df)
             avg_rating = rated_df['rating'].mean() if not rated_df.empty else 0
-            high_quality_count = len(rated_df[rated_df['rating'] >= 7.0]) if not rated_df.empty else 0
+            high_quality_count = len(
+                rated_df[rated_df['rating'] >= 7.0]) if not rated_df.empty else 0
 
             # Complete the step
             state.complete_step(step_name)
