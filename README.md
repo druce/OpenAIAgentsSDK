@@ -34,11 +34,9 @@ python news_agent.py
 
 ### Interactive Development
 
-Open and run `test_agent.ipynb` for step-by-step development and testing:
+`Basic Agent.ipynb` : basic OpenAI Agent SDK examples
 
-```bash
-jupyter notebook test_agent.ipynb
-```
+`Run Agent.ipynb` : the newsletter agent workflow
 
 ## 📋 Complete 9-Step Workflow
 
