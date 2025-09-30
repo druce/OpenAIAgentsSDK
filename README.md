@@ -2,7 +2,7 @@
 
 An AI-powered newsletter generation system built on the OpenAI Agents SDK that implements a 9-step workflow for automated newsletter creation from multiple news sources.
 
-Note: This is a work in progress, the intent is to port the AInewsbot repo to the OpenAI Agents SDK. Currently it runs the first 3 steps, fetching, filtering and downloading articles. The remaining steps are mocked. Check back in a few weeks for a complete implementation.
+Note: This is a work in progress, the intent is to port the AInewsbot repo to the OpenAI Agents SDK. Currently it runs the first 6 steps, fetching, filtering and downloading articles, extracting summaries, clustering by topic, and rating articles. The remaining steps are mocked. Check back in a few weeks for a complete implementation.
 
 ## Overview
 
@@ -45,19 +45,25 @@ jupyter notebook test_agent.ipynb
 The newsletter generation follows a structured 9-step process with persistent state management:
 
 ### Step 1: Gather URLs 📰
+
 - **Sources**: Fetches from 17+ configured news sources
 - **Types**: RSS feeds, HTML scraping, REST APIs
-- **Output**: raw article URLs with metadata
+- **Output**: raw article URLs and titles
 
 ### Step 2: Filter URLs 🔍
-- **AI Classification**: Uses LLM (GPT-5-nano) to identify AI-related content, also should wnd filter stuff seen before by matching URL or title/source, and previously processed
+
+- **AI Classification**: Uses LLM to identify AI-related content
+- **Dedupe**: Filters out articles seen before by matching URL or title/source (with date override to rerun)
 - **Batch Processing**: Efficiently processes articles in batches
-- **Output**: ~200 AI-related articles (typical 50% filter rate on 400 new articles per day)
+- **Output**: ~200 AI-related articles (typical 50% filter rate on 400+ new articles per day)
 
 ### Step 3: Download Articles ⬇️
 - **Concurrent Scraping**: Parallel asynchronous Playwright workers with per-domain rate limiting
-- **Content Extraction**: Rrafilatura for clean text, extract publication dates, open graph metadata
-- **Output**: Full article content with metadata, eventually dedupe using embeddings +cosine similarity for e.g. syndicated articles on different URLs
+- **Output**:
+  - Redirect URLs
+  - Clean article content (trafilatura extraction)
+  - Article metadata (publication date, open graph metadata)
+  - Dedupe using embeddings + cosine similarity for e.g. syndicated articles on different URLs
 
 ### Step 4: Extract Summaries 📝
 - **AI Summarization**: Generates bullet-point summaries for each article
@@ -65,14 +71,18 @@ The newsletter generation follows a structured 9-step process with persistent st
 - **Output**: 3-point summaries stored in persistent state
 
 ### Step 5: Cluster by Topic 🏷️
-- **Categories**: Apply Canonical topics like AI Safety & Ethics, OpenAI, etc. via prompts
-- **Thematic Grouping**: Organize articles into topic clusters using HDBSCAN 
-- **Output**: most articles assigned to named clusters 
+- **Categories**: Apply free-form topics and canonical topics like AI Safety & Ethics, OpenAI, etc. via prompts; ask LLM to identify a few top topics that match articles
+- **Thematic Grouping**: Organize articles into topic clusters using HDBSCAN over dimensionality-reduced embeddings
+- **Output**: Topic tags and clusters
 
 ### Step 6: Rate Articles ⭐
 - **Quality Scoring**: Assigns quality ratings (1-10) to each article using a prompt and ELO type importance comparisons
-- **Relevance**: Evaluates according to a rubric, impacts lots of people, dollars, novelty
-- **Frequency**: If same story is covered by several articles, pick highest rated and boost points based on how many articles cover same story
+- **Relevance**: Initial pass: it it spammy, on-topic, important? use LLM and output logrobs
+- **Quality**: Run battles asking LLM to compare articles according to a rubric: quality, impact, novelty, etc.
+- **Reputation**: articles from reputable sources get boost points
+- **Recency**: downrate old articles
+- **Frequency**: If same story is covered by several articles, pick highest rated and boost points based on how many articles cover same set of facts
+- **Output**: Deduped articles with ratings
 
 ### Step 7: Select Sections 📑
 - **Newsletter Structure**: Chooses top articles for each section

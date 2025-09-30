@@ -9,6 +9,7 @@ class Url:
     initial_url: str
     final_url: str
     title: str
+    source: str
     isAI: bool
     created_at: Optional[datetime]
 
@@ -20,6 +21,7 @@ class Url:
                 initial_url TEXT PRIMARY KEY,
                 final_url TEXT NOT NULL,
                 title TEXT NOT NULL,
+                source TEXT NOT NULL,
                 isAI BOOLEAN,
                 created_at TEXT
             )
@@ -29,18 +31,18 @@ class Url:
     def insert(self, conn: sqlite3.Connection):
         """Insert this URL record into the database"""
         conn.execute("""
-            INSERT INTO urls (initial_url, final_url, title, isAI, created_at)
-            VALUES (?, ?, ?, ?, ?)
-        """, (self.initial_url, self.final_url, self.title, self.isAI,
+            INSERT INTO urls (initial_url, final_url, title, source, isAI, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (self.initial_url, self.final_url, self.title, self.source, self.isAI,
               self.created_at.isoformat() if self.created_at else None))
         conn.commit()
 
     def update(self, conn: sqlite3.Connection):
         """Update this URL record in the database"""
         conn.execute("""
-            UPDATE urls SET final_url = ?, title = ?, isAI = ?, created_at = ?
+            UPDATE urls SET final_url = ?, title = ?, source = ?, isAI = ?, created_at = ?
             WHERE initial_url = ?
-        """, (self.final_url, self.title, self.isAI,
+        """, (self.final_url, self.title, self.source, self.isAI,
               self.created_at.isoformat() if self.created_at else None,
               self.initial_url))
         conn.commit()
@@ -55,7 +57,7 @@ class Url:
     def get(cls, conn: sqlite3.Connection, initial_url: str) -> Optional['Url']:
         """Get a URL record by initial_url"""
         cursor = conn.execute("""
-            SELECT initial_url, final_url, title, isAI, created_at
+            SELECT initial_url, final_url, title, source, isAI, created_at
             FROM urls WHERE initial_url = ?
         """, (initial_url,))
         row = cursor.fetchone()
@@ -64,8 +66,9 @@ class Url:
                 initial_url=row[0],
                 final_url=row[1],
                 title=row[2],
-                isAI=bool(row[3]),
-                created_at=datetime.fromisoformat(row[4]) if row[4] else None
+                source=row[3],
+                isAI=bool(row[4]),
+                created_at=datetime.fromisoformat(row[5]) if row[5] else None
             )
         return None
 
@@ -73,28 +76,60 @@ class Url:
     def get_all(cls, conn: sqlite3.Connection) -> list['Url']:
         """Get all URL records"""
         cursor = conn.execute("""
-            SELECT initial_url, final_url, title, isAI, created_at FROM urls
+            SELECT initial_url, final_url, title, source, isAI, created_at FROM urls
         """)
         rows = cursor.fetchall()
         return [cls(
             initial_url=row[0],
             final_url=row[1],
             title=row[2],
-            isAI=bool(row[3]),
-            created_at=datetime.fromisoformat(row[4]) if row[4] else None
+            source=row[3],
+            isAI=bool(row[4]),
+            created_at=datetime.fromisoformat(row[5]) if row[5] else None
         ) for row in rows]
+
+    @classmethod
+    def get_by_source_and_title(cls, conn: sqlite3.Connection, source: str, title: str) -> Optional['Url']:
+        """Get a URL record by matching both source and title"""
+        cursor = conn.execute("""
+            SELECT initial_url, final_url, title, source, isAI, created_at
+            FROM urls WHERE source = ? AND title = ?
+        """, (source, title))
+        row = cursor.fetchone()
+        if row:
+            return cls(
+                initial_url=row[0],
+                final_url=row[1],
+                title=row[2],
+                source=row[3],
+                isAI=bool(row[4]),
+                created_at=datetime.fromisoformat(row[5]) if row[5] else None
+            )
+        return None
+
+    @classmethod
+    def get_by_url_or_source_and_title(cls, conn: sqlite3.Connection, url: str, source: str, title: str) -> Optional['Url']:
+        """Get a URL record by URL first, then fallback to source and title match"""
+        # First try to get by URL
+        result = cls.get(conn, url)
+        if result:
+            return result
+
+        # If not found by URL, try by source and title
+        return cls.get_by_source_and_title(conn, source, title)
 
     def upsert(self, conn: sqlite3.Connection):
         """Insert or update this URL record"""
         conn.execute("""
-            INSERT INTO urls (initial_url, final_url, title, isAI, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO urls (initial_url, final_url, title, source, isAI, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(initial_url) DO UPDATE SET
                 final_url = excluded.final_url,
                 title = excluded.title,
+                source = excluded.source,
                 isAI = excluded.isAI,
                 created_at = excluded.created_at
-        """, (self.initial_url, self.final_url, self.title, self.isAI,
+        """, (self.initial_url, self.final_url, self.title, self.source, self.isAI,
               self.created_at.isoformat() if self.created_at else None))
         conn.commit()
 

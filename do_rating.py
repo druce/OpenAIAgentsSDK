@@ -293,14 +293,14 @@ async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFra
         if len(all_results) > 4:
             last_two = all_results[-1] + all_results[-2]
             prev_two = all_results[-3] + all_results[-4]
-            convergence_threshold = n_stories / 200   # 0.5%
+            convergence_threshold = n_stories / 100
             if (last_two) < convergence_threshold * 2:
                 logger.info("Converged - stopping early")
                 break
             else:
                 if last_two > prev_two:
                     logger.info("Increase in avg rank change, converging")
-                break
+                    break
 
         previous_rankings = new_rankings
 

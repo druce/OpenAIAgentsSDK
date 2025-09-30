@@ -508,8 +508,14 @@ class GatherUrlsTool:
             with sqlite3.connect(NEWSAGENTDB) as conn:
                 Url.create_table(conn)
                 for row in headline_df.itertuples():
-                    news_url = Url(row.url, '', row.title,
-                                   None, datetime.now())
+                    news_url = Url(
+                        initial_url=row.url,
+                        final_url='',  # Will be updated later in step 3
+                        title=row.title,
+                        source=row.source,  # Use source from headline_df
+                        isAI=None,  # Will be updated later in step 2
+                        created_at=datetime.now()
+                    )
                     try:
                         news_url.insert(conn)
                     except Exception as e:
@@ -628,14 +634,15 @@ class FilterUrlsTool:
                         print("checking", url_to_check)
                         if not url_to_check:  # should never happen
                             continue
-                        existing_url = Url.get(conn, url_to_check)
+                        existing_url = Url.get_by_url_or_source_and_title(
+                            conn, url_to_check, row.source, row.title)
                         if existing_url is None:  # not found
-                            print("not found")
+                            print("url not found")
                             continue
                         if state.process_since:
                             if existing_url.created_at is not None and existing_url.created_at > state.process_since:
                                 # URL exists but seen after process_since - treat as new
-                                print("found after cutoff")
+                                print("found url after cutoff")
                                 continue
                         # found url, no cutoff set, or seen prior to cutoff - treat as duplicate
                         print("found before cutoff")
@@ -1858,13 +1865,14 @@ class RateArticlesTool:
                 self.logger.info(
                     f"Rating {len(headline_df)} AI articles using fn_rate_articles")
 
-            # simple rating
+            # simple rating - reputation + (-1 to 2) based on prob (not spammy, on-topic, important)
             rated_df = await fn_rate_articles(headline_df, logger=self.logger)
-            # Bradley-Terry rating
+            # Bradley-Terry rating (like ELO)
             rated_df = await bradley_terry(rated_df, logger=self.logger)
-            rated_df['bradley_terry'] += 2.5  # from around 0  to around 5
-            rated_df['rating'] = rated_df['rating'] + rated_df['bradley_terry']
-            rated_df['rating'] = rated_df['rating'].clip(lower=0, upper=10)
+            # scale bradley_terry rating from z-score ~(-2.5 to 2.5) to ~(-1.5 to 6)
+            rated_df['bt_z'] = (rated_df['bt_z'] + 1.5) * 1.5
+            rated_df['rating'] = rated_df['rating'] + rated_df['bt_z']
+            # rated_df['rating'] = rated_df['rating'].clip(lower=0, upper=10)
 
             # Filter out low rated articles
             minimum_story_rating = 0.0
