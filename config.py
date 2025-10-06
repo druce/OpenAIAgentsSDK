@@ -51,7 +51,7 @@ IGNORE_LIST = ["www.bloomberg.com", "bloomberg.com",
                "wsj.com", "www.wsj.com"]
 
 MIN_TITLE_LEN = 28
-SLEEP_TIME = 10
+SLEEP_TIME = 7
 MAX_TOKENS = 8192  # for embeddings
 
 MODEL_FAMILY = {'gpt-4o-2024-11-20': 'openai',

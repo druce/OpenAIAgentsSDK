@@ -266,7 +266,7 @@ async def handle_navigate_url(args: Dict[str, Any]) -> List[types.TextContent]:
     async with async_playwright() as p:
         browser = await get_browser(p)
         try:
-            html_path, last_updated, final_url = await scrape_url(
+            html_path, last_updated, final_url, status = await scrape_url(
                 url=url,
                 title=title,
                 browser_context=browser,
@@ -284,17 +284,20 @@ async def handle_navigate_url(args: Dict[str, Any]) -> List[types.TextContent]:
                     "final_url": final_url,
                     "html_path": html_path,
                     "file_size_bytes": file_size,
-                    "last_updated": last_updated
+                    "last_updated": last_updated,
+                    "http_status": status
                 }
                 return [types.TextContent(
                     type="text",
                     text=f"Successfully navigated to {url}\n" +
                          f"Final URL: {final_url}\n" +
+                         f"HTTP Status: {status or 'Unknown'}\n" +
                          f"Saved to: {html_path}\n" +
                          f"File size: {file_size:,} bytes\n" +
                          f"Last updated: {last_updated or 'Unknown'}\n\n" +
                          f"Full result: {json.dumps(result, indent=2)}"
                 )]
+
             else:
                 return [types.TextContent(
                     type="text",
@@ -319,7 +322,7 @@ async def handle_extract_text(args: Dict[str, Any]) -> List[types.TextContent]:
             async with async_playwright() as p:
                 browser = await get_browser(p)
                 try:
-                    html_path, _, _ = await scrape_url(
+                    html_path, _, _, _ = await scrape_url(
                         url=url,
                         title=title,
                         browser_context=browser,
@@ -392,7 +395,7 @@ async def handle_get_metadata(args: Dict[str, Any]) -> List[types.TextContent]:
             async with async_playwright() as p:
                 browser = await get_browser(p)
                 try:
-                    html_path, _, _ = await scrape_url(
+                    html_path, _, _, _ = await scrape_url(
                         url=url,
                         title=title,
                         browser_context=browser,
@@ -486,7 +489,7 @@ async def handle_parse_links(args: Dict[str, Any]) -> List[types.TextContent]:
     async with async_playwright() as p:
         browser = await get_browser(p)
         try:
-            html_path, _, _ = await scrape_url(
+            html_path, _, _, _ = await scrape_url(
                 url=url,
                 title=title,
                 browser_context=browser,
@@ -566,7 +569,7 @@ async def handle_batch_fetch(args: Dict[str, Any]) -> List[types.TextContent]:
     total_size = 0
 
     result_data = []
-    for idx, url, title, file_path, last_updated in results:
+    for idx, status_code, url, title, file_path, last_updated in results:
         if file_path and os.path.exists(file_path):
             file_size = os.path.getsize(file_path)
             total_size += file_size
@@ -582,6 +585,7 @@ async def handle_batch_fetch(args: Dict[str, Any]) -> List[types.TextContent]:
             "url": url,
             "title": title,
             "status": status,
+            "status_code": status_code,
             "file_path": file_path,
             "file_size_bytes": file_size,
             "last_updated": last_updated

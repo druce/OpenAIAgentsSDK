@@ -131,6 +131,32 @@ class SiteNameGenerationList(BaseModel):
     results_list: list[SiteNameGeneration] = Field(
         description="List of site name generation results")
 
+# for categorizing articles
+
+
+class TopicHeadline(BaseModel):
+    """Topic headline of a group of stories for structured output"""
+    topic_title: str = Field(description="The title for the headline group")
+
+
+class TopicCategoryList(BaseModel):
+    """List of topics for structured output filtering"""
+    items: List[str] = Field(description="List of topics")
+
+# for deduping articles
+
+
+class DupeRecord(BaseModel):
+    """Dupe record for structured output filtering"""
+    id: int = Field(description="The article id")
+    dupe_id: int = Field(description="The dupe article id")
+
+
+class DupeRecordList(BaseModel):
+    """List of DupeRecord for structured output filtering"""
+    results_list: list[DupeRecord] = Field(
+        description="List of dupe records")
+
 
 def setup_logging(session_id: str = "default", db_path: str = LOGDB) -> logging.Logger:
     """Set up logging to console and SQLite database."""
@@ -505,24 +531,6 @@ class GatherUrlsTool:
             status_msg += f"\n\n📊 Articles stored in persistent state: {len(state.headline_data)}"
             headline_df = pd.DataFrame(state.headline_data)
 
-            with sqlite3.connect(NEWSAGENTDB) as conn:
-                Url.create_table(conn)
-                for row in headline_df.itertuples():
-                    news_url = Url(
-                        initial_url=row.url,
-                        final_url='',  # Will be updated later in step 3
-                        title=row.title,
-                        source=row.source,  # Use source from headline_df
-                        isAI=None,  # Will be updated later in step 2
-                        created_at=datetime.now()
-                    )
-                    try:
-                        news_url.insert(conn)
-                    except Exception as e:
-                        if self.logger and self.verbose:
-                            self.logger.error(
-                                f"Failed to insert URL: {str(e)} (might exist from previous run)")
-
             display(headline_df)
 
             if self.logger:
@@ -637,16 +645,29 @@ class FilterUrlsTool:
                         existing_url = Url.get_by_url_or_source_and_title(
                             conn, url_to_check, row.source, row.title)
                         if existing_url is None:  # not found
-                            print("url not found")
+                            print("url not found - inserting new URL")
+                            new_url = Url(
+                                initial_url=url_to_check,
+                                final_url='',
+                                title=row.title,
+                                source=row.source,
+                                isAI=None,  # Will be set after AI classification
+                                created_at=datetime.now()
+                            )
+                            new_url.insert(conn)
                             continue
                         if state.process_since:
                             if existing_url.created_at is not None and existing_url.created_at > state.process_since:
                                 # URL exists but seen after process_since - treat as new
                                 print("found url after cutoff")
                                 continue
-                        # found url, no cutoff set, or seen prior to cutoff - treat as duplicate
-                        print("found before cutoff")
-                        dupe_df.at[row.Index, 'is_new'] = False
+                            # found url and seen prior to cutoff - treat as duplicate
+                            print("found before cutoff")
+                            dupe_df.at[row.Index, 'is_new'] = False
+                        else:
+                            # No process_since set - treat any existing URLs as duplicates
+                            print("found url, no cutoff set - treating as duplicate")
+                            dupe_df.at[row.Index, 'is_new'] = False
 
                 # Filter DataFrame to only new URLs
                 headline_df = headline_df.loc[dupe_df['is_new']]
@@ -813,7 +834,7 @@ class DownloadArticlesTool:
             headline_df = pd.DataFrame(state.headline_data)
 
             # Filter for AI-related articles
-            ai_df = headline_df.loc[headline_df['isAI'] == True].copy()
+            ai_df = headline_df.loc[headline_df['isAI']].copy()
 
             if ai_df.empty:
                 return "❌ No AI-related articles found to download. Please run step 2 first."
@@ -1294,7 +1315,7 @@ class ExtractSummariesTool:
             headline_df = pd.DataFrame(state.headline_data)
             # Filter to AI-related articles with HTML content
             # TODO: filter to articles with text content with .str.len() > 0
-            ai_articles_mask = (headline_df.get('isAI') == True) & (
+            ai_articles_mask = (headline_df.get('isAI')) & (
                 headline_df['text_path'].notna())
             if not ai_articles_mask.any():
                 return "❌ No AI-related articles with HTML content found to summarize. Please run step 3 first."
@@ -1412,8 +1433,138 @@ class ExtractSummariesTool:
         )
 
 
+class RateArticlesTool:
+    """Tool for Step 5: Rate article quality and importance
+    - create a rating using prompt to compare articles according to a rubric, and ELO/Bradley-Terry model
+    - optionally could use a prompt to ask if it's AI related, important and not spammy, and use log probs from prompt
+    - use additional criteria like log length of article, reputation of site
+    - combine to create a rating
+    - ratings can later be used to inform clustering decisions and section selection
+    """
+
+    def __init__(self, verbose: bool = False, logger: logging.Logger = None):
+        self.verbose = verbose
+        self.logger = logger
+
+    async def _rate_articles(self, ctx, args: str) -> str:
+        """Execute Step 5: Rate Articles using persistent state"""
+        step_name = "step_05_rate_articles"
+
+        # Access the persistent state
+        state: NewsletterAgentState = ctx.context
+
+        # Check if step already completed via persistent state
+        if state.is_step_complete(step_name):
+            rated_articles = [
+                article for article in state.headline_data if article.get('quality_rating')]
+            avg_rating = sum(article.get('quality_rating', 0)
+                             for article in rated_articles) / len(rated_articles) if rated_articles else 0
+            return f"Step 5 already completed! Rated {len(rated_articles)} articles with average rating {avg_rating:.1f}/10."
+
+        # Check if step 4 is completed
+        if not state.is_step_complete("step_04_extract_summaries"):
+            return "❌ Cannot execute Step 5: Step 4 (Extract Summaries) must be completed first."
+
+        # Check if workflow is blocked by errors
+        if state.has_errors():
+            return "❌ Cannot execute Step 5: Workflow is blocked by errors. {state.workflow_status_message}"
+
+        try:
+            # Update workflow status for UI tracking
+            state.start_step(step_name)
+            print(f"▶ Starting Step 5: {step_name}")
+
+            # Get AI-related articles from persistent state
+            headline_df = state.headline_df.copy()
+
+            # Call fn_rate_articles from do_rating.py
+            if self.logger:
+                self.logger.info(
+                    f"Rating {len(headline_df)} AI articles using fn_rate_articles")
+
+            # dupe_count = headline_df["id"].duplicated().sum()
+            # self.logger.warning(f"1 Found {dupe_count} duplicate articles")
+            # simple rating - reputation + (-1 to 2) based on prob (not spammy, on-topic, important)
+            rated_df = await fn_rate_articles(headline_df.copy(), logger=self.logger)
+            # initial rating sort
+            rated_df = rated_df.sort_values(
+                "rating", ascending=False)
+            # important to match id = index
+            rated_df = rated_df.reset_index(drop=True)
+            rated_df['id'] = rated_df.index
+
+            # dupe_count = rated_df["id"].duplicated().sum()
+            # self.logger.warning(f"2 Found {dupe_count} duplicate articles")
+            # Bradley-Terry rating (like Elo)
+            rated_df = await bradley_terry(rated_df, logger=self.logger)
+            # dupe_count = rated_df["id"].duplicated().sum()
+            # self.logger.warning(f"3 Found {dupe_count} duplicate articles")
+            # scale bradley_terry rating from z-score ~(-2.5 to 2.5) to ~(-1.5 to 6)
+            rated_df['bt_z'] = (rated_df['bt_z'] + 1.5) * 1.5
+            rated_df['rating'] = rated_df['rating'] + rated_df['bt_z']
+            # rated_df['rating'] = rated_df['rating'].clip(lower=0, upper=10)
+
+            # Filter out low rated articles
+            minimum_story_rating = 0.0
+            low_rated_count = len(
+                rated_df[rated_df['rating'] < minimum_story_rating])
+            if self.logger:
+                self.logger.info(f"Low rated articles: {low_rated_count}")
+                for row in rated_df[rated_df['rating'] < minimum_story_rating].itertuples():
+                    self.logger.info(
+                        f"low rated article: {row.title} {row.rating}")
+
+            rated_df = rated_df[rated_df['rating']
+                                >= minimum_story_rating].copy()
+
+            # Convert back to dict format and update state
+            state.headline_data = rated_df.to_dict('records')
+
+            # Calculate stats
+            articles_rated = len(rated_df)
+            avg_rating = rated_df['rating'].mean() if not rated_df.empty else 0
+            high_quality_count = len(
+                rated_df[rated_df['rating'] >= 7.0]) if not rated_df.empty else 0
+
+            # Complete the step
+            state.complete_step(step_name)
+
+            if self.verbose:
+                print(f"✅ Completed Step 5: Rated {articles_rated} articles")
+
+            status_msg = f"✅ Step 5 {step_name} completed successfully! Rated {articles_rated} articles with average rating {avg_rating:.1f}/10."
+            status_msg += f"\n⭐ High quality articles (≥7.0): {high_quality_count}"
+            status_msg += "\n💾 Ratings stored in persistent state."
+
+            # Serialize state after completing step
+            state.serialize_to_db(step_name)
+            return status_msg
+
+        except Exception as e:
+            state.error_step(step_name, str(e))
+            return f"❌ Step 5 failed: {str(e)}"
+
+    def create_tool(self) -> FunctionTool:
+        """Create a FunctionTool instance following OpenAI Agents SDK conventions"""
+        return FunctionTool(
+            name="rate_articles",
+            description="Execute Step 5: Evaluate article quality and importance with ratings. Requires Step 4 to be completed first.",
+            params_json_schema={
+                "type": "object",
+                "properties": {},
+                "required": []
+            },
+            on_invoke_tool=self._rate_articles
+        )
+
+# review how we created categories ...
+# try to extract common themes from other sections
+# clean up categories to remove duplicates and merge similar themes and tighten names
+# assign articles to sections or other
+
+
 class ClusterByTopicTool:
-    """Tool for Step 5: Cluster articles by topic
+    """Tool for Step 6: Cluster articles by topic
 
     Multi-stage topic analysis and clustering process:
 
@@ -1544,7 +1695,7 @@ class ClusterByTopicTool:
 
         # Extract topics using filter_dataframe
         articles_with_summaries['extracted_topics'] = await topic_agent.filter_dataframe(
-            articles_with_summaries[['id', 'summary']],
+            articles_with_summaries[['id', 'input_text']],
             value_field='topics_list',
             item_list_field='results_list',
             item_id_field='id',
@@ -1575,8 +1726,7 @@ class ClusterByTopicTool:
             List of boolean values indicating relevance to the topic
         """
         # Get prompt and model from Langfuse
-        langfuse_client = LangfuseClient()
-        system_prompt, user_prompt, model = langfuse_client.get_prompt(
+        system_prompt, user_prompt, model = LangfuseClient().get_prompt(
             "newsagent/canonical_topic")
 
         # Create LLMagent for canonical topic classification
@@ -1591,7 +1741,7 @@ class ClusterByTopicTool:
 
         # Use filter_dataframe to classify against the canonical topic
         relevance_series = await canonical_agent.filter_dataframe(
-            headline_df[['id', 'summary']].copy(),
+            headline_df[['id', 'input_text']].copy(),
             value_field='relevant',
             item_list_field='results_list',
             item_id_field='id',
@@ -1693,8 +1843,8 @@ class ClusterByTopicTool:
         return headline_df
 
     async def _cluster_by_topic(self, ctx, args: str) -> str:
-        """Execute Step 5: Cluster By Topic using persistent state"""
-        step_name = "step_05_cluster_by_topic"
+        """Execute Step 6: Cluster By Topic using persistent state"""
+        step_name = "step_06_cluster_by_topic"
         # todo: combine title and description and summary and tags for topic extraction
         # todo: show list of common topics
 
@@ -1706,25 +1856,25 @@ class ClusterByTopicTool:
             cluster_count = len(state.clusters)
             total_articles = sum(len(articles)
                                  for articles in state.clusters.values())
-            return f"Step 5 already completed! Created {cluster_count} topic clusters with {total_articles} articles."
+            return f"Step 6 already completed! Created {cluster_count} topic clusters with {total_articles} articles."
 
-        # Check if step 4 is completed
-        if not state.is_step_complete("step_04_extract_summaries"):
-            return "❌ Cannot execute Step 5: Step 4 (Extract Summaries) must be completed first."
+        # Check if step 5 is completed
+        if not state.is_step_complete("step_05_rate_articles"):
+            return "❌ Cannot execute Step 6: Step 5 (Rate Articles) must be completed first."
 
         # Check if workflow is blocked by errors
         if state.has_errors():
-            return f"❌ Cannot execute Step 5: Workflow is blocked by errors. {state.workflow_status_message}"
+            return f"❌ Cannot execute Step 6: Workflow is blocked by errors. {state.workflow_status_message}"
 
         try:
             # Update workflow status for UI tracking
             state.start_step(step_name)
-            print(f"▶ Starting Step 5: {step_name}")
+            print(f"▶ Starting Step 6: {step_name}")
 
             # Get articles with summaries from persistent state
             headline_df = pd.DataFrame(state.headline_data)
             articles_with_summaries = headline_df.loc[
-                (headline_df['isAI'] == True) &
+                (headline_df['isAI']) &
                 headline_df['summary'].notna() &
                 (headline_df['summary'] != '')]
 
@@ -1733,6 +1883,19 @@ class ClusterByTopicTool:
 
             # Clear existing clusters
             state.clusters = {}
+
+            def _get_input_text(row):
+                retval = row['title']
+                if isinstance(row['rss_summary'], str) and len(row['rss_summary']) > 0:
+                    retval += "\n" + row['rss_summary']
+                if isinstance(row['description'], str) and len(row['description']) > 0:
+                    retval += "\n" + row['description']
+                if isinstance(row['summary'], str) and len(row['summary']) > 0:
+                    retval += "\n" + row['summary']
+                return retval
+
+            articles_with_summaries['input_text'] = articles_with_summaries.apply(
+                _get_input_text, axis=1)
 
             articles_with_summaries = await self._free_form_extraction(articles_with_summaries)
 
@@ -1787,7 +1950,7 @@ class ClusterByTopicTool:
             # Calculate canonical topic stats
             # total_canonical_matches = sum(len(article.get('canonical_topics', [])) for article in state.headline_data)
 
-            status_msg = f"✅ Step 5 {step_name} completed successfully! Organized {len(headline_df)} articles into topic clusters."
+            status_msg = f"✅ Step 6 {step_name} completed successfully! Organized {len(headline_df)} articles into topic clusters."
             # status_msg += f"\n📊 Cluster coherence score: {cluster_coherence_score:.1%}"
             # status_msg += f"\n🔄 Frequent topics found: {len(state.common_topics)} (top 50 topics appearing 3+ times)"
             # status_msg += f"\n🏛️ Canonical topic matches: {total_canonical_matches} across {len(CANONICAL_TOPICS)} canonical topics"
@@ -1800,13 +1963,13 @@ class ClusterByTopicTool:
 
         except Exception as e:
             state.error_step(step_name, str(e))
-            return f"❌ Step 5 failed: {str(e)}"
+            return f"❌ Step 6 failed: {str(e)}"
 
     def create_tool(self) -> FunctionTool:
         """Create a FunctionTool instance following OpenAI Agents SDK conventions"""
         return FunctionTool(
             name="cluster_by_topic",
-            description="Execute Step 5: Group articles by thematic topics using clustering. Requires Step 4 to be completed first.",
+            description="Execute Step 6: Group articles by thematic topics using clustering. Requires Step 5 to be completed first.",
             params_json_schema={
                 "type": "object",
                 "properties": {},
@@ -1814,123 +1977,6 @@ class ClusterByTopicTool:
             },
             on_invoke_tool=self._cluster_by_topic
         )
-
-
-class RateArticlesTool:
-    """Tool for Step 6: Rate article quality and importance
-    - create a rating using prompt to compare articles according to a rubric, and ELO/Bradley-Terry model
-    - optionally could use a prompt to ask if it's AI related, important and not spammy, and use log probs from prompt
-    - use additional criteria like log length of article, reputation of site
-    - combine to create a rating
-    - deduplicate each cluster of articles covering same story and add a point to the rating of the best story retained for each duplicate (since frequently covered stories are important)
-    """
-
-    def __init__(self, verbose: bool = False, logger: logging.Logger = None):
-        self.verbose = verbose
-        self.logger = logger
-
-    async def _rate_articles(self, ctx, args: str) -> str:
-        """Execute Step 6: Rate Articles using persistent state"""
-        step_name = "step_06_rate_articles"
-
-        # Access the persistent state
-        state: NewsletterAgentState = ctx.context
-
-        # Check if step already completed via persistent state
-        if state.is_step_complete(step_name):
-            rated_articles = [
-                article for article in state.headline_data if article.get('quality_rating')]
-            avg_rating = sum(article.get('quality_rating', 0)
-                             for article in rated_articles) / len(rated_articles) if rated_articles else 0
-            return f"Step 6 already completed! Rated {len(rated_articles)} articles with average rating {avg_rating:.1f}/10."
-
-        # Check if step 5 is completed
-        if not state.is_step_complete("step_05_cluster_by_topic"):
-            return "❌ Cannot execute Step 6: Step 5 (Cluster By Topic) must be completed first."
-
-        # Check if workflow is blocked by errors
-        if state.has_errors():
-            return "❌ Cannot execute Step 6: Workflow is blocked by errors. {state.workflow_status_message}"
-
-        try:
-            # Update workflow status for UI tracking
-            state.start_step(step_name)
-            print(f"▶ Starting Step 6: {step_name}")
-
-            # Get AI-related articles from persistent state
-            headline_df = state.headline_df
-
-            # Call fn_rate_articles from do_rating.py
-            if self.logger:
-                self.logger.info(
-                    f"Rating {len(headline_df)} AI articles using fn_rate_articles")
-
-            # simple rating - reputation + (-1 to 2) based on prob (not spammy, on-topic, important)
-            rated_df = await fn_rate_articles(headline_df, logger=self.logger)
-            # Bradley-Terry rating (like ELO)
-            rated_df = await bradley_terry(rated_df, logger=self.logger)
-            # scale bradley_terry rating from z-score ~(-2.5 to 2.5) to ~(-1.5 to 6)
-            rated_df['bt_z'] = (rated_df['bt_z'] + 1.5) * 1.5
-            rated_df['rating'] = rated_df['rating'] + rated_df['bt_z']
-            # rated_df['rating'] = rated_df['rating'].clip(lower=0, upper=10)
-
-            # Filter out low rated articles
-            minimum_story_rating = 0.0
-            low_rated_count = len(
-                rated_df[rated_df['rating'] < minimum_story_rating])
-            if self.logger:
-                self.logger.info(f"Low rated articles: {low_rated_count}")
-                for row in rated_df[rated_df['rating'] < minimum_story_rating].itertuples():
-                    self.logger.info(
-                        f"low rated article: {row.title} {row.rating}")
-
-            rated_df = rated_df[rated_df['rating']
-                                >= minimum_story_rating].copy()
-
-            # Convert back to dict format and update state
-            state.headline_data = rated_df.to_dict('records')
-
-            # Calculate stats
-            articles_rated = len(rated_df)
-            avg_rating = rated_df['rating'].mean() if not rated_df.empty else 0
-            high_quality_count = len(
-                rated_df[rated_df['rating'] >= 7.0]) if not rated_df.empty else 0
-
-            # Complete the step
-            state.complete_step(step_name)
-
-            if self.verbose:
-                print(f"✅ Completed Step 6: Rated {articles_rated} articles")
-
-            status_msg = f"✅ Step 6 {step_name} completed successfully! Rated {articles_rated} articles with average rating {avg_rating:.1f}/10."
-            status_msg += f"\n⭐ High quality articles (≥7.0): {high_quality_count}"
-            status_msg += "\n💾 Ratings stored in persistent state."
-
-            # Serialize state after completing step
-            state.serialize_to_db(step_name)
-            return status_msg
-
-        except Exception as e:
-            state.error_step(step_name, str(e))
-            return f"❌ Step 6 failed: {str(e)}"
-
-    def create_tool(self) -> FunctionTool:
-        """Create a FunctionTool instance following OpenAI Agents SDK conventions"""
-        return FunctionTool(
-            name="rate_articles",
-            description="Execute Step 6: Evaluate article quality and importance with ratings. Requires Step 5 to be completed first.",
-            params_json_schema={
-                "type": "object",
-                "properties": {},
-                "required": []
-            },
-            on_invoke_tool=self._rate_articles
-        )
-
-# review how we created categories ...
-# try to extract common themes from other sections
-# clean up categories to remove duplicates and merge similar themes and tighten names
-# assign articles to sections or other
 
 
 class SelectSectionsTool:
@@ -1947,99 +1993,212 @@ class SelectSectionsTool:
 
     async def _select_sections(self, ctx, args: str) -> str:
         """Execute Step 7: Select Sections using persistent state"""
-        step_name = "step_07_select_sections"
-
         # Access the persistent state
         state: NewsletterAgentState = ctx.context
 
         # Check if step already completed via persistent state
+        step_name = "step_07_select_sections"
         if state.is_step_complete(step_name):
             section_count = len(state.newsletter_sections)
             return f"Step 7 already completed! Created {section_count} newsletter sections."
 
         # Check if step 6 is completed
-        if not state.is_step_complete("step_06_rate_articles"):
-            return "❌ Cannot execute Step 7: Step 6 (Rate Articles) must be completed first."
+        if not state.is_step_complete("step_06_cluster_by_topic"):
+            return "❌ Cannot execute Step 7: Step 6 (Cluster By Topic) must be completed first."
 
         # Check if workflow is blocked by errors
         if state.has_errors():
             return "❌ Cannot execute Step 7: Workflow is blocked by errors. {state.workflow_status_message}"
 
+        def _get_input_text(row):
+            """
+            Format a news item for assignment to categories
+
+            Args:
+                row: DataFrame row
+
+            Returns:
+                str: Formatted text for a news item
+            """
+
+            retval = f"{row.title} - {row.site_name}\n"
+
+            retval += f"\nRating: {row.rating:.1f}\n"
+
+            if hasattr(row, 'topics') and row.topics:
+                topics = ", ".join(row.topics)
+                retval += f"\nTopics: {topics}\n"
+
+            summary = ""
+            if isinstance(row.rss_summary, str) and len(row.rss_summary) > 0:
+                summary += "\n" + row.rss_summary
+            elif isinstance(row.description, str) and len(row.description) > 0:
+                summary += "\n" + row.description
+            if summary:
+                soup = BeautifulSoup(summary, 'html.parser')
+                summary = soup.get_text().strip()
+                retval += f"\n{summary}\n"
+
+            if isinstance(row.summary, str) and len(row.summary) > 0:
+                retval += "\n" + row.summary
+
+            retval += "\n---\n"
+
+            return retval
+
         try:
             # Update workflow status for UI tracking
             state.start_step(step_name)
             print(f"▶ Starting Step 7: {step_name}")
-
             # Get rated articles from persistent state
-            rated_articles = [
-                article for article in state.headline_data
-                if article.get('isAI') is True and article.get('quality_rating')
-            ]
+            headline_df = state.headline_df.copy()
 
-            if not rated_articles:
-                return "❌ No rated articles found to organize into sections. Please run step 6 first."
+            self.logger.info("Free form categorization of articles")
 
-            # Clear existing sections if rerunning
-            state.newsletter_sections = {}
+            system_prompt, user_prompt, model = LangfuseClient().get_prompt(
+                "newsagent/cat_proposal")
 
-            # Create newsletter sections based on topic clusters and ratings
-            # Use existing topic clusters but prioritize high-quality articles
-            high_quality_articles = [
-                a for a in rated_articles if a.get('quality_rating', 0) >= 7.0]
-            medium_quality_articles = [
-                a for a in rated_articles if 5.0 <= a.get('quality_rating', 0) < 7.0]
+            cat_proposal_agent = LLMagent(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                output_type=TopicCategoryList,
+                model=model,
+                verbose=self.verbose,
+                logger=self.logger
+            )
 
-            # Group articles by cluster topic and select best ones for each section
-            cluster_sections = {}
-            for article in high_quality_articles + medium_quality_articles:
-                cluster = article.get('cluster_topic', 'Other AI Topics')
-                if cluster not in cluster_sections:
-                    cluster_sections[cluster] = []
-                cluster_sections[cluster].append(article)
+            headline_df["input_text"] = headline_df.apply(
+                _get_input_text, axis=1)
+            input_text = "\n".join(headline_df["input_text"].tolist())
 
-            # Create newsletter sections with article assignments
-            articles_assigned = 0
-            for cluster, articles in cluster_sections.items():
-                if not articles:
-                    continue
+            suggested_cats = await cat_proposal_agent.run_prompt(input_text=input_text)
+            suggested_cats_list = [cat for cat in suggested_cats.items]
 
-                # Sort articles by rating (highest first) and take top articles
-                sorted_articles = sorted(articles, key=lambda x: x.get(
-                    'quality_rating', 0), reverse=True)
-                # Max 5 articles per section
-                top_articles = sorted_articles[:5]
+            # combine with hdbscan clusters and remove duplicates
+            initial_cats = list(
+                set(headline_df["cluster_name"].to_list() + suggested_cats_list))
 
-                # Create section outline (will be filled in step 8)
-                section_content = {
-                    'title': cluster,
-                    'article_count': len(top_articles),
-                    'articles': [{
-                        'url': article.get('url'),
-                        'title': article.get('title'),
-                        'rating': article.get('quality_rating'),
-                        'source': article.get('source')
-                    } for article in top_articles],
-                    'section_status': 'selected',
-                    'timestamp': datetime.now().isoformat()
-                }
+            self.logger.info(f"Cleaning up initial categories: {initial_cats}")
 
-                state.newsletter_sections[cluster] = section_content
-                articles_assigned += len(top_articles)
+            system_prompt, user_prompt, model = LangfuseClient(
+            ).get_prompt("newsagent/cat_cleanup")
+
+            cat_cleanup_agent = LLMagent(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                output_type=TopicCategoryList,
+                model=model,
+                verbose=self.verbose,
+                logger=self.logger
+            )
+            response = await cat_cleanup_agent.run_prompt(input_text="\n".join(initial_cats))
+            final_cats = [cat for cat in response.items]
+            final_cats_str = "\n".join(sorted(final_cats))
+            self.logger.info(f"Final categories: {final_cats_str}")
+
+            # loop over items and assign to cats
+            system_prompt, user_prompt, model = LangfuseClient(
+            ).get_prompt("newsagent/cat_assignment")
+
+            cat_assignment_agent = LLMagent(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                output_type=TopicHeadline,
+                model=model,
+                verbose=self.verbose,
+                logger=self.logger
+            )
+
+            async def assign_topic(idx, input_text):
+                assigned_cat = await cat_assignment_agent.run_prompt(topics=final_cats_str,
+                                                                     input_text=input_text)
+                return (idx, input_text, assigned_cat.topic_title)
+
+            tasks = [assign_topic(row.id, row.input_text)
+                     for row in headline_df.itertuples()]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            templist = [t for t in results if not isinstance(t, Exception)]
+
+            catdf = pd.DataFrame(templist, columns=["id", "input_text", "cat"])
+            catdf["cat"] = catdf["cat"].fillna("Other")
+            catdf.loc[catdf["cat"] == "None", "cat"] = "Other"
+
+            headline_df = headline_df.merge(
+                catdf[["id", "cat"]], on="id", how="left")
+
+            # get unique cluster names and sort them
+            cluster_df = headline_df["cat"].value_counts().reset_index()
+            cluster_df.columns = ["cat", "count"]
+            self.logger.info(
+                f"Assigned articlles to {len(cluster_df)} categories")
+            self.logger.info(
+                f"Cluster counts: {cluster_df.to_dict(orient='records')}")
+
+            # dedupe articles
+            self.logger.info("Deduping articles")
+            system_prompt, user_prompt, model = LangfuseClient().get_prompt(
+                "newsagent/dedupe_articles")
+
+            dedupe_agent = LLMagent(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                output_type=DupeRecordList,
+                model=model,
+                verbose=self.verbose,
+                logger=self.logger
+            )
+
+            async def run_dedupe(input_text):
+                response = await dedupe_agent.run_prompt(input_text=input_text)
+                return pd.DataFrame([(dr.id, dr.dupe_id) for dr in response.results_list], columns=["id", "dupe_id"])
+
+            tasks = []
+            for cat in cluster_df["cat"]:
+                tmpdf = headline_df.loc[headline_df["cat"] == cat].sort_values(
+                    "rating", ascending=False).copy()
+                if len(tmpdf) > 1:  # at least 2 to dedupe
+                    self.logger.info(
+                        f"Deduping cat: {cat} ({len(tmpdf)} items)")
+                    input_text = tmpdf.loc[tmpdf["cat"] == cat][[
+                        "id", "extended_summary"]].to_json()
+                    tasks.append(run_dedupe(input_text))
+
+            deduped_dfs = await asyncio.gather(*tasks)
+
+            # concatenate deduped_dfs into a single df
+            deduped_df = pd.concat(deduped_dfs)
+            headline_df = pd.merge(
+                headline_df, deduped_df[["id", "dupe_id"]], on="id", how="left")
+            # count number of rows in aidf where dupe_id is >0 and group by dupe_id
+            dupe_counts = headline_df.loc[headline_df['dupe_id'] > 0].groupby(
+                'dupe_id').size()
+            self.logger.info(dupe_counts)
+            # for each dupe_id in dupe_counts, add the count to the rating of that id
+            for dupe_id in dupe_counts.index:
+                headline_df.loc[headline_df['id'] == dupe_id,
+                                'rating'] += dupe_counts[dupe_id]
+            self.logger.info(f"Deduped articles: {len(headline_df)}")
+            dupe_df = headline_df.loc[headline_df['dupe_id'] > 0]
+            self.logger.info(
+                f"Duplicating {len(dupe_df)} articles: {dupe_df.to_dict(orient='records')}")
+            # drop rows where dupe_id is >= 0 (keep rows where dupe_id is -1, ie unique)
+            headline_df = headline_df.loc[headline_df['dupe_id'] < 0]
+
+            state.headline_data = headline_df.to_dict('records')
 
             # Complete the step
             state.complete_step(step_name)
 
-            if self.verbose:
-                print(
-                    f"✅ Completed Step 7: Created {len(state.newsletter_sections)} newsletter sections")
+            cat_article_counts = headline_df.groupby("cat").count()[
+                "input_text"]
+            state.workflow_status_message = f"Categories and article counts:\n{cat_article_counts.to_string()}"
 
-            status_msg = f"✅ Step 7 {step_name} completed successfully! Organized content into {len(state.newsletter_sections)} sections with {articles_assigned} articles assigned."
-            status_msg += f"\n📑 Sections: {', '.join(state.newsletter_sections.keys())}"
-            status_msg += "\n💾 Section plan stored in persistent state."
+            if self.verbose:
+                print(f"✅ Completed Step 7: {state.workflow_status_message}")
 
             # Serialize state after completing step
             state.serialize_to_db(step_name)
-            return status_msg
+            return state.workflow_status_message
 
         except Exception as e:
             state.error_step(step_name, str(e))
@@ -2408,8 +2567,8 @@ WORKFLOW OVERVIEW:
 2. Step 2: Filter URLs - Filter headlines to AI-related content only
 3. Step 3: Download Articles - Fetch full article content from URLs
 4. Step 4: Extract Summaries - Create bullet point summaries of each article
-5. Step 5: Cluster By Topic - Group articles by thematic topics
-6. Step 6: Rate Articles - Evaluate article quality and importance
+5. Step 5: Rate Articles - Evaluate article quality and importance
+6. Step 6: Cluster By Topic - Group articles by thematic topics
 7. Step 7: Select Sections - Organize articles into newsletter sections
 8. Step 8: Draft Sections - Write content for each section
 9. Step 9: Finalize Newsletter - Combine sections into final newsletter

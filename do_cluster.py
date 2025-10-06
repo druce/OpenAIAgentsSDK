@@ -8,10 +8,10 @@ from sklearn.decomposition import TruncatedSVD
 from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
 import hdbscan
 import optuna
+import umap
 
 from openai import OpenAI
 from pydantic import BaseModel, Field
-
 
 from llm import paginate_df_async, LangfuseClient, LLMagent
 
@@ -401,12 +401,22 @@ def optimize_hdbscan(embeddings_array, n_trials=100, timeout=None):
 
     # Apply best dimensionality reduction
     if best_params['n_components'] < embeddings_array.shape[1]:
-        svd = TruncatedSVD(
+        reducer = TruncatedSVD(
             n_components=best_params['n_components'], random_state=RANDOM_STATE)
-        best_embeddings = svd.fit_transform(embeddings_array)
+        best_embeddings = reducer.fit_transform(embeddings_array)
         # Re-normalize after SVD
         best_embeddings /= np.linalg.norm(embeddings_array,
                                           axis=1, keepdims=True)
+        # reducer = umap.UMAP(n_components=best_params['n_components'])
+        # # Fit the reducer to the data without transforming
+        # reducer.fit(embeddings_array)
+        # force np64 or hdbscan pukes
+        # best_embeddings = reducer.transform(
+        #     embeddings_array).astype(np.float64)
+        # # Re-normalize after UMAP
+        # best_embeddings /= np.linalg.norm(best_embeddings,
+        #                                   axis=1, keepdims=True)
+
         print(
             f"Reduced dimensions from {embeddings_array.shape[1]} to {best_params['n_components']}")
     else:
@@ -438,7 +448,7 @@ def optimize_hdbscan(embeddings_array, n_trials=100, timeout=None):
         'best_labels': best_labels,
         'best_embeddings': best_embeddings,
         'best_metrics': best_metrics,
-        'svd_transformer': svd if best_params['n_components'] < embeddings_array.shape[1] else None
+        'svd_transformer': reducer if best_params['n_components'] < embeddings_array.shape[1] else None
     }
 
 

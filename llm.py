@@ -29,7 +29,7 @@ from pydantic import BaseModel
 import pandas as pd
 
 import openai
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, BadRequestError
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -250,7 +250,7 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         retry=retry_if_exception_type((
             openai.APIConnectionError,
             openai.APITimeoutError,
-            openai.InternalServerError
+            openai.InternalServerError,
         )),
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=1, min=1, max=30),
@@ -314,23 +314,37 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             {"role": "user", "content": user_message}
         ]
 
-        # Make the chat completion call with structured output
-        response = await client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "structured_response",
-                    "schema": self.output_type.model_json_schema()
-                }
-            }
-        )
+        try:
+            # Make the chat completion call with structured output
+            response = await client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "structured_response",
+                        "schema": self.output_type.model_json_schema()
+                    }
+                },
+                safety_identifier="news_agent"
+            )
 
-        # Parse the JSON response into the Pydantic model
-        response_text = response.choices[0].message.content
-        response_json = json.loads(response_text)
-        result = self.output_type.model_validate(response_json)
+            # Check for refusal
+            message = response.choices[0].message
+            if hasattr(message, 'refusal') and message.refusal:
+                self.logger.error(f"LLM refused request. User message: {user_message}")
+                self.logger.error(f"Refusal reason: {message.refusal}")
+                raise ValueError(f"LLM refused the request: {message.refusal}")
+
+            # Parse the JSON response into the Pydantic model
+            response_text = message.content
+            response_json = json.loads(response_text)
+            result = self.output_type.model_validate(response_json)
+
+        except BadRequestError as e:
+            self.logger.error(f"BadRequestError: {e}")
+            self.logger.error(f"User message that caused error: {user_message}")
+            raise
 
         if self.verbose:
             self.logger.info(f"Result: {result}")
@@ -451,17 +465,31 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             {"role": "user", "content": user_message}
         ]
 
-        # Make the chat completion call with logprobs (NO structured output)
-        response = await client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            logprobs=True,
-            top_logprobs=top_logprobs
-        )
+        try:
+            # Make the chat completion call with logprobs (NO structured output)
+            response = await client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                logprobs=True,
+                top_logprobs=top_logprobs,
+                safety_identifier="news_agent"
+            )
 
-        # Extract response text and logprobs
-        response_text = response.choices[0].message.content
-        logprobs_data = response.choices[0].logprobs
+            # Check for refusal
+            message = response.choices[0].message
+            if hasattr(message, 'refusal') and message.refusal:
+                self.logger.error(f"LLM refused request. User message: {user_message}")
+                self.logger.error(f"Refusal reason: {message.refusal}")
+                raise ValueError(f"LLM refused the request: {message.refusal}")
+
+            # Extract response text and logprobs
+            response_text = message.content
+            logprobs_data = response.choices[0].logprobs
+
+        except BadRequestError as e:
+            self.logger.error(f"BadRequestError: {e}")
+            self.logger.error(f"User message that caused error: {user_message}")
+            raise
 
         if self.verbose:
             self.logger.info(f"Response text: {response_text}")

@@ -105,8 +105,8 @@ def manage_workflow_step_tool(workflow_status: WorkflowStatus) -> Dict[str, Any]
                             "step_02_filter_urls",
                             "step_03_download_articles",
                             "step_04_extract_summaries",
-                            "step_05_cluster_by_topic",
-                            "step_06_rate_articles",
+                            "step_05_rate_articles",
+                            "step_06_cluster_by_topic",
                             "step_07_create_sections",
                             "step_08_draft_sections",
                             "step_09_finalize_newsletter"

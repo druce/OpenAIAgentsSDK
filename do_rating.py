@@ -11,6 +11,7 @@ import logging
 # import random
 import asyncio
 from pydantic import BaseModel, Field
+from IPython.display import display
 
 from llm import LLMagent, LangfuseClient  # , paginate_df_async
 
@@ -132,6 +133,7 @@ async def bt_paginate_list_async(lst, chunk_size: int = 25):
 
 
 async def process_battle_round(bt_df,
+                               battle_order,
                                battle_agent,
                                max_concurrent=100,
                                logger=_logger) -> List[Tuple[int, int]]:
@@ -151,15 +153,31 @@ async def process_battle_round(bt_df,
 
     semaphore = asyncio.Semaphore(max_concurrent)
 
+    # Create a DataFrame from the list with the desired order and sort by that
+    logger.info("Creating battle order")
+    logger.info(f"All ids: {battle_order}")
+    order_df = pd.DataFrame(
+        {'id': battle_order, 'order': range(len(battle_order))})
+    # display(order_df)
+    # print(bt_df.columns)
+
+    merge_df = order_df.merge(bt_df, on='id')
+    # print(merge_df.columns)
+    merge_df = merge_df.sort_values('order')
+    # display(merge_df[["id", "order", "input_text"]])
+
     # Create battle tasks
-    records = bt_df[["id", "input_text"]].to_dict('records')
+    records = merge_df[["id", "input_text"]].to_dict('records')
     tasks = []
-    async for batch in bt_paginate_list_async(records, 6):
+    BT_BATCH = 6
+    async for batch in bt_paginate_list_async(records, BT_BATCH):
         tasks.append(process_single_batch(batch))
 
     # Execute all battles concurrently
+    logger.info(
+        f"Processing {len(tasks)} battles of size {BT_BATCH} with concurrency = {max_concurrent}")
     results = await asyncio.gather(*tasks, return_exceptions=True)
-
+    logger.info("Battles complete")
     retlist = []
     for lst in results:
         battles = []
@@ -190,24 +208,22 @@ async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFra
     logger.info("Running Bradley-Terry rating with Swiss pairing")
 
     # Setup
-
-    # ensure canonical sort because prompt will return ids in order
-    bt_df = headline_df.sort_values("rating", ascending=False).copy()
-    bt_df = bt_df.reset_index(drop=True)
-    bt_df['id'] = bt_df.index
-
     # Initialize Bradley-Terry ratings and rankings based on index order
-    previous_rankings = (bt_df["id"]+1).to_list()
-    bt_df['bradley_terry'] = 1-(bt_df["id"]+1)/1000
+    bt_df = headline_df.copy()
+    previous_rankings = np.array(list(range(1, len(bt_df)+1)))
+    # dummy ratings based on index order
+    bt_df['bradley_terry'] = 1 - previous_rankings / len(bt_df)
 
     # max theoretical number of rounds to have everyone play everyone
-    # if we have 100 stories, n-1 pairs to play everyone
-    # each round each gets BT_BATCH-1 battles to play
+    # if we have n=120 stories, n-1 pairs to play everyone
+    # we ask prompt to rank batches
+    # each round each plays BT_BATCH-1 battles
     # so we need (n-1) / (BT_BATCH-1) rounds
+    # but note that in 1 batch of 6, each plays 5, 2 are guaranteed new, 3 are close in rank
     n_stories = len(bt_df)
-    swiss_rounds = math.ceil((n_stories-1) / (BT_BATCH-1))
+    max_rounds = math.ceil((n_stories-1) / (BT_BATCH-1))
     logger.info(
-        f"Max {swiss_rounds} rounds to have everyone play everyone")
+        f"Max {max_rounds} rounds")
     # Battle history matrix (N x N)
     # matrix of battles, did 2 stories battle each other?
     battle_history = np.zeros((n_stories, n_stories), dtype=int)
@@ -225,12 +241,15 @@ async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFra
     all_battles = []
     all_results = []
 
+    convergence_threshold = n_stories // 100
+    min_rounds = max_rounds // 4
+
     # run rounds to ensure everyone battles at least once
-    for round_num in range(1, swiss_rounds+1):
+    for round_num in range(1, max_rounds+1):
         logger.info(
             "---------------------------------------------------")
         logger.info(
-            f"Running round {round_num} of {swiss_rounds}")
+            f"Running round {round_num} of {max_rounds}")
         logger.info(
             "---------------------------------------------------")
 
@@ -242,27 +261,61 @@ async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFra
             logger.info("No more valid pairings available")
             break
 
-        # make a list of all ids that are going to battle in order
+        # swiss pairing finds pairs that haven't battled before.
+        # then we output all pairs in order , randomize any remaining
+        # (odd one or ones that couldn't be paired with anyone they haven't battled).
+        # then we batch into groups of 6. so we are guaranteed 3 pairs per batch that haven't battled.
+
+        # a better algorithm would be to find the maximum number of never-battled pairs that are close in rank
+        # using maximum weight bipartite matching
+
+        # def optimal_swiss_pairing(headline_df, battle_history):
+        #     # Create graph of available pairings
+        #     G = nx.Graph()
+        #     for i in range(len(headline_df)):
+        #         for j in range(i+1, len(headline_df)):
+        #             # only link those that haven't battled
+        #             # alternatively could link all and divide by 2^number of battles
+        #             # but need to make it so e.g. 50-rank difference is same as 1 extra battle
+        #             if battle_history[i, j] == 0:  # Haven't battled
+        #                 # Weight by rating similarity for better matches
+        #                 weight = 1.0 / (abs(headline_df.iloc[i]['bradley_terry'] - headline_df.iloc[j]['bradley_terry'])) + 0.1
+        #                 G.add_edge(i, j, weight=weight)
+
+        #     # Find maximum weight matching
+        #     matching = nx.max_weight_matching(G)
+        #     return list(matching)
+
         all_ids = []
         for pair in pairs:
             all_ids.extend(list(pair))
         all_ids_set = set(all_ids)
 
-        duped_ids = []  # have already battled, but add anyway, to ensure everyone battles at every round
-        for row in bt_df.itertuples():
-            if row.id not in all_ids_set:
-                duped_ids.append(row.index)
+        # may have already battled (or odd one out), but add anyway, to ensure everyone battles at every round
+        duped_ids = [row.id for row in bt_df.itertuples()
+                     if row.id not in all_ids_set]
         np.random.shuffle(duped_ids)
         all_ids.extend(duped_ids)
 
+        logger.info(
+            f"len(all_ids): {len(set(all_ids))} ; len(bt_df): {len(bt_df)}")
+
+        # dupe_count = bt_df["id"].duplicated().sum()
+        # logger.warning(f"Found {dupe_count} duplicate articles")
+
         # Process battles concurrently
         battle_results = await process_battle_round(bt_df,
+                                                    all_ids,
                                                     battle_agent,
                                                     max_concurrent=1000,
                                                     logger=logger)
 
+        # dupe_count = bt_df["id"].duplicated().sum()
+        # logger.warning(f"Found {dupe_count} duplicate articles")
+
         # Update battle history and results
         all_battles.extend(battle_results)
+        logger.info(f"total battles: {len(all_battles)}")
         for winner_id, loser_id in battle_results:
             battle_history[winner_id, loser_id] += 1
             battle_history[loser_id, winner_id] += 1
@@ -270,19 +323,30 @@ async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFra
         # Use choix to compute Bradley-Terry ratings based on a series of pairwise comparisons
         # Similar to ELO but more mathematically optimal based on full hostory
         # Unlike ELO, can't update online after 1 match
+        # IMPORTANT: uses sort order , requres index==id
+        logger.info("Recomputing Bradley-Terry ratings")
         bt_df['bradley_terry'] = choix.opt_pairwise(len(bt_df), all_battles)
+        logger.info("Recomputed Bradley-Terry ratings")
 
         bt_df["bt_z"] = (bt_df["bradley_terry"] - bt_df["bradley_terry"].mean()) / \
             bt_df["bradley_terry"].std(ddof=0)
+        logger.info("Computed Bradley-Terry z-scores")
 
         # Check convergence
-        new_rankings = bt_df['bradley_terry'].rank(
-            method='min', ascending=False).astype(int)
+        # Show top 10 ids after sorting by Bradley-Terry rating
+        sorted_df = bt_df.copy().sort_values(
+            'bradley_terry', ascending=False)
+        top_10_ids = sorted_df['id'].tolist()[:10]
+        logger.info(
+            f"Top 10 ids: {top_10_ids}")
+
+        new_rankings = sorted_df["id"].values
         ranking_changes = (previous_rankings != new_rankings).sum()
         ranking_change_sum = np.abs(previous_rankings - new_rankings).sum()
         avg_change = ranking_change_sum / len(bt_df)
+        previous_rankings = new_rankings
 
-        logger.info(f"After round {round_num}/{swiss_rounds}: ")
+        logger.info(f"After round {round_num}/{max_rounds}: ")
         logger.info(f"Number of ranking changes: {ranking_changes}")
         logger.info(
             f"Sum of absolute ranking changes: {ranking_change_sum:.1f} (avg rank chg {avg_change:.2f})")
@@ -290,19 +354,16 @@ async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFra
         all_results.append(avg_change)
 
         # Convergence detection
-        if len(all_results) > 4:
+        if len(all_results) > min_rounds:  # do at least 1/4 of max rounds
             last_two = all_results[-1] + all_results[-2]
             prev_two = all_results[-3] + all_results[-4]
-            convergence_threshold = n_stories / 100
             if (last_two) < convergence_threshold * 2:
-                logger.info("Converged - stopping early")
+                logger.info("Convergence threshold achieved - stopping")
                 break
             else:
                 if last_two > prev_two:
-                    logger.info("Increase in avg rank change, converging")
+                    logger.info("Increase in avg rank change, stopping")
                     break
-
-        previous_rankings = new_rankings
 
     return bt_df
 
@@ -348,6 +409,10 @@ async def fn_rate_articles(headline_df: pd.DataFrame, logger: Optional[logging.L
     # add points for recency
     yesterday = (datetime.now(timezone.utc)
                  - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # fix bad strings that don't start with 20
+    rating_df['last_updated'] = rating_df['last_updated'].apply(
+        lambda s: s if isinstance(s, str) and s[:2] == '20' else None)
     rating_df['last_updated'] = rating_df['last_updated'].fillna(yesterday)
     rating_df["age"] = (datetime.now(timezone.utc) -
                         pd.to_datetime(rating_df['last_updated']))

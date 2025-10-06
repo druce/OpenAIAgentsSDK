@@ -31,7 +31,7 @@ from dateutil import parser as date_parser
 
 import requests
 from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright, Browser, BrowserContext, Page
+from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Error as PlaywrightError
 from playwright_stealth import Stealth
 import tiktoken
 
@@ -111,6 +111,41 @@ class RateLimiter:
                 return True, 0.0
             else:
                 return False, self.delay - time_since_last
+
+
+def _is_success_status(status: Optional[int]) -> bool:
+    """Check if HTTP status indicates successful response."""
+    return 200 <= status < 400 if status else False
+
+
+def _get_error_description(status: Optional[int]) -> str:
+    """Get descriptive error message for HTTP status codes."""
+    if status is None:
+        return "no response received"
+    elif status == 400:
+        return f"bad request error {status}"
+    elif status == 401:
+        return f"unauthorized error {status}"
+    elif status == 403:
+        return f"forbidden error {status}"
+    elif status == 404:
+        return f"not found error {status}"
+    elif status == 429:
+        return f"rate limited error {status}"
+    elif 400 <= status < 500:
+        return f"client error {status}"
+    elif status == 500:
+        return f"internal server error {status}"
+    elif status == 502:
+        return f"bad gateway error {status}"
+    elif status == 503:
+        return f"service unavailable error {status}"
+    elif status == 504:
+        return f"gateway timeout error {status}"
+    elif 500 <= status < 600:
+        return f"server error {status}"
+    else:
+        return f"unknown error {status}"
 
 
 def get_og_tags(source: str, logger: Optional[logging.Logger] = None) -> Dict[str, str]:
@@ -509,7 +544,6 @@ async def scrape_urls_concurrent(
 
     Returns:
         List of (index, status, url, title, file_path, last_updated) results
-        where status is 'success', 'ratelimit', or error description
     """
     logger = logger or _logger
     rate_limiter = RateLimiter(delay_seconds=rate_limit_seconds)
@@ -532,12 +566,12 @@ async def scrape_urls_concurrent(
         html_path = os.path.join(PAGES_DIR, f'{title_sanitized}.html')
         if os.path.exists(html_path):
             logger.info(f"File already exists: {html_path}")
-            return (idx, 'success', url, title, html_path, None)
+            return (idx, 'exists', url, title, html_path, None)
 
         # Skip ignored domains
         if domain in IGNORE_LIST:
             logger.info(f"Skipping ignored domain: {domain}")
-            return (idx, 'success', url, title, "", None)
+            return (idx, 'skipped', url, title, "", None)
 
         # Atomically check and acquire domain slot - if blocked, return immediately
         can_proceed, wait_time = await rate_limiter.try_acquire_domain_slot(domain)
@@ -548,8 +582,8 @@ async def scrape_urls_concurrent(
 
         # Proceed with scraping (domain slot already acquired atomically)
         try:
-            html_path, last_updated, final_url = await scrape_url(url, title, browser, logger=logger)
-            return (idx, 'success', final_url or url, title, html_path or "", last_updated)
+            html_path, last_updated, final_url, status = await scrape_url(url, title, browser, logger=logger)
+            return (idx, status, final_url or url, title, html_path or "", last_updated)
 
         except asyncio.TimeoutError as exc:
             error_msg = f"Timeout: {exc}"
@@ -639,10 +673,12 @@ async def scrape_urls_concurrent(
     all_results = [completed_results[idx]
                    for idx in sorted(completed_results.keys())]
 
-    success_count = sum(1 for r in all_results if r[1] == 'success')
-    error_count = len(all_results) - success_count
+    success_count = sum(1 for r in all_results if isinstance(
+        r[4], str) and os.path.exists(r[4]) and os.path.getsize(r[4]) > 0)
+    skipped_count = sum(1 for r in all_results if r[1] == 'skipped')
+    error_count = len(all_results) - success_count - skipped_count
     logger.info(
-        f"Completed scraping {len(all_results)} URLs: {success_count} successful, {error_count} failed")
+        f"Completed scraping {len(all_results)} URLs: {success_count} successful, {skipped_count} skipped, {error_count} failed")
 
     return all_results
 
@@ -663,7 +699,7 @@ async def scrape_url(url: str,
                      scroll_div: str = "",
                      initial_sleep: float = SLEEP_TIME,
                      destination: str = PAGES_DIR,
-                     logger: Optional[logging.Logger] = None) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+                     logger: Optional[logging.Logger] = None) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[int]]:
     """
     scrapes a URL using a Playwright browser context.
 
@@ -678,10 +714,11 @@ async def scrape_url(url: str,
         logger (logging.Logger): Optional logger for this operation.
 
     Returns:
-        tuple: (html_path, last_updated_time, final_url) where:
+        tuple: (html_path, last_updated_time, final_url, status) where:
             html_path (str): The path to the downloaded file.
             last_updated_time (str or None): The last update time of the page.
             final_url (str): The final URL after any redirects.
+            status (int or None): The HTTP status code from the response.
 
     # should add retry functionality, re-enable screenshots
     """
@@ -698,13 +735,22 @@ async def scrape_url(url: str,
         # check if file already exists, don't re-download
         if os.path.exists(html_path):
             logger.info(f"File already exists: {html_path}")
-            return html_path, None, url
+            return html_path, None, url, None
 
         # if file does not exist, download
         logger.info(f"Downloading {url}")
         page = await browser_context.new_page()
         response = await page.goto(url, timeout=SHORT_REQUEST_TIMEOUT*1000, wait_until='domcontentloaded')
-        logger.info(f"Response: {response.status}")
+        status = response.status if response else None
+        logger.info(f"Response: {status}")
+
+        # Check for HTTP error status codes and return early
+        if not _is_success_status(status):
+            error_msg = _get_error_description(status)
+            logger.error(f"HTTP error scraping {url}: {error_msg}")
+            await page.close()
+            return None, None, None, status
+
         logger.debug(f"Initial sleep: {initial_sleep}")
         sleep_time = initial_sleep + random.uniform(1, 3)
         await asyncio.sleep(sleep_time)
@@ -836,16 +882,19 @@ async def scrape_url(url: str,
 
         await page.close()
 
-        return html_path, last_updated, final_url
+        return html_path, last_updated, final_url, status
     except asyncio.TimeoutError as exc:
         logger.error(f"Timeout error scraping {url}: {exc}")
-        return None, None, None
+        return None, None, None, None
+    except PlaywrightError as exc:
+        logger.error(f"Playwright error scraping {url}: {exc}")
+        return None, None, None, None
     except (ConnectionError, OSError) as exc:
         logger.error(f"Network error scraping {url}: {exc}")
-        return None, None, None
+        return None, None, None, None
     except Exception as exc:
         logger.error(f"Unexpected error scraping {url}: {exc}")
-        return None, None, None
+        return None, None, None, None
     finally:
         # Ensure page is always closed
         if 'page' in locals() and page:
@@ -998,7 +1047,7 @@ async def scrape_source(source_dict: Dict[str, Any], browser_context: Optional[B
     logger.info(f"Starting scrape_source {url}, {filename}")
 
     # Open the page and scrape the HTML
-    file_path, _, _ = await scrape_url(url, filename, browser_context,
-                                       click_xpath, scrolls, scroll_div, initial_sleep, destination=DOWNLOAD_DIR, logger=logger)
+    file_path, _, _, _ = await scrape_url(url, filename, browser_context,
+                                          click_xpath, scrolls, scroll_div, initial_sleep, destination=DOWNLOAD_DIR, logger=logger)
     source_dict['latest'] = file_path
     return (sourcename, file_path)

@@ -32,7 +32,7 @@ import agents
 from agents.exceptions import InputGuardrailTripwireTriggered
 from agents import (Agent, Runner, Tool, ModelSettings, FunctionTool, InputGuardrail, GuardrailFunctionOutput,
                     SQLiteSession, set_default_openai_api, set_default_openai_client
-                   )
+                    )
 
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from playwright.async_api import async_playwright
@@ -42,6 +42,7 @@ from log_handler import SQLiteLogHandler, setup_sqlite_logging, sanitize_error_f
 # Removed utilities imports - functionality merged into newsletter_state.py
 from config import DOWNLOAD_DIR
 from scrape import get_browser, scrape_source, parse_source_file
+
 
 class Fetcher:
     """
@@ -66,33 +67,45 @@ class Fetcher:
         if sources is None:
             # Load sources from YAML file
             try:
-                self._log(f"Loading sources from {sources_file}", "fetcher_init", "INFO")
+                self._log(
+                    f"Loading sources from {sources_file}", "fetcher_init", "INFO")
                 with open(sources_file, 'r', encoding='utf-8') as file:
                     self.sources = yaml.safe_load(file) or {}
 
                 # Log source breakdown
-                rss_sources = [k for k, v in self.sources.items() if v.get('type') == 'rss']
-                html_sources = [k for k, v in self.sources.items() if v.get('type') == 'html']
-                api_sources = [k for k, v in self.sources.items() if v.get('type') == 'rest']
+                rss_sources = [k for k, v in self.sources.items()
+                               if v.get('type') == 'rss']
+                html_sources = [
+                    k for k, v in self.sources.items() if v.get('type') == 'html']
+                api_sources = [k for k, v in self.sources.items()
+                               if v.get('type') == 'rest']
 
-                self._log(f"Loaded {len(self.sources)} sources: {len(rss_sources)} RSS, {len(html_sources)} HTML, {len(api_sources)} API", "fetcher_init", "INFO")
+                self._log(
+                    f"Loaded {len(self.sources)} sources: {len(rss_sources)} RSS, {len(html_sources)} HTML, {len(api_sources)} API", "fetcher_init", "INFO")
 
                 # Log individual sources for debugging
                 for source_key, source_config in self.sources.items():
-                    source_type = "RSS" if source_config.get('rss') else source_config.get('type', 'unknown')
-                    self._log(f"Source '{source_key}': type={source_type}, url={source_config.get('url') or source_config.get('rss', 'N/A')}", "fetcher_sources", "DEBUG")
+                    source_type = "RSS" if source_config.get(
+                        'rss') else source_config.get('type', 'unknown')
+                    self._log(
+                        f"Source '{source_key}': type={source_type}, url={source_config.get('url') or source_config.get('rss', 'N/A')}", "fetcher_sources", "DEBUG")
             except FileNotFoundError:
-                self._log(f"Sources file not found: {sources_file}", "fetcher_init", "ERROR")
-                raise FileNotFoundError(f'Sources file not found: {sources_file}')
+                self._log(
+                    f"Sources file not found: {sources_file}", "fetcher_init", "ERROR")
+                raise FileNotFoundError(
+                    f'Sources file not found: {sources_file}')
             except yaml.YAMLError as e:
-                self._log(f"Error parsing YAML: {str(e)}", "fetcher_init", "ERROR")
+                self._log(
+                    f"Error parsing YAML: {str(e)}", "fetcher_init", "ERROR")
                 raise ValueError(f'Error parsing YAML: {str(e)}')
         else:
             self.sources = sources
-            self._log(f"Initialized with {len(self.sources)} provided sources", "fetcher_init", "INFO")
+            self._log(
+                f"Initialized with {len(self.sources)} provided sources", "fetcher_init", "INFO")
 
         self.max_concurrent = max_concurrent
-        self._log(f"Fetcher initialized with max_concurrent={max_concurrent}", "fetcher_init", "INFO")
+        self._log(
+            f"Fetcher initialized with max_concurrent={max_concurrent}", "fetcher_init", "INFO")
         self.session: Optional[aiohttp.ClientSession] = None
         # Browser context now managed by scrape.py module-level caching
         self.semaphore = asyncio.Semaphore(max_concurrent)
@@ -126,7 +139,8 @@ class Fetcher:
             # Only add handler if none exist (to avoid duplicates)
             if not self.logger.handlers:
                 handler = logging.StreamHandler()
-                formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+                formatter = logging.Formatter(
+                    '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
                 handler.setFormatter(formatter)
                 self.logger.addHandler(handler)
                 self.logger.propagate = False
@@ -190,7 +204,8 @@ class Fetcher:
             }
 
         try:
-            self._log(f"Fetching RSS from {source}: {rss_url}", "fetch_rss", "INFO")
+            self._log(
+                f"Fetching RSS from {source}: {rss_url}", "fetch_rss", "INFO")
             timeout = aiohttp.ClientTimeout(total=10)
             async with self.session.get(rss_url, timeout=timeout) as response:
                 if response.status == 200:
@@ -202,7 +217,8 @@ class Fetcher:
                     for entry in feed.entries[:50]:  # Limit to 50 entries
                         # Format title with title_detail if available
                         title = entry.get('title', '')
-                        title_detail = entry.get('title_detail', {}).get('value', '') if entry.get('title_detail') else ''
+                        title_detail = entry.get('title_detail', {}).get(
+                            'value', '') if entry.get('title_detail') else ''
                         formatted_title = f"{title}: {title_detail}" if title_detail and title_detail != title else title
 
                         article = {
@@ -214,7 +230,8 @@ class Fetcher:
                         }
                         articles.append(article)
 
-                    self._log(f"RSS fetch successful for {source}: {len(articles)} articles", "fetch_rss", "INFO")
+                    self._log(
+                        f"RSS fetch successful for {source}: {len(articles)} articles", "fetch_rss", "INFO")
                     return {
                         'source': source,
                         'results': articles,
@@ -235,7 +252,8 @@ class Fetcher:
                     }
 
         except Exception as e:
-            self._log(f"RSS fetch failed for {source}: {str(e)}", "fetch_rss", "ERROR")
+            self._log(
+                f"RSS fetch failed for {source}: {str(e)}", "fetch_rss", "ERROR")
             return {
                 'source': source,
                 'results': [],
@@ -274,7 +292,8 @@ class Fetcher:
 
         try:
             if do_download:
-                self._log(f"Fetching HTML from {source_key}: {url}", "fetch_html", "INFO")
+                self._log(
+                    f"Fetching HTML from {source_key}: {url}", "fetch_html", "INFO")
                 # Get browser context
                 browser_context = await self._get_browser_context()
                 # Check if browser context is valid
@@ -286,20 +305,23 @@ class Fetcher:
                         'metadata': {'error': 'Browser context is not available or has been closed'}
                     }
 
-                self._log(f"Source dict for {source_key}: {source_dict}", "fetch_html", "INFO")
+                self._log(
+                    f"Source dict for {source_key}: {source_dict}", "fetch_html", "INFO")
 
                 # Fetch the landing page HTML
                 source_dict["sourcename"] = source_key
                 _, file_path = await scrape_source(source_dict, browser_context, logger=self.logger)
 
             else:
-                self._log(f"Using existing HTML file from {source_key}: {url}", "fetch_html", "INFO")
+                self._log(
+                    f"Using existing HTML file from {source_key}: {url}", "fetch_html", "INFO")
                 filename = self.sources.get(source_key, {}).get('filename')
                 source_dict["sourcename"] = source_key
                 file_path = f'{DOWNLOAD_DIR}/{filename}.html'
 
             if not file_path:
-                self._log(f"Failed to download HTML page from {source_key}: {url}", "fetch_html", "ERROR")
+                self._log(
+                    f"Failed to download HTML page from {source_key}: {url}", "fetch_html", "ERROR")
                 return {
                     'source': source_key,
                     'results': [],
@@ -324,7 +346,8 @@ class Fetcher:
                 }
                 articles.append(article)
 
-            self._log(f"HTML fetch successful for {source_key}: {len(articles)} articles", "fetch_html", "INFO")
+            self._log(
+                f"HTML fetch successful for {source_key}: {len(articles)} articles", "fetch_html", "INFO")
             return {
                 'source': source_key,
                 'results': articles,
@@ -337,7 +360,8 @@ class Fetcher:
             }
 
         except Exception as e:
-            self._log(f"HTML fetch failed for {source_key}: {str(e)}", "fetch_html", "ERROR")
+            self._log(
+                f"HTML fetch failed for {source_key}: {str(e)}", "fetch_html", "ERROR")
             return {
                 'source': source_key,
                 'results': [],
@@ -409,7 +433,9 @@ class Fetcher:
         Returns:
             List of results from all sources
         """
-        self._log(f"Starting fetch_all for {len(self.sources)} sources", "fetch_all", "INFO")
+        self._log(
+            f"Starting fetch_all for {len(self.sources)} sources", "fetch_all", "INFO")
+
         async def fetch_with_semaphore(source_key, source_record):
             async with self.semaphore:
                 if source_record.get('type') == 'rss':
@@ -451,11 +477,15 @@ class Fetcher:
                 })
 
         # Log summary
-        success_count = sum(1 for r in valid_results if r.get('status') == 'success')
-        error_count = sum(1 for r in valid_results if r.get('status') == 'error')
-        total_articles = sum(len(r.get('results', [])) for r in valid_results if r.get('status') == 'success')
+        success_count = sum(
+            1 for r in valid_results if r.get('status') == 'success')
+        error_count = sum(
+            1 for r in valid_results if r.get('status') == 'error')
+        total_articles = sum(len(r.get('results', []))
+                             for r in valid_results if r.get('status') == 'success')
 
-        self._log(f"fetch_all completed: {success_count} successful, {error_count} failed, {total_articles} total articles", "fetch_all", "INFO")
+        self._log(
+            f"fetch_all completed: {success_count} successful, {error_count} failed, {total_articles} total articles", "fetch_all", "INFO")
 
         return valid_results
 
@@ -479,7 +509,8 @@ class Fetcher:
             date_24h_ago = datetime.now() - timedelta(hours=24)
             formatted_date = date_24h_ago.strftime("%Y-%m-%dT%H:%M:%S")
 
-            self._log(f"Fetching top {page_size} stories matching {q} since {formatted_date} from NewsAPI", "newsapi", "INFO")
+            self._log(
+                f"Fetching top {page_size} stories matching {q} since {formatted_date} from NewsAPI", "newsapi", "INFO")
 
             baseurl = 'https://newsapi.org/v2/everything'
             params = {
@@ -525,7 +556,8 @@ class Fetcher:
             }
 
         except Exception as e:
-            self._log(f"Failed to fetch from NewsAPI: {str(e)}", "newsapi", "ERROR")
+            self._log(
+                f"Failed to fetch from NewsAPI: {str(e)}", "newsapi", "ERROR")
             return {
                 'source': 'NewsAPI',
                 'results': [],
@@ -567,4 +599,3 @@ async def gather_urls(sources_file: str = "sources.yaml", max_concurrent: int = 
     # Use Fetcher class for coordinated fetching
     async with Fetcher(sources, max_concurrent) as fetcher:
         return await fetcher.fetch_all()
-
