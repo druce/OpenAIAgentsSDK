@@ -38,6 +38,7 @@ from tenacity import (
     before_sleep_log
 )
 
+from config import DEFAULT_CONCURRENCY
 from agents import Agent, Runner
 
 import langfuse
@@ -332,7 +333,8 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             # Check for refusal
             message = response.choices[0].message
             if hasattr(message, 'refusal') and message.refusal:
-                self.logger.error(f"LLM refused request. User message: {user_message}")
+                self.logger.error(
+                    f"LLM refused request. User message: {user_message}")
                 self.logger.error(f"Refusal reason: {message.refusal}")
                 raise ValueError(f"LLM refused the request: {message.refusal}")
 
@@ -343,7 +345,8 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
 
         except BadRequestError as e:
             self.logger.error(f"BadRequestError: {e}")
-            self.logger.error(f"User message that caused error: {user_message}")
+            self.logger.error(
+                f"User message that caused error: {user_message}")
             raise
 
         if self.verbose:
@@ -478,7 +481,8 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             # Check for refusal
             message = response.choices[0].message
             if hasattr(message, 'refusal') and message.refusal:
-                self.logger.error(f"LLM refused request. User message: {user_message}")
+                self.logger.error(
+                    f"LLM refused request. User message: {user_message}")
                 self.logger.error(f"Refusal reason: {message.refusal}")
                 raise ValueError(f"LLM refused the request: {message.refusal}")
 
@@ -488,7 +492,8 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
 
         except BadRequestError as e:
             self.logger.error(f"BadRequestError: {e}")
-            self.logger.error(f"User message that caused error: {user_message}")
+            self.logger.error(
+                f"User message that caused error: {user_message}")
             raise
 
         if self.verbose:
@@ -555,7 +560,7 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
     async def prompt_batch(self,
                            variables_list: List[Dict[str, Any]],
                            batch_size: int = 25,
-                           max_concurrency: int = 16,
+                           max_concurrency: int = DEFAULT_CONCURRENCY,
                            retries: int = 3,
                            item_list_field: str = 'results_list',
                            item_id_field: str = '',
@@ -841,6 +846,7 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
     async def _process_indexed_chunk(self,
                                      chunk_idx: int,
                                      chunk_df: pd.DataFrame,
+                                     sem: asyncio.Semaphore,
                                      input_vars: Optional[Dict[str,
                                                                Any]] = None,
                                      item_list_field: str = 'results_list',
@@ -853,6 +859,7 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         Args:
             chunk_idx: Index of this chunk in the original chunk list
             chunk_df: DataFrame chunk to process
+            sem: Semaphore for concurrency control
             input_vars: Optional additional variables for prompt substitution
             item_list_field: Name of the field in response containing results list
             item_id_field: Name of the ID field to validate matches
@@ -862,15 +869,16 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         Returns:
             Tuple of (chunk_index, result) for order preservation
         """
-        result = await self.filter_dataframe_chunk(
-            chunk_df,
-            input_vars=input_vars,
-            item_list_field=item_list_field,
-            item_id_field=item_id_field,
-            retries=retries,
-            chat=chat
-        )
-        return chunk_idx, result
+        async with sem:
+            result = await self.filter_dataframe_chunk(
+                chunk_df,
+                input_vars=input_vars,
+                item_list_field=item_list_field,
+                item_id_field=item_id_field,
+                retries=retries,
+                chat=chat
+            )
+            return chunk_idx, result
 
     async def filter_dataframe_batch(self,
                                      input_df: pd.DataFrame,
@@ -884,7 +892,9 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                                      value_field: str = 'output',
                                      chat: bool = True,
                                      return_probabilities: bool = False,
-                                     target_tokens: List[str] = None
+                                     target_tokens: List[str] = None,
+                                     max_concurrency: int = DEFAULT_CONCURRENCY,
+                                     **kwargs
                                      ) -> Any:
         """
         Process a DataFrame in chunks asynchronously using concurrent calls to filter_dataframe_chunk.
@@ -905,6 +915,7 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             chat: If True (default), use prompt_dict_chat; if False, use prompt_dict
             return_probabilities: If True, return token probabilities instead of structured output
             target_tokens: List of tokens to extract probabilities for (default: ["1"])
+            max_concurrency: Maximum number of concurrent chunk processing tasks (default: DEFAULT_CONCURRENCY)
 
         Returns:
             If return_probabilities=True: pandas Series with probabilities for target tokens
@@ -913,6 +924,9 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         """
         if input_df.empty:
             return []
+
+        # Use semaphore for concurrency control
+        sem = asyncio.Semaphore(max_concurrency)
 
         # Handle probability extraction mode
         if return_probabilities:
@@ -925,20 +939,19 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                 )
 
             # For probabilities, we process each row individually using run_prompt_with_probs
-            probabilities = []
-            # Process all rows asynchronously
-            tasks = []
-            for _, row in input_df.iterrows():
-                # Convert row to dict and merge with input_vars
-                row_vars = row.to_dict()
-                if input_vars:
-                    row_vars.update(input_vars)
 
-                # Get probabilities for this row
-                tasks.append(self.run_prompt_with_probs(
-                    target_tokens=target_tokens, **row_vars))
+            async def _process_row_with_sem(row):
+                async with sem:
+                    # Convert row to dict and merge with input_vars
+                    row_vars = row.to_dict()
+                    if input_vars:
+                        row_vars.update(input_vars)
+                    # Get probabilities for this row
+                    return await self.run_prompt_with_probs(target_tokens=target_tokens, **row_vars)
 
-            # Wait for all tasks to complete
+            # Process all rows asynchronously with concurrency control
+            tasks = [_process_row_with_sem(row)
+                     for _, row in input_df.iterrows()]
             prob_dicts = await asyncio.gather(*tasks)
 
             # Extract probability for first target token from each dict
@@ -956,15 +969,19 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         if not chunks:
             return []
 
-        # Process all chunks concurrently with index tracking
+        self.logger.info(
+            f"Processing {len(chunks)} chunks with concurrency {max_concurrency}")
+
+        # Process all chunks concurrently with index tracking and semaphore control
         tasks = [
             self._process_indexed_chunk(
-                i, chunk,
+                i, chunk, sem,
                 input_vars=input_vars,
                 item_list_field=item_list_field,
                 item_id_field=item_id_field,
                 retries=retries,
-                chat=chat
+                chat=chat,
+                **kwargs
             )
             for i, chunk in enumerate(chunks)
         ]

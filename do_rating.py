@@ -12,7 +12,6 @@ import logging
 import asyncio
 from pydantic import BaseModel, Field
 from IPython.display import display
-
 from llm import LLMagent, LangfuseClient  # , paginate_df_async
 
 BT_BATCH = 6
@@ -161,10 +160,9 @@ async def process_battle_round(bt_df,
     # display(order_df)
     # print(bt_df.columns)
 
+    # sort on battle order
     merge_df = order_df.merge(bt_df, on='id')
-    # print(merge_df.columns)
     merge_df = merge_df.sort_values('order')
-    # display(merge_df[["id", "order", "input_text"]])
 
     # Create battle tasks
     records = merge_df[["id", "input_text"]].to_dict('records')
@@ -177,18 +175,16 @@ async def process_battle_round(bt_df,
     logger.info(
         f"Processing {len(tasks)} battles of size {BT_BATCH} with concurrency = {max_concurrent}")
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    logger.info("Battles complete")
+    flattened = [sublist.items for sublist in results]
+    logger.info(f"Flattened results: {flattened}")
     retlist = []
-    for lst in results:
-        battles = []
-        for item in lst.items:
-            battles.append(item.id)
+    for battles in flattened:
         n_results = len(battles)
         for i in range(n_results-1):
             for j in range(i+1, n_results):
-                winner = battles[i]
-                loser = battles[j]
-                # print(f"Battle: {winner} beat {loser}")
+                winner = battles[i].id
+                loser = battles[j].id
+                print(f"Battle: {winner} beat {loser}")
                 retlist.append((winner, loser))
 
     return retlist
@@ -242,14 +238,18 @@ async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFra
     all_results = []
 
     convergence_threshold = n_stories // 100
+    logger.info(
+        f"Convergence threshold: {convergence_threshold}")
     min_rounds = max_rounds // 4
+    logger.info(
+        f"Min rounds: {min_rounds}")
 
     # run rounds to ensure everyone battles at least once
     for round_num in range(1, max_rounds+1):
         logger.info(
             "---------------------------------------------------")
         logger.info(
-            f"Running round {round_num} of {max_rounds}")
+            f"Running round {round_num} of max {max_rounds}")
         logger.info(
             "---------------------------------------------------")
 
@@ -266,25 +266,21 @@ async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFra
         # (odd one or ones that couldn't be paired with anyone they haven't battled).
         # then we batch into groups of 6. so we are guaranteed 3 pairs per batch that haven't battled.
 
-        # a better algorithm would be to find the maximum number of never-battled pairs that are close in rank
-        # using maximum weight bipartite matching
+        # a better algorithm would be to use swiss batches instead of swiss pairs
+        # go down the list in rank order
+        # start with first unassigned
+        # find next unassigned that hasn't battled first
+        # then find next unassigned that hasn't battled first or second
+        # and so one until you get a six batch
+        # if you get to end of list, try to create 5-batch
+        # continue until all assigned
 
-        # def optimal_swiss_pairing(headline_df, battle_history):
-        #     # Create graph of available pairings
-        #     G = nx.Graph()
-        #     for i in range(len(headline_df)):
-        #         for j in range(i+1, len(headline_df)):
-        #             # only link those that haven't battled
-        #             # alternatively could link all and divide by 2^number of battles
-        #             # but need to make it so e.g. 50-rank difference is same as 1 extra battle
-        #             if battle_history[i, j] == 0:  # Haven't battled
-        #                 # Weight by rating similarity for better matches
-        #                 weight = 1.0 / (abs(headline_df.iloc[i]['bradley_terry'] - headline_df.iloc[j]['bradley_terry'])) + 0.1
-        #                 G.add_edge(i, j, weight=weight)
-
-        #     # Find maximum weight matching
-        #     matching = nx.max_weight_matching(G)
-        #     return list(matching)
+        # a better algorithm would be to find the maximum number of never-battled batches that are close in rank
+        # using maximum weight bipartite matching, something like
+        # only connect if they haven't battled
+        # weight edges by inverse of distance in list
+        # find maximum weight bipartite matching
+        # then batch into groups of 6
 
         all_ids = []
         for pair in pairs:
@@ -331,6 +327,8 @@ async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFra
         bt_df["bt_z"] = (bt_df["bradley_terry"] - bt_df["bradley_terry"].mean()) / \
             bt_df["bradley_terry"].std(ddof=0)
         logger.info("Computed Bradley-Terry z-scores")
+        display(bt_df[['id', 'title', 'bradley_terry', 'bt_z']
+                      ].sort_values('bradley_terry', ascending=False))
 
         # Check convergence
         # Show top 10 ids after sorting by Bradley-Terry rating
@@ -355,15 +353,16 @@ async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFra
 
         # Convergence detection
         if len(all_results) > min_rounds:  # do at least 1/4 of max rounds
-            last_two = all_results[-1] + all_results[-2]
-            prev_two = all_results[-3] + all_results[-4]
-            if (last_two) < convergence_threshold * 2:
+            last_two = (all_results[-1] + all_results[-2]) / 2
+            prev_two = (all_results[-3] + all_results[-4]) / 2
+            logger.info(f"last_two: {last_two}, prev_two: {prev_two}")
+            if (last_two) < convergence_threshold:
                 logger.info("Convergence threshold achieved - stopping")
                 break
-            else:
-                if last_two > prev_two:
-                    logger.info("Increase in avg rank change, stopping")
-                    break
+            elif last_two < n_stories / 5 and last_two > prev_two:
+                # stop if increasing but needs to be < 20% of stories
+                logger.info("Increase in avg rank change, stopping")
+                break
 
     return bt_df
 

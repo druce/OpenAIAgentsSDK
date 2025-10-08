@@ -35,24 +35,23 @@ from typing import Dict, Any, Optional, List
 from pydantic import BaseModel, Field
 # from email.utils import parsedate_to_datetime
 # from urllib.parse import urlparse
+from bs4 import BeautifulSoup
 
 from agents import (Agent, Runner, RunContextWrapper, FunctionTool,
                     SQLiteSession, set_default_openai_client)
 
 from openai import AsyncOpenAI
+
+from config import CANONICAL_TOPICS, DOWNLOAD_DIR, PAGES_DIR, TEXT_DIR, NEWSAGENTDB, LOGDB, DEFAULT_CONCURRENCY
 from newsletter_state import NewsletterAgentState
 from log_handler import SQLiteLogHandler
+from db import Url, Site
 from fetch import Fetcher
 from scrape import scrape_urls_concurrent, normalize_html
 from llm import LLMagent, LangfuseClient
-from config import CANONICAL_TOPICS, DOWNLOAD_DIR, PAGES_DIR, TEXT_DIR, NEWSAGENTDB, LOGDB
-from bs4 import BeautifulSoup
 from do_dedupe import process_dataframe_with_filtering
 from do_cluster import do_clustering
 from do_rating import fn_rate_articles, bradley_terry
-
-# import db
-from db import Url, Site
 
 # Pydantic models for structured output
 
@@ -156,6 +155,18 @@ class DupeRecordList(BaseModel):
     """List of DupeRecord for structured output filtering"""
     results_list: list[DupeRecord] = Field(
         description="List of dupe records")
+
+
+class DistilledStory(BaseModel):
+    """DistilledStory class for structured output distillation into a single sentence """
+    id: int = Field(description="The article id")
+    short_summary: str = Field(description="The distilled short summary")
+
+
+class DistilledStoryList(BaseModel):
+    """List of DistilledStory for batch processing"""
+    results_list: list[DistilledStory] = Field(
+        description="List of distilled stories")
 
 
 def setup_logging(session_id: str = "default", db_path: str = LOGDB) -> logging.Logger:
@@ -855,7 +866,7 @@ class DownloadArticlesTool:
             # Use real scraping with scrape_urls_concurrent
             scrape_results = await scrape_urls_concurrent(
                 scrape_inputs,
-                concurrency=16,
+                concurrency=DEFAULT_CONCURRENCY,
                 rate_limit_seconds=2.0,
                 logger=self.logger
             )
@@ -1363,6 +1374,7 @@ class ExtractSummariesTool:
                 item_id_field='id',              # This maps the responses back to the correct rows
                 chunk_size=1                     # send in batches of
             )
+
             # Clean up text_content column
             ai_articles_df.drop('text_content', axis=1, inplace=True)
 
@@ -1395,6 +1407,60 @@ class ExtractSummariesTool:
             # Update headline_df with description and tags
             headline_df['description'] = ai_articles_df['description']
             headline_df['tags'] = ai_articles_df['tags']
+
+            # Make short summary
+
+            def _get_input_text(row):
+                """
+                Format a news item for short summary
+
+                Args:
+                    row: DataFrame row
+
+                Returns:
+                    str: Formatted text for a news item
+                """
+
+                retval = f"{row.title}\n"
+
+                summary = ""
+                if isinstance(row.rss_summary, str) and len(row.rss_summary) > 0:
+                    summary += "\n" + row.rss_summary
+                elif isinstance(row.description, str) and len(row.description) > 0:
+                    summary += "\n" + row.description
+                if summary:
+                    soup = BeautifulSoup(summary, 'html.parser')
+                    summary = soup.get_text().strip()
+                    retval += f"\n{summary}\n"
+
+                if isinstance(row.summary, str) and len(row.summary) > 0:
+                    retval += "\n" + row.summary
+
+                return retval
+
+            ai_articles_df['input_text'] = ai_articles_df.apply(
+                _get_input_text, axis=1)
+
+            system_prompt, user_prompt, model = LangfuseClient(
+            ).get_prompt("newsagent/item_distiller")
+            distill_agent = LLMagent(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                output_type=DistilledStoryList,
+                model=model,
+                verbose=self.verbose,
+                logger=self.logger
+            )
+            ai_articles_df['short_summary'] = await distill_agent.filter_dataframe(
+                ai_articles_df[['id', 'input_text']],
+                # This tells it to extract the list from the batch response
+                item_list_field='results_list',
+                # This tells it to get the 'short_summary' field from each ArticleSummary
+                value_field='short_summary',
+                item_id_field='id',              # This maps the responses back to the correct rows
+                chunk_size=1                     # send in batches of
+            )
+            headline_df['short_summary'] = ai_articles_df['short_summary']
 
             # Store updated headline data in state
             state.headline_data = headline_df.to_dict('records')

@@ -40,7 +40,7 @@ import trafilatura
 # from log_handler import log  # Replaced with standard logging
 from config import (DOWNLOAD_DIR, IGNORE_LIST, PAGES_DIR, FIREFOX_PROFILE_PATH,  # SCREENSHOT_DIR,
                     MIN_TITLE_LEN, SLEEP_TIME, MAX_TOKENS, DOMAIN_RATE_LIMIT,
-                    SHORT_REQUEST_TIMEOUT)
+                    SHORT_REQUEST_TIMEOUT, DEFAULT_CONCURRENCY)
 
 # Module-level logger for default logging
 # when calling from high level function, pass logger=logger but this is here as a default
@@ -526,7 +526,7 @@ async def perform_human_like_actions(page: Page) -> Page:
 
 async def scrape_urls_concurrent(
     urls: List[Tuple[int, str, str]],  # index, url, title
-    concurrency: int = 16,
+    concurrency: int = DEFAULT_CONCURRENCY,
     rate_limit_seconds: float = DOMAIN_RATE_LIMIT,
     logger: Optional[logging.Logger] = None
 ) -> List[Tuple[int, str, str, str, str, Optional[str]]]:
