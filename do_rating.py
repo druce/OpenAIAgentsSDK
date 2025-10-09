@@ -12,7 +12,8 @@ import logging
 import asyncio
 from pydantic import BaseModel, Field
 from IPython.display import display
-from llm import LLMagent, LangfuseClient  # , paginate_df_async
+# , paginate_df_async
+from llm import LLMagent, get_langfuse_client, run_prompt_on_dataframe
 
 BT_BATCH = 6
 
@@ -101,6 +102,124 @@ def swiss_pairing(headline_df: pd.DataFrame, battle_history: np.ndarray) -> List
     return pairs
 
 
+async def swiss_batching(headline_df: pd.DataFrame, battle_history: np.ndarray,
+                         batch_size: int = BT_BATCH, min_batch_size: int = 3) -> List[List[int]]:
+    """
+    Create Swiss-style batches for Bradley-Terry battles.
+
+    Constructs batches where items are close in rank and haven't battled each other.
+    This is superior to pairwise matching because it guarantees no repeat battles
+    within each batch and maximizes information gain per LLM call.
+
+    Args:
+        headline_df: DataFrame with 'id' and 'bradley_terry' columns
+        battle_history: NxN matrix where [i,j]!=0 means i vs j already battled
+        batch_size: Target batch size (default: 6)
+        min_batch_size: Minimum viable batch size (default: 3)
+
+    Returns:
+        List of batches, where each batch is a list of story IDs
+
+    Algorithm:
+        1. Sort items by bradley_terry rating (descending)
+        2. For each unassigned item in rank order:
+           a. Start a new batch with this item
+           b. Try to add next unassigned items that haven't battled any batch members
+           c. Stop when batch reaches batch_size or no more valid candidates
+           d. If batch >= min_batch_size, keep it; else return items to pool
+        3. Return all valid batches
+    """
+    # Sort by current rating (highest first)
+    sorted_df = headline_df.sort_values(
+        'bradley_terry', ascending=False).reset_index(drop=True)
+
+    # Track which items are assigned to batches
+    assigned = set()
+    batches = []
+
+    for i, row in sorted_df.iterrows():
+        story_id = int(row['id'])
+
+        if story_id in assigned:
+            continue
+
+        # Start new batch with this item
+        current_batch = [story_id]
+        assigned.add(story_id)
+
+        # Try to fill the batch
+        for j in range(i + 1, len(sorted_df)):
+            candidate_id = int(sorted_df.iloc[j]['id'])
+
+            if candidate_id in assigned:
+                continue
+
+            # Check if candidate has battled any current batch member
+            has_battled_any = False
+            for batch_member_id in current_batch:
+                if battle_history[candidate_id, batch_member_id] != 0:
+                    has_battled_any = True
+                    break
+
+            # If no battles with any batch member, add to batch
+            if not has_battled_any:
+                current_batch.append(candidate_id)
+                assigned.add(candidate_id)
+
+                # Stop if we reached target batch size
+                if len(current_batch) >= batch_size:
+                    break
+
+        # Keep last batch if it meets minimum size
+        if len(current_batch) >= min_batch_size:
+            batches.append(current_batch)
+        else:
+            # Return items to unassigned pool
+            for item_id in current_batch:
+                assigned.remove(item_id)
+
+    # Mop-up phase: give unassigned stories random battles with ones they haven't battled
+    # this ensures everyone gets a battle
+    # otherwise the bottom stories have less chance to get out and there is hysteresis
+    # compute unassigned stories
+    # this also makes it return random batches when there are no unbattled pairs
+    unassigned = set(sorted_df['id']) - assigned
+
+    if unassigned:
+        extra_battle_ids = []
+
+        while unassigned:
+            # Pick an unassigned story
+            story_id = unassigned.pop()
+            extra_battle_ids.append(story_id)
+
+            # Find all unbattled opponents using numpy
+            unbattled = set(
+                np.where(battle_history[story_id] == 0)[0]) - {story_id}
+
+            if unbattled:
+                # Pick one random unbattled opponent
+                candidate_id = np.random.choice(list(unbattled))
+                extra_battle_ids.append(candidate_id)
+                unassigned.discard(candidate_id)
+            else:
+                # if no unbattled, just pick a random opponent
+                valid_ids = list(set(sorted_df['id']) - {story_id})
+                candidate_id = np.random.choice(valid_ids)
+                extra_battle_ids.append(candidate_id)
+                unassigned.discard(candidate_id)
+
+        # remove duplicates since we are adding without checking if already present
+        extra_battle_ids = list(set(extra_battle_ids))
+
+        # Use bt_paginate_list_async to create properly sized batches
+        if len(extra_battle_ids) >= 1:  # edge case where 1 straggler and no unbattled
+            async for batch in bt_paginate_list_async(extra_battle_ids, batch_size):
+                batches.append(batch)
+
+    return batches
+
+
 async def bt_paginate_list_async(lst, chunk_size: int = 25):
     """Async generator for list pagination with smart last chunk handling."""
     i = 0
@@ -132,19 +251,38 @@ async def bt_paginate_list_async(lst, chunk_size: int = 25):
 
 
 async def process_battle_round(bt_df,
-                               battle_order,
+                               batches: List[List[int]],
                                battle_agent,
                                max_concurrent=100,
                                logger=_logger) -> List[Tuple[int, int]]:
     """
-    Process all battle pairs concurrently and return winner/loser tuples.
+    Process pre-formed battle batches concurrently and return winner/loser tuples.
+
+    Args:
+        bt_df: DataFrame with article data including 'id' and 'input_text' columns
+        batches: List of batches, where each batch is a list of story IDs
+        battle_agent: LLM agent for ranking battles
+        max_concurrent: Maximum concurrent API calls
+        logger: Logger instance
+
+    Returns:
+        List of (winner_id, loser_id) tuples from all battles
     """
 
-    async def process_single_batch(batch):
+    async def process_single_batch(batch_ids):
         """Process a single batch with semaphore control."""
         async with semaphore:
             try:
-                result = await battle_agent.run_prompt(input_text=str(batch))
+                # Get records for this batch in the order specified by batch_ids
+                batch_records = []
+                for story_id in batch_ids:
+                    row = bt_df[bt_df['id'] == story_id].iloc[0]
+                    batch_records.append({
+                        'id': int(row['id']),
+                        'input_text': row['input_text']
+                    })
+
+                result = await battle_agent.run_prompt(input_text=str(batch_records))
                 return result
             except Exception as e:
                 logger.error(f"Error processing batch: {e}")
@@ -152,39 +290,29 @@ async def process_battle_round(bt_df,
 
     semaphore = asyncio.Semaphore(max_concurrent)
 
-    # Create a DataFrame from the list with the desired order and sort by that
-    logger.info("Creating battle order")
-    logger.info(f"All ids: {battle_order}")
-    order_df = pd.DataFrame(
-        {'id': battle_order, 'order': range(len(battle_order))})
-    # display(order_df)
-    # print(bt_df.columns)
+    logger.info(f"Processing {len(batches)} pre-formed batches")
 
-    # sort on battle order
-    merge_df = order_df.merge(bt_df, on='id')
-    merge_df = merge_df.sort_values('order')
-
-    # Create battle tasks
-    records = merge_df[["id", "input_text"]].to_dict('records')
-    tasks = []
-    BT_BATCH = 6
-    async for batch in bt_paginate_list_async(records, BT_BATCH):
-        tasks.append(process_single_batch(batch))
+    # Create tasks for each batch
+    tasks = [process_single_batch(batch) for batch in batches]
 
     # Execute all battles concurrently
     logger.info(
-        f"Processing {len(tasks)} battles of size {BT_BATCH} with concurrency = {max_concurrent}")
+        f"Processing {len(tasks)} battles with concurrency = {max_concurrent}")
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    flattened = [sublist.items for sublist in results]
-    logger.info(f"Flattened results: {flattened}")
+
+    # Extract battle results
     retlist = []
-    for battles in flattened:
+    for result in results:
+        if result is None or not hasattr(result, 'items'):
+            continue
+
+        battles = result.items
         n_results = len(battles)
         for i in range(n_results-1):
             for j in range(i+1, n_results):
                 winner = battles[i].id
                 loser = battles[j].id
-                print(f"Battle: {winner} beat {loser}")
+                # logger.debug(f"Battle: {winner} beat {loser}")
                 retlist.append((winner, loser))
 
     return retlist
@@ -215,7 +343,7 @@ async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFra
     # we ask prompt to rank batches
     # each round each plays BT_BATCH-1 battles
     # so we need (n-1) / (BT_BATCH-1) rounds
-    # but note that in 1 batch of 6, each plays 5, 2 are guaranteed new, 3 are close in rank
+    # but note that we don't get all stories into each round
     n_stories = len(bt_df)
     max_rounds = math.ceil((n_stories-1) / (BT_BATCH-1))
     logger.info(
@@ -225,7 +353,8 @@ async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFra
     battle_history = np.zeros((n_stories, n_stories), dtype=int)
 
     # Setup battle agent
-    system, user, model = LangfuseClient().get_prompt("newsagent/battle_prompt")
+    system, user, model = get_langfuse_client(
+        logger=logger).get_prompt("newsagent/battle_prompt")
     battle_agent = LLMagent(
         system_prompt=system,
         user_prompt=user,
@@ -237,10 +366,10 @@ async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFra
     all_battles = []
     all_results = []
 
-    convergence_threshold = n_stories // 100
+    convergence_threshold = n_stories / 100
     logger.info(
         f"Convergence threshold: {convergence_threshold}")
-    min_rounds = max_rounds // 4
+    min_rounds = max_rounds // 2
     logger.info(
         f"Min rounds: {min_rounds}")
 
@@ -253,55 +382,24 @@ async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFra
         logger.info(
             "---------------------------------------------------")
 
-        # Swiss pairing
-        pairs = swiss_pairing(bt_df, battle_history)
-        logger.info(f"Generated {len(pairs)} battle pairs")
+        # Swiss batching - creates batches directly instead of pairs
+        # Mop-up phase ensures all stories battle at least once per round
+        batches = await swiss_batching(
+            bt_df, battle_history, batch_size=BT_BATCH, min_batch_size=3)
+        logger.info(f"Generated {len(batches)} battle batches")
 
-        if not pairs:
-            logger.info("No more valid pairings available")
+        if not batches:
+            logger.info("No more valid batches available")
             break
 
-        # swiss pairing finds pairs that haven't battled before.
-        # then we output all pairs in order , randomize any remaining
-        # (odd one or ones that couldn't be paired with anyone they haven't battled).
-        # then we batch into groups of 6. so we are guaranteed 3 pairs per batch that haven't battled.
-
-        # a better algorithm would be to use swiss batches instead of swiss pairs
-        # go down the list in rank order
-        # start with first unassigned
-        # find next unassigned that hasn't battled first
-        # then find next unassigned that hasn't battled first or second
-        # and so one until you get a six batch
-        # if you get to end of list, try to create 5-batch
-        # continue until all assigned
-
-        # a better algorithm would be to find the maximum number of never-battled batches that are close in rank
-        # using maximum weight bipartite matching, something like
-        # only connect if they haven't battled
-        # weight edges by inverse of distance in list
-        # find maximum weight bipartite matching
-        # then batch into groups of 6
-
-        all_ids = []
-        for pair in pairs:
-            all_ids.extend(list(pair))
-        all_ids_set = set(all_ids)
-
-        # may have already battled (or odd one out), but add anyway, to ensure everyone battles at every round
-        duped_ids = [row.id for row in bt_df.itertuples()
-                     if row.id not in all_ids_set]
-        np.random.shuffle(duped_ids)
-        all_ids.extend(duped_ids)
-
+        # Log batch statistics
+        total_stories_in_batches = sum(len(batch) for batch in batches)
         logger.info(
-            f"len(all_ids): {len(set(all_ids))} ; len(bt_df): {len(bt_df)}")
+            f"Total stories in batches: {total_stories_in_batches} ; Total stories: {len(bt_df)}")
 
-        # dupe_count = bt_df["id"].duplicated().sum()
-        # logger.warning(f"Found {dupe_count} duplicate articles")
-
-        # Process battles concurrently
+        # Process battles concurrently with pre-formed batches
         battle_results = await process_battle_round(bt_df,
-                                                    all_ids,
+                                                    batches,
                                                     battle_agent,
                                                     max_concurrent=1000,
                                                     logger=logger)
@@ -352,7 +450,7 @@ async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFra
         all_results.append(avg_change)
 
         # Convergence detection
-        if len(all_results) > min_rounds:  # do at least 1/4 of max rounds
+        if len(all_results) > min_rounds:  # do at least 1/2 of max rounds
             last_two = (all_results[-1] + all_results[-2]) / 2
             prev_two = (all_results[-3] + all_results[-4]) / 2
             logger.info(f"last_two: {last_two}, prev_two: {prev_two}")
@@ -427,26 +525,18 @@ async def fn_rate_articles(headline_df: pd.DataFrame, logger: Optional[logging.L
     if logger:
         logger.info("Rating spam probability")
 
-    # Get prompt from Langfuse
+    # Quality assessment
     try:
-        system, user, model = LangfuseClient().get_prompt("newsagent/rate_quality")
-
-        quality_agent = LLMagent(
-            system_prompt=system,
-            user_prompt=user,
+        rating_df['low_quality'] = await run_prompt_on_dataframe(
+            input_df=rating_df[['id', 'input_text']],
+            prompt_name="newsagent/rate_quality",
             output_type=StoryRatings,
-            model=model,
-            verbose=False,
-            logger=logger
-        )
-
-        rating_df['low_quality'] = await quality_agent.filter_dataframe(
-            rating_df[['id', 'input_text']],
             value_field='low_quality',
             item_list_field='results_list',
             item_id_field='id',
             chunk_size=25,
-            return_probabilities=True
+            return_probabilities=True,
+            logger=logger
         )
 
     except Exception as e:
@@ -462,24 +552,16 @@ async def fn_rate_articles(headline_df: pd.DataFrame, logger: Optional[logging.L
 
     # Topic relevance assessment
     try:
-        system, user, model = LangfuseClient().get_prompt("newsagent/rate_on_topic")
-
-        topic_agent = LLMagent(
-            system_prompt=system,
-            user_prompt=user,
+        rating_df['on_topic'] = await run_prompt_on_dataframe(
+            input_df=rating_df[['id', 'input_text']],
+            prompt_name="newsagent/rate_on_topic",
             output_type=StoryRatings,
-            model=model,
-            verbose=False,
-            logger=logger
-        )
-
-        rating_df['on_topic'] = await topic_agent.filter_dataframe(
-            rating_df[['id', 'input_text']],
             value_field='on_topic',
             item_list_field='results_list',
             item_id_field='id',
             chunk_size=25,
-            return_probabilities=True
+            return_probabilities=True,
+            logger=logger
         )
 
     except Exception as e:
@@ -498,24 +580,16 @@ async def fn_rate_articles(headline_df: pd.DataFrame, logger: Optional[logging.L
         logger.info("Rating importance probability")
 
     try:
-        system, user, model = LangfuseClient().get_prompt("newsagent/rate_importance")
-
-        importance_agent = LLMagent(
-            system_prompt=system,
-            user_prompt=user,
+        rating_df['important'] = await run_prompt_on_dataframe(
+            input_df=rating_df[['id', 'input_text']],
+            prompt_name="newsagent/rate_importance",
             output_type=StoryRatings,
-            model=model,
-            verbose=False,
-            logger=logger
-        )
-
-        rating_df['important'] = await importance_agent.filter_dataframe(
-            rating_df[['id', 'input_text']],
             value_field='important',
             item_list_field='results_list',
             item_id_field='id',
             chunk_size=25,
-            return_probabilities=True
+            return_probabilities=True,
+            logger=logger
         )
 
     except Exception as e:
@@ -593,6 +667,7 @@ async def fn_rate_articles(headline_df: pd.DataFrame, logger: Optional[logging.L
                         text_path=row.get('text_path', ''),
                         content_length=int(row.get('content_length', 0)),
                         summary=row.get('summary', ''),
+                        short_summary=row.get('short_summary'),
                         description=row.get('description', ''),
                         rating=float(row.get('rating', 0.0)),
                         cluster_label=row.get(

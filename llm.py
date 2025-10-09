@@ -45,6 +45,25 @@ import langfuse
 
 _logger = logging.getLogger(__name__)
 
+# Global singleton LangfuseClient for reuse across calls
+_global_langfuse_client: Optional['LangfuseClient'] = None
+
+
+def get_langfuse_client(logger: Optional[logging.Logger] = None) -> 'LangfuseClient':
+    """
+    Get or create singleton LangfuseClient.
+
+    Args:
+        logger: Optional logger instance
+
+    Returns:
+        Shared LangfuseClient instance
+    """
+    global _global_langfuse_client
+    if _global_langfuse_client is None:
+        _global_langfuse_client = LangfuseClient(logger=logger)
+    return _global_langfuse_client
+
 
 async def paginate_df_async(df: pd.DataFrame, chunk_size: int = 25):
     """Async generator for DataFrame pagination."""
@@ -58,6 +77,53 @@ async def paginate_list_async(lst, chunk_size: int = 25):
     for i in range(0, len(lst), chunk_size):
         yield lst[i:i + chunk_size]
         await asyncio.sleep(0)  # Allow other tasks to run
+
+
+def _introspect_output_type(output_type: Type[BaseModel]) -> tuple[Optional[str], Optional[str]]:
+    """
+    Introspect a Pydantic model to find list field and value field.
+
+    Args:
+        output_type: Pydantic BaseModel class
+
+    Returns:
+        Tuple of (item_list_field, value_field)
+        - item_list_field: Name of the field containing List[X]
+        - value_field: Name of the non-id field in the inner model X
+    """
+    import typing
+    from pydantic.fields import FieldInfo
+
+    item_list_field = None
+    value_field = None
+
+    # Find the list field
+    for field_name, field_info in output_type.model_fields.items():
+        # Get the field type annotation
+        field_type = field_info.annotation
+
+        # Check if it's a List type
+        origin = typing.get_origin(field_type)
+        if origin is list or origin is List:
+            item_list_field = field_name
+
+            # Get the inner type of the list
+            args = typing.get_args(field_type)
+            if args and len(args) > 0:
+                inner_type = args[0]
+
+                # If inner type is a BaseModel, find the non-id field
+                if isinstance(inner_type, type) and issubclass(inner_type, BaseModel):
+                    inner_fields = inner_type.model_fields
+                    non_id_fields = [name for name in inner_fields.keys()
+                                     if name.lower() not in ('id', 'index')]
+
+                    # If exactly one non-id field, use it as value_field
+                    if len(non_id_fields) == 1:
+                        value_field = non_id_fields[0]
+            break
+
+    return item_list_field, value_field
 
 
 class LangfuseClient:
@@ -922,6 +988,7 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             If return_series=True: pandas Series with values for DataFrame column assignment
             Otherwise: Single concatenated result object (if item_list_field specified) or list of results
         """
+        print("concurrency: ", max_concurrency)
         if input_df.empty:
             return []
 
@@ -1114,3 +1181,106 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                 f"Value count mismatch: expected {len(input_df)}, got {len(values)}")
 
         return pd.Series(values, index=input_df.index)
+
+
+async def run_prompt_on_dataframe(
+    input_df: pd.DataFrame,
+    prompt_name: str,
+    output_type: Type[BaseModel],
+    value_field: Optional[str] = None,
+    item_list_field: Optional[str] = None,
+    item_id_field: str = 'id',
+    chunk_size: int = 25,
+    max_concurrency: int = DEFAULT_CONCURRENCY,
+    return_probabilities: bool = False,
+    target_tokens: Optional[List[str]] = None,
+    verbose: bool = False,
+    logger: Optional[logging.Logger] = None,
+    **kwargs
+) -> pd.Series:
+    """
+    Convenience function to run a Langfuse prompt on a DataFrame.
+
+    Automatically:
+    - Fetches prompt from Langfuse using singleton client
+    - Creates LLMagent with prompt configuration
+    - Introspects output_type to determine field names (if not provided)
+    - Runs inference and returns pandas Series
+
+    Args:
+        input_df: DataFrame to process
+        prompt_name: Name of prompt in Langfuse (e.g., 'newsagent/rate_quality')
+        output_type: Pydantic model class for structured output
+        value_field: Field to extract from results (auto-detected if None)
+        item_list_field: List field name in output (auto-detected if None)
+        item_id_field: ID field name for validation (default: 'id')
+        chunk_size: Rows per batch (default: 25)
+        max_concurrency: Max concurrent requests (default: DEFAULT_CONCURRENCY)
+        return_probabilities: Return token probabilities instead of structured output
+        target_tokens: Tokens to extract probabilities for (default: ["1"])
+        verbose: Enable verbose logging
+        logger: Optional logger instance
+        **kwargs: Additional arguments passed to filter_dataframe
+
+    Returns:
+        pandas Series with results, indexed to match input_df
+
+    Example:
+        # Single line replaces 10+ lines of boilerplate
+        rating_df['low_quality'] = await run_prompt_on_dataframe(
+            rating_df[['id', 'input_text']],
+            "newsagent/rate_quality",
+            StoryRatings,
+            return_probabilities=True,
+            logger=logger
+        )
+    """
+    logger = logger or _logger
+
+    # Get singleton Langfuse client
+    lf_client = get_langfuse_client(logger=logger)
+
+    # Fetch prompt from Langfuse
+    system_prompt, user_prompt, model = lf_client.get_prompt(prompt_name)
+
+    # Auto-detect fields if not provided
+    if item_list_field is None or value_field is None:
+        detected_list_field, detected_value_field = _introspect_output_type(
+            output_type)
+
+        if item_list_field is None:
+            item_list_field = detected_list_field or 'results_list'
+        if value_field is None:
+            value_field = detected_value_field
+
+            # If still None and not using probabilities, raise error
+            if value_field is None and not return_probabilities:
+                raise ValueError(
+                    f"Could not auto-detect value_field for {output_type.__name__}. "
+                    f"Please specify explicitly."
+                )
+
+    # Create LLM agent
+    agent = LLMagent(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        output_type=output_type,
+        model=model,
+        verbose=verbose,
+        logger=logger
+    )
+
+    # Run inference
+    result_series = await agent.filter_dataframe(
+        input_df,
+        value_field=value_field,
+        item_list_field=item_list_field,
+        item_id_field=item_id_field,
+        chunk_size=chunk_size,
+        max_concurrency=max_concurrency,
+        return_probabilities=return_probabilities,
+        target_tokens=target_tokens,
+        **kwargs
+    )
+
+    return result_series

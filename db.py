@@ -149,6 +149,7 @@ class Article:
     text_path: Optional[str]
     content_length: int
     summary: Optional[str]
+    short_summary: Optional[str]
     description: Optional[str]
     rating: float
     cluster_label: Optional[str]
@@ -175,6 +176,7 @@ class Article:
                 text_path TEXT,
                 content_length INTEGER NOT NULL,
                 summary TEXT,
+                short_summary TEXT,
                 description TEXT,
                 rating REAL NOT NULL,
                 cluster_label TEXT,
@@ -189,14 +191,14 @@ class Article:
     def insert(self, conn: sqlite3.Connection):
         """Insert this Article record into the database"""
         conn.execute("""
-            INSERT INTO articles (final_url, url, source, title, published, rss_summary, isAI, status, html_path, last_updated, text_path, content_length, summary, description, rating, cluster_label, domain, site_name, reputation, date)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO articles (final_url, url, source, title, published, rss_summary, isAI, status, html_path, last_updated, text_path, content_length, summary, short_summary, description, rating, cluster_label, domain, site_name, reputation, date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             self.final_url, self.url, self.source, self.title,
             self.published.isoformat() if self.published else None,
             self.rss_summary, self.isAI, self.status, self.html_path,
             self.last_updated.isoformat() if self.last_updated else None,
-            self.text_path, self.content_length, self.summary, self.description,
+            self.text_path, self.content_length, self.summary, self.short_summary, self.description,
             self.rating, self.cluster_label, self.domain, self.site_name,
             self.reputation,
             self.date.isoformat() if self.date else None
@@ -206,14 +208,14 @@ class Article:
     def update(self, conn: sqlite3.Connection):
         """Update this Article record in the database"""
         conn.execute("""
-            UPDATE articles SET url = ?, source = ?, title = ?, published = ?, rss_summary = ?, isAI = ?, status = ?, html_path = ?, last_updated = ?, text_path = ?, content_length = ?, summary = ?, description = ?, rating = ?, cluster_label = ?, domain = ?, site_name = ?, reputation = ?, date = ?
+            UPDATE articles SET url = ?, source = ?, title = ?, published = ?, rss_summary = ?, isAI = ?, status = ?, html_path = ?, last_updated = ?, text_path = ?, content_length = ?, summary = ?, short_summary = ?, description = ?, rating = ?, cluster_label = ?, domain = ?, site_name = ?, reputation = ?, date = ?
             WHERE final_url = ?
         """, (
             self.url, self.source, self.title,
             self.published.isoformat() if self.published else None,
             self.rss_summary, self.isAI, self.status, self.html_path,
             self.last_updated.isoformat() if self.last_updated else None,
-            self.text_path, self.content_length, self.summary, self.description,
+            self.text_path, self.content_length, self.summary, self.short_summary, self.description,
             self.rating, self.cluster_label, self.domain, self.site_name,
             self.reputation,
             self.date.isoformat() if self.date else None, self.final_url
@@ -230,7 +232,7 @@ class Article:
     def get(cls, conn: sqlite3.Connection, final_url: str) -> Optional['Article']:
         """Get an Article record by final_url"""
         cursor = conn.execute("""
-            SELECT final_url, url, source, title, published, rss_summary, isAI, status, html_path, last_updated, text_path, content_length, summary, description, rating, cluster_label, domain, site_name, reputation, date
+            SELECT final_url, url, source, title, published, rss_summary, isAI, status, html_path, last_updated, text_path, content_length, summary, short_summary, description, rating, cluster_label, domain, site_name, reputation, date
             FROM articles WHERE final_url = ?
         """, (final_url,))
         row = cursor.fetchone()
@@ -250,13 +252,14 @@ class Article:
                 text_path=row[10],
                 content_length=row[11],
                 summary=row[12],
-                description=row[13],
-                rating=row[14],
-                cluster_label=row[15],
-                domain=row[16],
-                site_name=row[17],
-                reputation=row[18],
-                date=datetime.fromisoformat(row[19]) if row[19] else None
+                short_summary=row[13],
+                description=row[14],
+                rating=row[15],
+                cluster_label=row[16],
+                domain=row[17],
+                site_name=row[18],
+                reputation=row[19],
+                date=datetime.fromisoformat(row[20]) if row[20] else None
             )
         return None
 
@@ -264,7 +267,7 @@ class Article:
     def get_all(cls, conn: sqlite3.Connection) -> list['Article']:
         """Get all Article records"""
         cursor = conn.execute("""
-            SELECT final_url, url, source, title, published, rss_summary, isAI, status, html_path, last_updated, text_path, content_length, summary, description, rating, cluster_label, domain, site_name, reputation, date FROM articles
+            SELECT final_url, url, source, title, published, rss_summary, isAI, status, html_path, last_updated, text_path, content_length, summary, short_summary, description, rating, cluster_label, domain, site_name, reputation, date FROM articles
         """)
         rows = cursor.fetchall()
         return [cls(
@@ -281,20 +284,21 @@ class Article:
             text_path=row[10],
             content_length=row[11],
             summary=row[12],
-            description=row[13],
-            rating=row[14],
-            cluster_label=row[15],
-            domain=row[16],
-            site_name=row[17],
-            reputation=row[18],
-            date=datetime.fromisoformat(row[19]) if row[19] else None
+            short_summary=row[13],
+            description=row[14],
+            rating=row[15],
+            cluster_label=row[16],
+            domain=row[17],
+            site_name=row[18],
+            reputation=row[19],
+            date=datetime.fromisoformat(row[20]) if row[20] else None
         ) for row in rows]
 
     def upsert(self, conn: sqlite3.Connection):
         """Insert or update this Article record"""
         conn.execute("""
-            INSERT INTO articles (final_url, url, source, title, published, rss_summary, isAI, status, html_path, last_updated, text_path, content_length, summary, description, rating, cluster_label, domain, site_name, reputation, date)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO articles (final_url, url, source, title, published, rss_summary, isAI, status, html_path, last_updated, text_path, content_length, summary, short_summary, description, rating, cluster_label, domain, site_name, reputation, date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(final_url) DO UPDATE SET
                 url = excluded.url,
                 source = excluded.source,
@@ -308,6 +312,7 @@ class Article:
                 text_path = excluded.text_path,
                 content_length = excluded.content_length,
                 summary = excluded.summary,
+                short_summary = excluded.short_summary,
                 description = excluded.description,
                 rating = excluded.rating,
                 cluster_label = excluded.cluster_label,
@@ -320,7 +325,7 @@ class Article:
             self.published.isoformat() if self.published else None,
             self.rss_summary, self.isAI, self.status, self.html_path,
             self.last_updated.isoformat() if self.last_updated else None,
-            self.text_path, self.content_length, self.summary, self.description,
+            self.text_path, self.content_length, self.summary, self.short_summary, self.description,
             self.rating, self.cluster_label, self.domain, self.site_name,
             self.reputation,
             self.date.isoformat() if self.date else None
