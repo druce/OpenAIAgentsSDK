@@ -438,18 +438,28 @@ class Fetcher:
 
         async def fetch_with_semaphore(source_key, source_record):
             async with self.semaphore:
-                if source_record.get('type') == 'rss':
-                    return await self.fetch_rss(source_key)
-                elif source_record.get('type') == 'rest':
-                    return await self.fetch_api(source_key)
-                elif source_record.get('type') == 'html':
-                    return await self.fetch_html(source_key, do_download)
-                else:
+                try:
+                    if source_record.get('type') == 'rss':
+                        return await self.fetch_rss(source_key)
+                    elif source_record.get('type') == 'rest':
+                        return await self.fetch_api(source_key)
+                    elif source_record.get('type') == 'html':
+                        return await self.fetch_html(source_key, do_download)
+                    else:
+                        return {
+                            'source': source_key,
+                            'results': [],
+                            'status': 'error',
+                            'metadata': {'error': 'Unknown source type: ' + source_record.get('type')}
+                        }
+                except Exception as e:
+                    print(
+                        f"Exception while fetching from source {source_key}: {str(e)}")
                     return {
                         'source': source_key,
                         'results': [],
                         'status': 'error',
-                        'metadata': {'error': 'Unknown source type: ' + source_record.get('type')}
+                        'metadata': {'error': f'Exception while fetching: {str(e)}'}
                     }
 
         # Create tasks for all sources

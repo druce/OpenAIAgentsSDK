@@ -126,7 +126,7 @@ Reddit:
   rss: https://www.reddit.com/r/AI_Agents+ArtificialInteligence+Automate+ChatGPT+ChatGPTCoding+Futurology+MachineLearning+OpenAI+ProgrammerHumor+accelerate+aiArt+aivideo+artificial+deeplearning+learnmachinelearning+programming+singularity+tech+technews+technology/top/.rss?sort=top&t=day
 
 Techmeme:
-  type: rss
+  type: html
   url: https://www.techmeme.com/river
   filename: Techmeme
   exclude:

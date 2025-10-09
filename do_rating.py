@@ -425,8 +425,9 @@ async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFra
         bt_df["bt_z"] = (bt_df["bradley_terry"] - bt_df["bradley_terry"].mean()) / \
             bt_df["bradley_terry"].std(ddof=0)
         logger.info("Computed Bradley-Terry z-scores")
-        display(bt_df[['id', 'title', 'bradley_terry', 'bt_z']
-                      ].sort_values('bradley_terry', ascending=False))
+        with pd.option_context('display.max_columns', None, 'display.width', None, 'display.max_colwidth', None):
+            display(bt_df[['id', 'site_name', 'title', 'bradley_terry', 'bt_z']
+                          ].sort_values('bradley_terry', ascending=False))
 
         # Check convergence
         # Show top 10 ids after sorting by Bradley-Terry rating

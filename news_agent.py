@@ -7,6 +7,20 @@ Each step updates the workflow status and serializes the state.
 
 """
 
+from agents import (Agent, Runner, RunContextWrapper, FunctionTool,
+                    SQLiteSession, set_default_openai_client)
+from do_rating import fn_rate_articles, bradley_terry
+from do_cluster import do_clustering
+from do_dedupe import process_dataframe_with_filtering
+from llm import LLMagent, LangfuseClient
+from utilities import send_gmail
+from scrape import scrape_urls_concurrent, normalize_html
+from fetch import Fetcher
+from db import Url, Site
+from log_handler import SQLiteLogHandler
+from newsletter_state import NewsletterAgentState
+from config import CANONICAL_TOPICS, DOWNLOAD_DIR, PAGES_DIR, TEXT_DIR, NEWSAGENTDB, LOGDB, DEFAULT_CONCURRENCY
+from openai import AsyncOpenAI
 import asyncio
 import time
 import logging
@@ -37,21 +51,26 @@ from pydantic import BaseModel, Field
 # from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 
-from agents import (Agent, Runner, RunContextWrapper, FunctionTool,
-                    SQLiteSession, set_default_openai_client)
 
-from openai import AsyncOpenAI
+# Pydantic models for section drafting
+class SectionStoryLink(BaseModel):
+    url: str = Field(description="URL of the article")
+    site_name: str = Field(description="Name of the website/source")
 
-from config import CANONICAL_TOPICS, DOWNLOAD_DIR, PAGES_DIR, TEXT_DIR, NEWSAGENTDB, LOGDB, DEFAULT_CONCURRENCY
-from newsletter_state import NewsletterAgentState
-from log_handler import SQLiteLogHandler
-from db import Url, Site
-from fetch import Fetcher
-from scrape import scrape_urls_concurrent, normalize_html
-from llm import LLMagent, LangfuseClient
-from do_dedupe import process_dataframe_with_filtering
-from do_cluster import do_clustering
-from do_rating import fn_rate_articles, bradley_terry
+
+class SectionStory(BaseModel):
+    headline: str = Field(description="Headline for the story")
+    summary: str = Field(description="Summary of the story")
+    links: List[SectionStoryLink] = Field(
+        description="List of links related to this story")
+    prune: bool = Field(description="Whether to prune/exclude this story")
+
+
+class Section(BaseModel):
+    section_title: str = Field(description="Title of the newsletter section")
+    stories: List[SectionStory] = Field(
+        description="List of stories in this section")
+
 
 # Pydantic models for structured output
 
@@ -364,12 +383,10 @@ class StateInspectionTool:
                 "",
                 "NEWSLETTER SECTIONS:",
             ])
-            for section_name, section_data in state.newsletter_sections.items():
-                status = section_data.get('section_status', 'unknown')
-                word_count = section_data.get('word_count', 0)
-                article_count = section_data.get('article_count', 0)
+            for section_name, section_content in state.newsletter_sections.items():
+                word_count = len(section_content.split())
                 report_lines.append(
-                    f"  {section_name}: {status}, {article_count} articles, {word_count} words")
+                    f"  {section_name}: {word_count} words")
 
         if state.final_newsletter:
             newsletter_words = len(state.final_newsletter.split())
@@ -1598,6 +1615,38 @@ class RateArticlesTool:
             if self.verbose:
                 print(f"✅ Completed Step 5: Rated {articles_rated} articles")
 
+            # Send email with rated articles
+            try:
+                # Create HTML content for email
+                html_items = []
+                for row in rated_df.sort_values("rating", ascending=False).itertuples():
+                    rating = getattr(row, 'rating', 0)
+                    title = getattr(row, 'title', 'No Title')
+                    url = getattr(row, 'url', '#')
+                    site_name = getattr(row, 'site_name', 'Unknown')
+                    short_summary = getattr(row, 'short_summary', '')
+
+                    html_item = f"""
+                    <div style="margin-bottom: 20px; padding: 10px; border-left: 3px solid #4CAF50;">
+                        <h3 style="margin: 0 0 5px 0;">{rating:.1f} - <a href="{url}">{title}</a> - {site_name}</h3>
+                        <p style="margin: 5px 0 0 0; color: #666;">{short_summary}</p>
+                    </div>
+                    """
+                    html_items.append(html_item)
+
+                html_content = "\n".join(html_items)
+
+                # Create subject with date/time
+                now = datetime.now()
+                subject = f"AI news items - {now.strftime('%Y-%m-%d %H:%M:%S')}"
+
+                # Send email
+                send_gmail(subject, html_content)
+                self.logger.info(
+                    f"Sent email with {len(html_items)} rated articles")
+            except Exception as e:
+                self.logger.error(f"Failed to send email: {e}")
+
             status_msg = f"✅ Step 5 {step_name} completed successfully! Rated {articles_rated} articles with average rating {avg_rating:.1f}/10."
             status_msg += f"\n⭐ High quality articles (≥7.0): {high_quality_count}"
             status_msg += "\n💾 Ratings stored in persistent state."
@@ -2175,8 +2224,9 @@ class SelectSectionsTool:
                 logger=self.logger
             )
 
-            async def assign_topic(idx, input_text):
-                assigned_cat = await cat_assignment_agent.run_prompt(topics=final_cats_str,
+            async def assign_topic(idx, input_text, topics_str=None):
+                topics = topics_str if topics_str is not None else final_cats_str
+                assigned_cat = await cat_assignment_agent.run_prompt(topics=topics,
                                                                      input_text=input_text)
                 return (idx, input_text, assigned_cat.topic_title)
 
@@ -2250,6 +2300,69 @@ class SelectSectionsTool:
             # drop rows where dupe_id is >= 0 (keep rows where dupe_id is -1, ie unique)
             headline_df = headline_df.loc[headline_df['dupe_id'] < 0]
 
+            # Handle singleton categories (categories with only 1 article)
+            self.logger.info("Handling singleton categories")
+            cat_counts_df = headline_df["cat"].value_counts().reset_index()
+            cat_counts_df.columns = ["cat", "count"]
+
+            # Split into singletons (count == 1) and non-singletons (count > 1)
+            singletons = cat_counts_df.loc[cat_counts_df["count"] == 1, "cat"].tolist(
+            )
+            nonsingletons = cat_counts_df.loc[cat_counts_df["count"] > 1, "cat"].tolist(
+            )
+
+            # Ensure 'Other' is in nonsingletons and not in singletons
+            if "Other" in singletons:
+                singletons.remove("Other")
+            if "Other" not in nonsingletons:
+                nonsingletons.append("Other")
+
+            self.logger.info(
+                f"Singleton categories ({len(singletons)}): {singletons}")
+            self.logger.info(
+                f"Non-singleton categories ({len(nonsingletons)}): {nonsingletons}")
+
+            # Reassign singleton articles to non-singleton categories
+            if singletons and nonsingletons:
+                singleton_rows = headline_df.loc[headline_df["cat"].isin(
+                    singletons)]
+
+                if len(singleton_rows) > 0:
+                    self.logger.info(
+                        f"Reassigning {len(singleton_rows)} singleton articles to non-singleton categories")
+
+                    nonsingletons_str = "\n".join(sorted(nonsingletons))
+
+                    reassign_tasks = [
+                        assign_topic(row.id, row.input_text, nonsingletons_str)
+                        for row in singleton_rows.itertuples()
+                    ]
+                    reassign_results = await asyncio.gather(*reassign_tasks, return_exceptions=True)
+                    reassign_valid = [
+                        r for r in reassign_results if not isinstance(r, Exception)]
+
+                    # Create dataframe and update categories
+                    reassign_df = pd.DataFrame(
+                        reassign_valid, columns=["id", "input_text", "cat"])
+                    reassign_df["cat"] = reassign_df["cat"].fillna("Other")
+                    reassign_df.loc[reassign_df["cat"]
+                                    == "None", "cat"] = "Other"
+
+                    # Update the headline_df with reassigned categories
+                    for _, row in reassign_df.iterrows():
+                        headline_df.loc[headline_df['id'] ==
+                                        row['id'], 'cat'] = row['cat']
+
+                    self.logger.info(
+                        f"Reassigned {len(reassign_valid)} singleton articles")
+
+                    # Log final category counts
+                    final_cat_counts = headline_df["cat"].value_counts(
+                    ).reset_index()
+                    final_cat_counts.columns = ["cat", "count"]
+                    self.logger.info(
+                        f"Final category counts: {final_cat_counts.to_dict(orient='records')}")
+
             state.headline_data = headline_df.to_dict('records')
 
             # Complete the step
@@ -2305,11 +2418,10 @@ class DraftSectionsTool:
 
         # Check if step already completed via persistent state
         if state.is_step_complete(step_name):
-            drafted_sections = [
-                s for s in state.newsletter_sections.values() if s.get('content')]
-            total_words = sum(len(s.get('content', '').split())
-                              for s in drafted_sections)
-            return f"Step 8 already completed! Drafted {len(drafted_sections)} sections with {total_words} total words."
+            section_count = len(state.newsletter_sections)
+            total_words = sum(len(content.split())
+                              for content in state.newsletter_sections.values())
+            return f"Step 8 already completed! Drafted {section_count} sections with {total_words} total words."
 
         # Check if step 7 is completed
         if not state.is_step_complete("step_07_select_sections"):
@@ -2324,90 +2436,78 @@ class DraftSectionsTool:
             state.start_step(step_name)
             print(f"▶ Starting Step 8: {step_name}")
 
-            # Get section plans from persistent state
-            if not state.newsletter_sections:
-                return "❌ No newsletter sections found to draft. Please run step 7 first."
+            # Get headline data
+            headline_df = pd.DataFrame(state.headline_data)
 
-            # Draft content for each section
+            if headline_df.empty:
+                return "❌ No headlines found to draft sections. Please run previous steps first."
+
+            # Get unique categories
+            categories = headline_df['cat'].unique().tolist()
+            categories = [cat for cat in categories if cat != "Other"]
+
+            if not categories:
+                return "❌ No categories found in headlines. Please run step 7 first."
+
+            self.logger.info(
+                f"Drafting sections for {len(categories)} categories")
+
+            # Create write_section agent
+            write_section_system_prompt, write_section_user_prompt, model = \
+                LangfuseClient().get_prompt("newsagent/write_section")
+
+            write_section_agent = LLMagent(
+                system_prompt=write_section_system_prompt,
+                user_prompt=write_section_user_prompt,
+                output_type=Section,
+                model=model,
+                verbose=self.verbose,
+                logger=self.logger
+            )
+
+            async def draft_section(cat, agent):
+                """Draft a section for a given category"""
+                # Get articles for this category, sorted by rating, convert to JSON
+                cat_df = headline_df.loc[headline_df["cat"] == cat].sort_values(
+                    "rating", ascending=False)
+
+                input_text = cat_df[["rating", "short_summary", "site_name", "url"]].to_json(
+                    orient="records")
+
+                # Call the LLM to draft the section
+                response = await agent.run_prompt(input_text=input_text)
+
+                return (cat, response)
+
+            # Draft all sections asynchronously
+            draft_tasks = [draft_section(cat, write_section_agent)
+                           for cat in categories]
+            draft_results = await asyncio.gather(*draft_tasks, return_exceptions=True)
+
+            # Filter out exceptions and store results
             sections_drafted = 0
-            total_words = 0
-
-            for section_name, section_data in state.newsletter_sections.items():
-                if section_data.get('section_status') != 'selected':
+            for result in draft_results:
+                if isinstance(result, Exception):
+                    self.logger.error(f"Error drafting section: {result}")
                     continue
 
-                articles = section_data.get('articles', [])
-                if not articles:
-                    continue
-
-                # Mock section content generation - in reality, this would use AI
-                # to create engaging newsletter content from article summaries
-                section_content = f"## {section_name}\n\n"
-
-                # Add intro paragraph
-                intro_templates = {
-                    'LLM Advances': "The latest developments in large language models continue to push the boundaries of what's possible in AI.",
-                    'AI Safety & Ethics': "Important discussions around responsible AI development and deployment are shaping the future of the field.",
-                    'Business AI Applications': "Companies are finding innovative ways to integrate AI into their products and workflows.",
-                    'Research Breakthroughs': "Academic researchers are making significant strides in advancing our understanding of artificial intelligence.",
-                    'Industry News': "The AI industry continues to evolve with new partnerships, funding rounds, and product launches."
-                }
-
-                intro = intro_templates.get(
-                    section_name, f"Here are the latest updates in {section_name.lower()}.")
-                section_content += f"{intro}\n\n"
-
-                # Add article summaries
-                # Top 3 articles per section
-                for i, article in enumerate(articles[:3]):
-                    article_url = article.get('url', '')
-                    article_title = article.get('title', 'Unknown Title')
-                    article_source = article.get('source', 'Unknown Source')
-
-                    # Get the actual summary from article data if available
-                    summary_bullets = article.get('summary', [
-                        f"Key insights from this {section_name.lower()} article",
-                        "Important implications for the AI community",
-                        "Notable developments worth following"
-                    ])
-
-                    section_content += f"### {article_title}\n"
-                    section_content += f"*Source: {article_source}*\n\n"
-
-                    for bullet in summary_bullets:
-                        section_content += f"- {bullet}\n"
-
-                    section_content += f"\n[Read more]({article_url})\n\n"
-
-                # Store the drafted content
-                state.newsletter_sections[section_name]['content'] = section_content
-                state.newsletter_sections[section_name]['section_status'] = 'drafted'
-                state.newsletter_sections[section_name]['draft_timestamp'] = datetime.now(
-                ).isoformat()
-                state.newsletter_sections[section_name]['word_count'] = len(
-                    section_content.split())
-
+                cat, content = result
+                state.newsletter_sections[cat] = content
                 sections_drafted += 1
-                total_words += len(section_content.split())
-
-            # Calculate average words per section
-            avg_words_per_section = total_words / \
-                sections_drafted if sections_drafted > 0 else 0
 
             # Complete the step
             state.complete_step(step_name)
 
-            if self.verbose:
-                print(
-                    f"✅ Completed Step 8: Drafted {sections_drafted} sections")
+            total_words = sum(len(content.split())
+                              for content in state.newsletter_sections.values())
+            state.workflow_status_message = f"Drafted {sections_drafted} sections with {total_words} total words"
 
-            status_msg = f"✅ Step 8 {step_name} completed successfully! Drafted {sections_drafted} sections with {total_words} total words."
-            status_msg += f"\n📝 Average words per section: {avg_words_per_section:.0f}"
-            status_msg += "\n💾 Section content stored in persistent state."
+            if self.verbose:
+                print(f"✅ Completed Step 8: {state.workflow_status_message}")
 
             # Serialize state after completing step
             state.serialize_to_db(step_name)
-            return status_msg
+            return state.workflow_status_message
 
         except Exception as e:
             state.error_step(step_name, str(e))
@@ -2447,8 +2547,7 @@ class FinalizeNewsletterTool:
         if state.is_step_complete(step_name):
             newsletter_length = len(
                 state.final_newsletter.split()) if state.final_newsletter else 0
-            sections_count = len(
-                [s for s in state.newsletter_sections.values() if s.get('content')])
+            sections_count = len(state.newsletter_sections)
             return f"Step 9 already completed! Newsletter finalized with {sections_count} sections and {newsletter_length} words."
 
         # Check if step 8 is completed
@@ -2465,12 +2564,7 @@ class FinalizeNewsletterTool:
             print(f"▶ Starting Step 9: {step_name}")
 
             # Get drafted sections from persistent state
-            drafted_sections = {
-                name: data for name, data in state.newsletter_sections.items()
-                if data.get('section_status') == 'drafted' and data.get('content')
-            }
-
-            if not drafted_sections:
+            if not state.newsletter_sections:
                 return "❌ No drafted sections found to finalize. Please run step 8 first."
 
             # Create the final newsletter by combining all sections
@@ -2482,13 +2576,13 @@ class FinalizeNewsletterTool:
 
             # Add table of contents
             newsletter_content += "## Table of Contents\n\n"
-            for i, section_name in enumerate(drafted_sections.keys(), 1):
+            for i, section_name in enumerate(state.newsletter_sections.keys(), 1):
                 newsletter_content += f"{i}. [{section_name}](#{section_name.lower().replace(' ', '-').replace('&', 'and')})\n"
             newsletter_content += "\n---\n\n"
 
             # Add each section content
-            for section_name, section_data in drafted_sections.items():
-                newsletter_content += section_data.get('content', '')
+            for section_name, section_content_text in state.newsletter_sections.items():
+                newsletter_content += section_content_text
                 newsletter_content += "\n---\n\n"
 
             # Add footer
