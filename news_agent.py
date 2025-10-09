@@ -57,19 +57,29 @@ class SectionStoryLink(BaseModel):
     url: str = Field(description="URL of the article")
     site_name: str = Field(description="Name of the website/source")
 
+    def __str__(self):
+        return f"[{self.site_name}]({self.url})"
 
-class SectionStory(BaseModel):
-    headline: str = Field(description="Headline for the story")
-    summary: str = Field(description="Summary of the story")
+
+class Story(BaseModel):
+    headline: str = Field(description="Summary of the story")
     links: List[SectionStoryLink] = Field(
         description="List of links related to this story")
     prune: bool = Field(description="Whether to prune/exclude this story")
 
+    def __str__(self):
+        return f"- {self.headline} - " + " ".join([str(s) for s in self.links])
+
 
 class Section(BaseModel):
     section_title: str = Field(description="Title of the newsletter section")
-    stories: List[SectionStory] = Field(
+    headlines: List[Story] = Field(
         description="List of stories in this section")
+
+    def __str__(self):
+        return f"## {self.section_title}\n\n" + "\n".join(
+            [str(h) for h in self.headlines if not h.prune]
+        )
 
 
 # Pydantic models for structured output
@@ -275,7 +285,7 @@ class WorkflowStatusTool:
                 result += f"  Total articles: {len(state.headline_data)}\n"
                 result += f"  AI-related: {ai_related}\n"
                 result += f"  Clusters: {len(state.clusters)}\n"
-                result += f"  Sections: {len(state.newsletter_sections)}"
+                result += f"  Sections: {len(state.newsletter_section_text)}"
 
             # Add intervention guidance if workflow is in error state
             if state.has_errors():
@@ -366,7 +376,7 @@ class StateInspectionTool:
             "",
             "PROCESSING RESULTS:",
             f"  Topic clusters: {len(state.clusters)} topics",
-            f"  Newsletter sections: {len(state.newsletter_sections)} sections",
+            f"  Newsletter sections: {len(state.newsletter_section_text)} sections",
             f"  Final newsletter: {'Generated' if state.final_newsletter else 'Not created'}",
         ])
 
@@ -378,12 +388,12 @@ class StateInspectionTool:
             for topic, urls in state.clusters.items():
                 report_lines.append(f"  {topic}: {len(urls)} articles")
 
-        if state.newsletter_sections:
+        if state.newsletter_section_text:
             report_lines.extend([
                 "",
                 "NEWSLETTER SECTIONS:",
             ])
-            for section_name, section_content in state.newsletter_sections.items():
+            for section_name, section_content in state.newsletter_section_text.items():
                 word_count = len(section_content.split())
                 report_lines.append(
                     f"  {section_name}: {word_count} words")
@@ -1597,6 +1607,7 @@ class RateArticlesTool:
                     self.logger.info(
                         f"low rated article: {row.title} {row.rating}")
 
+            # filter to minimum rating, we could filter to top n, or using rating and MMR
             rated_df = rated_df[rated_df['rating']
                                 >= minimum_story_rating].copy()
 
@@ -1622,7 +1633,7 @@ class RateArticlesTool:
                 for row in rated_df.sort_values("rating", ascending=False).itertuples():
                     rating = getattr(row, 'rating', 0)
                     title = getattr(row, 'title', 'No Title')
-                    url = getattr(row, 'url', '#')
+                    url = getattr(row, 'final_url', '#')
                     site_name = getattr(row, 'site_name', 'Unknown')
                     short_summary = getattr(row, 'short_summary', '')
 
@@ -2114,7 +2125,7 @@ class SelectSectionsTool:
         # Check if step already completed via persistent state
         step_name = "step_07_select_sections"
         if state.is_step_complete(step_name):
-            section_count = len(state.newsletter_sections)
+            section_count = len(state.newsletter_section_text)
             return f"Step 7 already completed! Created {section_count} newsletter sections."
 
         # Check if step 6 is completed
@@ -2418,9 +2429,9 @@ class DraftSectionsTool:
 
         # Check if step already completed via persistent state
         if state.is_step_complete(step_name):
-            section_count = len(state.newsletter_sections)
+            section_count = len(state.newsletter_section_text)
             total_words = sum(len(content.split())
-                              for content in state.newsletter_sections.values())
+                              for content in state.newsletter_section_text.values())
             return f"Step 8 already completed! Drafted {section_count} sections with {total_words} total words."
 
         # Check if step 7 is completed
@@ -2471,7 +2482,7 @@ class DraftSectionsTool:
                 cat_df = headline_df.loc[headline_df["cat"] == cat].sort_values(
                     "rating", ascending=False)
 
-                input_text = cat_df[["rating", "short_summary", "site_name", "url"]].to_json(
+                input_text = cat_df[["rating", "short_summary", "site_name", "final_url"]].rename(columns={"short_summary": "summary", "final_url": "url"}).to_json(
                     orient="records")
 
                 # Call the LLM to draft the section
@@ -2492,14 +2503,15 @@ class DraftSectionsTool:
                     continue
 
                 cat, content = result
-                state.newsletter_sections[cat] = content
+                state.newsletter_section_obj[cat] = content
+                state.newsletter_section_text[cat] = content
                 sections_drafted += 1
 
             # Complete the step
             state.complete_step(step_name)
 
             total_words = sum(len(content.split())
-                              for content in state.newsletter_sections.values())
+                              for content in state.newsletter_section_text.values())
             state.workflow_status_message = f"Drafted {sections_drafted} sections with {total_words} total words"
 
             if self.verbose:
@@ -2547,7 +2559,7 @@ class FinalizeNewsletterTool:
         if state.is_step_complete(step_name):
             newsletter_length = len(
                 state.final_newsletter.split()) if state.final_newsletter else 0
-            sections_count = len(state.newsletter_sections)
+            sections_count = len(state.newsletter_section_text)
             return f"Step 9 already completed! Newsletter finalized with {sections_count} sections and {newsletter_length} words."
 
         # Check if step 8 is completed
@@ -2564,7 +2576,7 @@ class FinalizeNewsletterTool:
             print(f"▶ Starting Step 9: {step_name}")
 
             # Get drafted sections from persistent state
-            if not state.newsletter_sections:
+            if not state.newsletter_section_text:
                 return "❌ No drafted sections found to finalize. Please run step 8 first."
 
             # Create the final newsletter by combining all sections
@@ -2576,12 +2588,12 @@ class FinalizeNewsletterTool:
 
             # Add table of contents
             newsletter_content += "## Table of Contents\n\n"
-            for i, section_name in enumerate(state.newsletter_sections.keys(), 1):
+            for i, section_name in enumerate(state.newsletter_section_text.keys(), 1):
                 newsletter_content += f"{i}. [{section_name}](#{section_name.lower().replace(' ', '-').replace('&', 'and')})\n"
             newsletter_content += "\n---\n\n"
 
             # Add each section content
-            for section_name, section_content_text in state.newsletter_sections.items():
+            for section_name, section_content_text in state.newsletter_section_text.items():
                 newsletter_content += section_content_text
                 newsletter_content += "\n---\n\n"
 
@@ -2846,7 +2858,7 @@ Remember: Your state is persistent. You can safely resume from any point. Never 
                 "",
                 "PROCESSING RESULTS:",
                 f"  Topic clusters: {len(self.state.clusters)}",
-                f"  Newsletter sections: {len(self.state.newsletter_sections)}",
+                f"  Newsletter sections: {len(self.state.newsletter_section_text)}",
                 f"  Final newsletter: {'Generated' if self.state.final_newsletter else 'Not created'}",
             ])
 

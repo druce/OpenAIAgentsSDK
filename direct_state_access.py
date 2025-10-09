@@ -9,6 +9,7 @@ import pickle
 from typing import Any, Dict
 from newsletter_state import NewsletterAgentState
 
+
 class DirectStateAccess:
     """Direct access to SQLite session state without going through the agent"""
 
@@ -23,7 +24,8 @@ class DirectStateAccess:
             cursor = conn.cursor()
 
             # Query the session data
-            cursor.execute("SELECT data FROM sessions WHERE id = ?", (self.session_id,))
+            cursor.execute(
+                "SELECT data FROM sessions WHERE id = ?", (self.session_id,))
             result = cursor.fetchone()
             conn.close()
 
@@ -84,7 +86,8 @@ class DirectStateAccess:
                 print(f"  URL: {article.get('url', 'N/A')[:60]}...")
                 print(f"  AI-related: {article.get('ai_related', 'Not set')}")
                 print(f"  Has content: {bool(article.get('content'))}")
-                print(f"  Quality rating: {article.get('quality_rating', 'Not set')}")
+                print(
+                    f"  Quality rating: {article.get('quality_rating', 'Not set')}")
                 print(f"  Cluster: {article.get('cluster_topic', 'Not set')}")
 
     def get_state_summary(self) -> Dict[str, Any]:
@@ -101,7 +104,7 @@ class DirectStateAccess:
             "unique_sources": len(set(a.get('source', 'Unknown') for a in state.headline_data)),
             "summaries_count": len(state.article_summaries),
             "clusters_count": len(state.clusters),
-            "sections_count": len(state.newsletter_sections),
+            "sections_count": len(state.newsletter_section_text),
             "has_final_newsletter": bool(state.final_newsletter)
         }
 
@@ -119,7 +122,7 @@ class DirectStateAccess:
         if target_step < 5:
             state.clusters = {}
         if target_step < 7:
-            state.newsletter_sections = {}
+            state.newsletter_section_text = {}
         if target_step < 9:
             state.final_newsletter = ""
 
@@ -143,6 +146,7 @@ class DirectStateAccess:
 
         self.save_state(state)
         print(f"Reset state to step {target_step}")
+
 
 def main():
     import sys
@@ -192,6 +196,7 @@ def main():
 
     else:
         print(f"Unknown command: {command}")
+
 
 if __name__ == "__main__":
     main()
