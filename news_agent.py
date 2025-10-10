@@ -2503,7 +2503,7 @@ class DraftSectionsTool:
                     continue
 
                 cat, content = result
-                state.newsletter_section_obj[cat] = content
+                # state.newsletter_section_obj[cat] = content
                 state.newsletter_section_text[cat] = content
                 sections_drafted += 1
 
@@ -2579,33 +2579,67 @@ class FinalizeNewsletterTool:
             if not state.newsletter_section_text:
                 return "❌ No drafted sections found to finalize. Please run step 8 first."
 
-            # Create the final newsletter by combining all sections
-            today = datetime.now().strftime("%B %d, %Y")
+            # Compile all sections into markdown string
+            # Group by category and count articles, sort by article count (descending)
+            cat_df = state.headline_df.groupby("cat") \
+                .count() \
+                .reset_index()[['cat', 'source']] \
+                .sort_values('source', ascending=False)
 
-            newsletter_content = f"# AI News Digest - {today}\n\n"
-            newsletter_content += "*Curated insights from the latest in artificial intelligence*\n\n"
-            newsletter_content += "---\n\n"
+            output_str = ""
+            for cat in cat_df["cat"]:
+                if cat != "Other":
+                    output_str += str(state.newsletter_section_text[cat]) + "\n\n"
 
-            # Add table of contents
-            newsletter_content += "## Table of Contents\n\n"
-            for i, section_name in enumerate(state.newsletter_section_text.keys(), 1):
-                newsletter_content += f"{i}. [{section_name}](#{section_name.lower().replace(' ', '-').replace('&', 'and')})\n"
-            newsletter_content += "\n---\n\n"
+            # Get draft_newsletter prompt from Langfuse
+            draft_newsletter_system_prompt, draft_newsletter_user_prompt, model = \
+                LangfuseClient().get_prompt("newsagent/draft_newsletter")
 
-            # Add each section content
-            for section_name, section_content_text in state.newsletter_section_text.items():
-                newsletter_content += section_content_text
-                newsletter_content += "\n---\n\n"
+            draft_newsletter_agent = LLMagent(
+                system_prompt=draft_newsletter_system_prompt,
+                user_prompt=draft_newsletter_user_prompt,
+                output_type=str,
+                model=model,
+                verbose=self.verbose,
+                logger=self.logger
+            )
 
-            # Add footer
-            newsletter_content += "## About This Newsletter\n\n"
-            newsletter_content += "This AI News Digest was automatically curated using our intelligent newsletter agent. "
-            newsletter_content += f"We analyzed {len(state.headline_data)} articles from {len(set(a.get('source', '') for a in state.headline_data))} sources "
-            newsletter_content += "to bring you the most relevant AI developments.\n\n"
-            newsletter_content += f"*Generated on {today}*\n"
+            # Apply prompt to generate final newsletter
+            newsletter_content = await draft_newsletter_agent.run_prompt(input_text=output_str)
 
             # Store the final newsletter
             state.final_newsletter = newsletter_content
+
+            # Send email with styled newsletter
+            try:
+                import markdown
+
+                today = datetime.now().strftime("%B %d, %Y")
+                subject = f"AI News Digest - {today}"
+
+                # Convert markdown to HTML
+                newsletter_html = markdown.markdown(newsletter_content, extensions=['extra', 'codehilite'])
+
+                # Apply HTML styling
+                html_content = f"""
+                <div style="max-width: 800px; margin: 0 auto; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
+                    <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 40px 20px; text-align: center; border-radius: 8px 8px 0 0;">
+                        <h1 style="color: white; margin: 0; font-size: 32px;">AI News Digest</h1>
+                        <p style="color: rgba(255,255,255,0.9); margin: 10px 0 0 0; font-size: 16px;">{today}</p>
+                    </div>
+                    <div style="background: #ffffff; padding: 30px; border-radius: 0 0 8px 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); line-height: 1.6; color: #333;">
+                        {newsletter_html}
+                    </div>
+                    <div style="text-align: center; padding: 20px; color: #666; font-size: 14px;">
+                        <p>Generated on {today} by AI Newsletter Agent</p>
+                    </div>
+                </div>
+                """
+
+                send_gmail(subject, html_content)
+                self.logger.info(f"Sent newsletter email with subject: {subject}")
+            except Exception as e:
+                self.logger.error(f"Failed to send newsletter email: {e}")
 
             # Calculate final stats
             newsletter_length = len(newsletter_content.split())

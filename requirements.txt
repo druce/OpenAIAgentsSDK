@@ -41,6 +41,7 @@ feedparser
 aiohttp
 newsapi-python
 trafilatura
+markdown
 
 chromadb
 
