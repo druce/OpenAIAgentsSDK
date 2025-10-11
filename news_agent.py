@@ -63,6 +63,9 @@ class SectionStoryLink(BaseModel):
 
 
 class SectionStory(BaseModel):
+    id: int = Field(description="Article ID for matching back to headline_df")
+    rating: float = Field(
+        description="Article quality rating (for filtering/sorting)")
     headline: str = Field(description="Summary of the story")
     links: List[SectionStoryLink] = Field(
         description="List of links related to this story")
@@ -438,7 +441,7 @@ class WorkflowStatusTool:
                 result += f"  Total articles: {len(state.headline_data)}\n"
                 result += f"  AI-related: {ai_related}\n"
                 result += f"  Clusters: {len(state.clusters)}\n"
-                result += f"  Sections: {len(state.newsletter_section_text)}"
+                result += f"  Sections: {len(state.newsletter_section_data)}"
 
             # Add intervention guidance if workflow is in error state
             if state.has_errors():
@@ -529,7 +532,7 @@ class StateInspectionTool:
             "",
             "PROCESSING RESULTS:",
             f"  Topic clusters: {len(state.clusters)} topics",
-            f"  Newsletter sections: {len(state.newsletter_section_text)} sections",
+            f"  Newsletter sections: {len(state.newsletter_section_data)} stories",
             f"  Final newsletter: {'Generated' if state.final_newsletter else 'Not created'}",
         ])
 
@@ -541,15 +544,18 @@ class StateInspectionTool:
             for topic, urls in state.clusters.items():
                 report_lines.append(f"  {topic}: {len(urls)} articles")
 
-        if state.newsletter_section_text:
+        if state.newsletter_section_data:
             report_lines.extend([
                 "",
                 "NEWSLETTER SECTIONS:",
             ])
-            for section_name, section_content in state.newsletter_section_text.items():
-                word_count = len(section_content.split())
+            # Group by category and count stories
+            section_df = state.newsletter_section_df
+            for cat in section_df['cat'].unique():
+                cat_stories = section_df[section_df['cat'] == cat]
+                story_count = len(cat_stories)
                 report_lines.append(
-                    f"  {section_name}: {word_count} words")
+                    f"  {cat}: {story_count} stories")
 
         if state.final_newsletter:
             newsletter_words = len(state.final_newsletter.split())
@@ -2278,8 +2284,8 @@ class SelectSectionsTool:
         # Check if step already completed via persistent state
         step_name = "step_07_select_sections"
         if state.is_step_complete(step_name):
-            section_count = len(state.newsletter_section_text)
-            return f"Step 7 already completed! Created {section_count} newsletter sections."
+            section_count = len(state.newsletter_section_data)
+            return f"Step 7 already completed! Created {section_count} newsletter section stories."
 
         # Check if step 6 is completed
         if not state.is_step_complete("step_06_cluster_by_topic"):
@@ -2582,10 +2588,11 @@ class DraftSectionsTool:
 
         # Check if step already completed via persistent state
         if state.is_step_complete(step_name):
-            section_count = len(state.newsletter_section_text)
-            total_words = sum(len(content.split())
-                              for content in state.newsletter_section_text.values())
-            return f"Step 8 already completed! Drafted {section_count} sections with {total_words} total words."
+            section_count = len(state.newsletter_section_data)
+            # Count unique categories
+            section_df = state.newsletter_section_df
+            unique_sections = len(section_df['cat'].unique())
+            return f"Step 8 already completed! Drafted {unique_sections} sections with {section_count} total stories."
 
         # Check if step 7 is completed
         if not state.is_step_complete("step_07_select_sections"):
@@ -2663,15 +2670,14 @@ class DraftSectionsTool:
             # Use selected stories for section drafting
             headline_df = selected_df.copy()
 
-            # Get unique categories
+            # Get unique categories (including "Other")
             categories = headline_df['cat'].unique().tolist()
-            categories = [cat for cat in categories if cat != "Other"]
 
             if not categories:
                 return "❌ No categories found in selected headlines."
 
             self.logger.info(
-                f"Step 8b: Drafting sections for {len(categories)} categories from selected stories")
+                f"Step 8b: Drafting sections for {len(categories)} categories (including Other) from selected stories")
 
             # Create write_section agent
             write_section_system_prompt, write_section_user_prompt, model = \
@@ -2692,8 +2698,9 @@ class DraftSectionsTool:
                 cat_df = headline_df.loc[headline_df["cat"] == cat].sort_values(
                     "rating", ascending=False)
 
-                input_text = cat_df[["rating", "short_summary", "site_name", "final_url"]].rename(columns={"short_summary": "summary", "final_url": "url"}).to_json(
-                    orient="records")
+                input_text = cat_df[["id", "rating", "short_summary", "site_name", "final_url"]].rename(
+                    columns={"short_summary": "summary", "final_url": "url"}
+                ).to_json(orient="records")
 
                 # Call the LLM to draft the section
                 response = await agent.run_prompt(input_text=input_text)
@@ -2705,24 +2712,64 @@ class DraftSectionsTool:
                            for cat in categories]
             draft_results = await asyncio.gather(*draft_tasks, return_exceptions=True)
 
-            # Filter out exceptions and store results
+            # Store Section objects in local dict
+            newsletter_section_obj = {}
             sections_drafted = 0
             for result in draft_results:
                 if isinstance(result, Exception):
                     self.logger.error(f"Error drafting section: {result}")
                     continue
 
-                cat, content = result
-                # state.newsletter_section_obj[cat] = content
-                state.newsletter_section_text[cat] = str(content)
+                cat, section = result
+                newsletter_section_obj[cat] = section
                 sections_drafted += 1
+
+            self.logger.info(f"Drafted {sections_drafted} sections, now flattening to DataFrame")
+
+            # Flatten section objects to DataFrame
+            section_list = []
+            for cat, section in newsletter_section_obj.items():
+                for story in section.headlines:
+                    # Convert links to markdown string
+                    links_md = " ".join([f"[{link.site_name}]({link.url})" for link in story.links])
+
+                    section_list.append({
+                        'cat': cat,
+                        'section_title': section.section_title,
+                        'id': story.id,
+                        'headline': story.headline,
+                        'rating': story.rating,
+                        'prune': story.prune,
+                        'links': links_md
+                    })
+
+            # Create DataFrame
+            newsletter_section_df = pd.DataFrame(section_list)
+
+            if not newsletter_section_df.empty:
+                # Reassign pruned stories to "Other" category
+                newsletter_section_df.loc[newsletter_section_df['prune'] == True, 'cat'] = 'Other'
+
+                # Update section_title for "Other" category
+                newsletter_section_df.loc[newsletter_section_df['cat'] == 'Other', 'section_title'] = 'Other News'
+
+                pruned_count = newsletter_section_df['prune'].sum()
+                self.logger.info(f"Reassigned {pruned_count} pruned stories to Other section")
+
+                # Store in state
+                state.newsletter_section_data = newsletter_section_df.to_dict('records')
+
+                self.logger.info(f"Created newsletter_section_df with {len(newsletter_section_df)} stories across {newsletter_section_df['cat'].nunique()} categories")
+            else:
+                self.logger.warning("No stories in newsletter sections")
+                state.newsletter_section_data = []
 
             # Complete the step
             state.complete_step(step_name)
 
-            total_words = sum(len(content.split())
-                              for content in state.newsletter_section_text.values())
-            state.workflow_status_message = f"Drafted {sections_drafted} sections with {total_words} total words"
+            total_stories = len(newsletter_section_df) if not newsletter_section_df.empty else 0
+            total_categories = newsletter_section_df['cat'].nunique() if not newsletter_section_df.empty else 0
+            state.workflow_status_message = f"Drafted {total_stories} stories across {total_categories} sections"
 
             if self.verbose:
                 print(f"✅ Completed Step 8: {state.workflow_status_message}")
@@ -2769,7 +2816,7 @@ class FinalizeNewsletterTool:
         if state.is_step_complete(step_name):
             newsletter_length = len(
                 state.final_newsletter.split()) if state.final_newsletter else 0
-            sections_count = len(state.newsletter_section_text)
+            sections_count = len(state.newsletter_section_df['cat'].unique()) if state.newsletter_section_data else 0
             return f"Step 9 already completed! Newsletter finalized with {sections_count} sections and {newsletter_length} words."
 
         # Check if step 8 is completed
@@ -2786,31 +2833,46 @@ class FinalizeNewsletterTool:
             print(f"▶ Starting Step 9: {step_name}")
 
             # Get drafted sections from persistent state
-            if not state.newsletter_section_text:
+            if not state.newsletter_section_data:
                 return "❌ No drafted sections found to finalize. Please run step 8 first."
 
             # ============ Step 9a: Assemble Newsletter from Sections ============
-            self.logger.info(
-                "Step 9a: Assembling newsletter from section drafts")
+            self.logger.info("Step 9a: Assembling newsletter from section drafts")
 
-            # Compile all sections into markdown string
-            # Group by category and count articles, sort by avg rating (descending)
-            headline_df = state.headline_df
-            cat_df = headline_df.groupby("cat").agg({
+            # Get newsletter section DataFrame
+            newsletter_section_df = state.newsletter_section_df
+
+            # Group by category and calculate stats, sort by avg rating (descending)
+            cat_df = newsletter_section_df.groupby(["cat", "section_title"]).agg({
                 'rating': 'mean',  # average rating per category
-                'source': 'count'   # story count
-            }).sort_values('rating', ascending=False).reset_index()
+                'id': 'count'      # story count
+            }).rename(columns={'id': 'count'}).sort_values('rating', ascending=False).reset_index()
 
             self.logger.info(f"Assembling {len(cat_df)} categories")
 
-            # Concatenate section drafts (exclude "Other" for now)
+            # Build markdown sections (exclude "Other" for now)
             sections_md = []
             for _, row in cat_df.iterrows():
                 cat = row['cat']
-                if cat != "Other" and cat in state.newsletter_section_text:
-                    sections_md.append(str(state.newsletter_section_text[cat]))
+                if cat == "Other":
+                    continue
+
+                section_title = row['section_title']
+                # Get stories for this category, sorted by rating (descending), exclude pruned
+                cat_stories = newsletter_section_df[
+                    (newsletter_section_df['cat'] == cat) &
+                    (newsletter_section_df['prune'] == False)
+                ].sort_values('rating', ascending=False)
+
+                # Build markdown section
+                section_md = f"## {section_title}\n\n"
+                for _, story in cat_stories.iterrows():
+                    section_md += f"- {story['headline']} - {story['links']}\n"
+
+                sections_md.append(section_md)
 
             input_sections = "\n\n".join(sections_md)
+            self.logger.info(f"Compiled {len(sections_md)} sections into markdown input")
 
             # Get assemble_newsletter prompt from Langfuse
             assemble_system_prompt, assemble_user_prompt, model = \
@@ -2974,7 +3036,7 @@ class FinalizeNewsletterTool:
                 self.logger.error(f"Failed to send newsletter email: {e}")
 
             # Calculate final stats
-            sections_included = len(state.newsletter_section_text)
+            sections_included = newsletter_section_df['cat'].nunique() if not newsletter_section_df.empty else 0
             final_quality_score = critique.overall_score if 'critique' in locals() else 8.0
 
             # Complete the step and mark workflow as complete
@@ -3217,7 +3279,7 @@ Remember: Your state is persistent. You can safely resume from any point. Never 
                 "",
                 "PROCESSING RESULTS:",
                 f"  Topic clusters: {len(self.state.clusters)}",
-                f"  Newsletter sections: {len(self.state.newsletter_section_text)}",
+                f"  Newsletter sections: {len(self.state.newsletter_section_data)} stories",
                 f"  Final newsletter: {'Generated' if self.state.final_newsletter else 'Not created'}",
             ])
 
