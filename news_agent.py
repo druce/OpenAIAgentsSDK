@@ -10,7 +10,7 @@ Each step updates the workflow status and serializes the state.
 from agents import (Agent, Runner, RunContextWrapper, FunctionTool,
                     SQLiteSession, set_default_openai_client)
 from do_rating import fn_rate_articles, bradley_terry
-from do_cluster import do_clustering
+from do_cluster import do_clustering, _get_embeddings_df
 from do_dedupe import process_dataframe_with_filtering
 from llm import LLMagent, LangfuseClient
 from utilities import send_gmail
@@ -38,8 +38,9 @@ import tldextract
 
 import shutil
 # import pickle
-# import numpy as np
+import numpy as np
 import pandas as pd
+from sklearn.metrics.pairwise import cosine_similarity
 # from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
 # import hdbscan
 
@@ -52,7 +53,7 @@ from pydantic import BaseModel, Field
 from bs4 import BeautifulSoup
 
 
-# Pydantic models for section drafting
+# Pydantic models for structured output
 class SectionStoryLink(BaseModel):
     url: str = Field(description="URL of the article")
     site_name: str = Field(description="Name of the website/source")
@@ -61,7 +62,7 @@ class SectionStoryLink(BaseModel):
         return f"[{self.site_name}]({self.url})"
 
 
-class Story(BaseModel):
+class SectionStory(BaseModel):
     headline: str = Field(description="Summary of the story")
     links: List[SectionStoryLink] = Field(
         description="List of links related to this story")
@@ -73,16 +74,13 @@ class Story(BaseModel):
 
 class Section(BaseModel):
     section_title: str = Field(description="Title of the newsletter section")
-    headlines: List[Story] = Field(
+    headlines: List[SectionStory] = Field(
         description="List of stories in this section")
 
     def __str__(self):
         return f"## {self.section_title}\n\n" + "\n".join(
             [str(h) for h in self.headlines if not h.prune]
         )
-
-
-# Pydantic models for structured output
 
 
 class ArticleSummary(BaseModel):
@@ -196,6 +194,161 @@ class DistilledStoryList(BaseModel):
     """List of DistilledStory for batch processing"""
     results_list: list[DistilledStory] = Field(
         description="List of distilled stories")
+
+
+# Newsletter critique models for quality evaluation
+
+class DuplicateIssue(BaseModel):
+    """Identified duplicate or near-duplicate story across sections"""
+    headline_1: str = Field(description="First headline text")
+    section_1: str = Field(description="Section containing first headline")
+    headline_2: str = Field(description="Second headline text")
+    section_2: str = Field(description="Section containing second headline")
+    explanation: str = Field(description="Why these are considered duplicates")
+
+
+class HeadlineIssue(BaseModel):
+    """Quality issue with a specific headline"""
+    headline: str = Field(description="The problematic headline")
+    section: str = Field(description="Section containing this headline")
+    issue_type: str = Field(
+        description="Type of issue: too_long, passive_voice, unclear, missing_specifics, jargon"
+    )
+    suggestion: str = Field(
+        description="Specific suggestion to improve this headline")
+
+
+class SectionIssue(BaseModel):
+    """Quality issue with a section"""
+    section_title: str = Field(description="Title of the problematic section")
+    issue_type: str = Field(
+        description="Type of issue: too_small, too_large, incoherent, title_mismatch"
+    )
+    suggestion: str = Field(
+        description="Specific suggestion to improve this section")
+
+
+class NewsletterCritique(BaseModel):
+    """Comprehensive quality evaluation of newsletter draft"""
+    overall_score: float = Field(
+        description="Overall quality score 0-10 (9-10 excellent, 8-9 good, 7-8 acceptable, <7 needs work)"
+    )
+
+    # Specific issues (empty lists if none found)
+    duplicate_issues: List[DuplicateIssue] = Field(
+        default_factory=list,
+        description="List of duplicate or near-duplicate stories found"
+    )
+    headline_issues: List[HeadlineIssue] = Field(
+        default_factory=list,
+        description="List of headline quality issues"
+    )
+    section_issues: List[SectionIssue] = Field(
+        default_factory=list,
+        description="List of section quality issues"
+    )
+
+    # Dimension scores (0-10 each)
+    theme_coherence: float = Field(
+        description="0-10: How well H1 title reflects content and sections cluster thematically"
+    )
+    headline_quality: float = Field(
+        description="0-10: Clarity, conciseness, specificity, active voice"
+    )
+    source_quality: float = Field(
+        description="0-10: Use of authoritative sources (Reuters, Bloomberg, FT, etc.)"
+    )
+    format_compliance: float = Field(
+        description="0-10: Adherence to markdown format rules"
+    )
+
+    # Actionable feedback
+    recommendations: List[str] = Field(
+        description="Top 3-5 specific, actionable improvements needed",
+        default_factory=list
+    )
+    should_iterate: bool = Field(
+        description="True if score < 8.5 and issues are fixable through iteration"
+    )
+
+
+# MMR Selection Function
+
+def mmr_selection(
+    df: pd.DataFrame,
+    embeddings: np.ndarray,
+    n: int = 100,
+    lambda_param: float = 0.5
+) -> pd.DataFrame:
+    """
+    Select diverse, high-quality stories using Max Marginal Relevance.
+
+    Balances story quality (rating) with diversity (embedding similarity)
+    to avoid redundant coverage of the same story angles.
+
+    Args:
+        df: DataFrame with 'rating' column and matching embedding indices
+        embeddings: numpy array of embeddings (shape: [len(df), embedding_dim])
+        n: Number of stories to select
+        lambda_param: Tradeoff between relevance (rating) and diversity
+                     1.0 = pure rating, 0.0 = pure diversity, 0.5 = balanced
+
+    Returns:
+        DataFrame subset of n selected stories with maximum rating and diversity
+    """
+    if len(df) <= n:
+        return df
+
+    # Normalize ratings to 0-1 scale
+    max_rating = df['rating'].max()
+    min_rating = df['rating'].min()
+    rating_range = max_rating - min_rating
+
+    if rating_range == 0:
+        normalized_ratings = pd.Series([0.5] * len(df), index=df.index)
+    else:
+        normalized_ratings = (df['rating'] - min_rating) / rating_range
+
+    selected_indices = []
+    remaining_indices = list(df.index)
+
+    # Start with highest rated story
+    first_idx = df['rating'].idxmax()
+    selected_indices.append(first_idx)
+    remaining_indices.remove(first_idx)
+
+    # Get embedding index mapping (df.index might not be 0..n-1)
+    idx_to_embedding_pos = {idx: pos for pos, idx in enumerate(df.index)}
+
+    while len(selected_indices) < n and remaining_indices:
+        mmr_scores = []
+
+        for idx in remaining_indices:
+            # Relevance: normalized rating
+            relevance = normalized_ratings.loc[idx]
+
+            # Diversity: 1 - max_similarity to already selected
+            embedding_pos = idx_to_embedding_pos[idx]
+            selected_positions = [idx_to_embedding_pos[i]
+                                  for i in selected_indices]
+
+            similarities = cosine_similarity(
+                embeddings[embedding_pos:embedding_pos+1],
+                embeddings[selected_positions]
+            )
+            max_similarity = similarities.max()
+            diversity = 1 - max_similarity
+
+            # Combined MMR score
+            mmr = lambda_param * relevance + (1 - lambda_param) * diversity
+            mmr_scores.append((idx, mmr))
+
+        # Select highest MMR
+        best_idx = max(mmr_scores, key=lambda x: x[1])[0]
+        selected_indices.append(best_idx)
+        remaining_indices.remove(best_idx)
+
+    return df.loc[selected_indices]
 
 
 def setup_logging(session_id: str = "default", db_path: str = LOGDB) -> logging.Logger:
@@ -2453,15 +2606,72 @@ class DraftSectionsTool:
             if headline_df.empty:
                 return "❌ No headlines found to draft sections. Please run previous steps first."
 
+            # ============ Step 8a: Story Selection with Rating-Based Tiers ============
+            self.logger.info(
+                f"Step 8a: Selecting stories from {len(headline_df)} total")
+
+            # Tier 1: Must-include high-impact stories (rating > 8.0)
+            must_include = headline_df.loc[headline_df['rating'] > 8.0].copy()
+            self.logger.info(
+                f"{len(must_include)} must-include stories with rating > 8")
+
+            # Tier 2: Stories with rating <= 8.0
+            candidates = headline_df.loc[headline_df['rating'] <= 8.0].copy()
+            self.logger.info(f"{len(candidates)} stories with rating <= 8")
+            target_tier2 = 100 - len(must_include)
+
+            if len(candidates) > 0:
+                # Generate embeddings for diversity selection
+                candidates_for_embed = candidates.copy()
+                # overkill
+                candidates_for_embed['short_summary'] = candidates_for_embed['short_summary'].fillna(
+                    '')
+                candidates_for_embed.loc[candidates_for_embed['short_summary'] ==
+                                         '', 'short_summary'] = candidates_for_embed['summary'].fillna('')
+                candidates_for_embed.loc[candidates_for_embed['short_summary'] ==
+                                         '', 'short_summary'] = candidates_for_embed['title'].fillna('')
+
+                embedding_df = await _get_embeddings_df(candidates_for_embed)
+
+                if len(embedding_df) > 0:
+                    # Convert embedding df to numpy array
+                    embeddings = embedding_df.values
+                    # Select diverse tier 2 stories using MMR
+                    tier2_selected = mmr_selection(
+                        df=candidates,
+                        embeddings=embeddings,
+                        n=target_tier2,
+                        lambda_param=0.5  # 50% rating, 50% diversity
+                    )
+                    self.logger.info(
+                        f"Selected {len(tier2_selected)} diverse Tier 2 stories via MMR")
+                else:
+                    # Fallback: just take top-rated if embedding fails
+                    tier2_selected = candidates.nlargest(
+                        target_tier2, 'rating')
+                    self.logger.warning(
+                        "Embedding failed, using top-rated stories for Tier 2")
+            else:
+                tier2_selected = pd.DataFrame()
+
+            # Combine tiers
+            selected_df = pd.concat(
+                [must_include, tier2_selected])
+            self.logger.info(
+                f"Total selected stories: {len(selected_df)} (target: 100)")
+
+            # Use selected stories for section drafting
+            headline_df = selected_df.copy()
+
             # Get unique categories
             categories = headline_df['cat'].unique().tolist()
             categories = [cat for cat in categories if cat != "Other"]
 
             if not categories:
-                return "❌ No categories found in headlines. Please run step 7 first."
+                return "❌ No categories found in selected headlines."
 
             self.logger.info(
-                f"Drafting sections for {len(categories)} categories")
+                f"Step 8b: Drafting sections for {len(categories)} categories from selected stories")
 
             # Create write_section agent
             write_section_system_prompt, write_section_user_prompt, model = \
@@ -2504,7 +2714,7 @@ class DraftSectionsTool:
 
                 cat, content = result
                 # state.newsletter_section_obj[cat] = content
-                state.newsletter_section_text[cat] = content
+                state.newsletter_section_text[cat] = str(content)
                 sections_drafted += 1
 
             # Complete the step
@@ -2579,36 +2789,154 @@ class FinalizeNewsletterTool:
             if not state.newsletter_section_text:
                 return "❌ No drafted sections found to finalize. Please run step 8 first."
 
+            # ============ Step 9a: Assemble Newsletter from Sections ============
+            self.logger.info(
+                "Step 9a: Assembling newsletter from section drafts")
+
             # Compile all sections into markdown string
-            # Group by category and count articles, sort by article count (descending)
-            cat_df = state.headline_df.groupby("cat") \
-                .count() \
-                .reset_index()[['cat', 'source']] \
-                .sort_values('source', ascending=False)
+            # Group by category and count articles, sort by avg rating (descending)
+            headline_df = state.headline_df
+            cat_df = headline_df.groupby("cat").agg({
+                'rating': 'mean',  # average rating per category
+                'source': 'count'   # story count
+            }).sort_values('rating', ascending=False).reset_index()
 
-            output_str = ""
-            for cat in cat_df["cat"]:
-                if cat != "Other":
-                    output_str += str(state.newsletter_section_text[cat]) + "\n\n"
+            self.logger.info(f"Assembling {len(cat_df)} categories")
 
-            # Get draft_newsletter prompt from Langfuse
-            draft_newsletter_system_prompt, draft_newsletter_user_prompt, model = \
-                LangfuseClient().get_prompt("newsagent/draft_newsletter")
+            # Concatenate section drafts (exclude "Other" for now)
+            sections_md = []
+            for _, row in cat_df.iterrows():
+                cat = row['cat']
+                if cat != "Other" and cat in state.newsletter_section_text:
+                    sections_md.append(str(state.newsletter_section_text[cat]))
 
-            draft_newsletter_agent = LLMagent(
-                system_prompt=draft_newsletter_system_prompt,
-                user_prompt=draft_newsletter_user_prompt,
+            input_sections = "\n\n".join(sections_md)
+
+            # Get assemble_newsletter prompt from Langfuse
+            assemble_system_prompt, assemble_user_prompt, model = \
+                LangfuseClient().get_prompt("newsagent/assemble_newsletter")
+
+            assemble_agent = LLMagent(
+                system_prompt=assemble_system_prompt,
+                user_prompt=assemble_user_prompt,
                 output_type=str,
                 model=model,
                 verbose=self.verbose,
                 logger=self.logger
             )
 
-            # Apply prompt to generate final newsletter
-            newsletter_content = await draft_newsletter_agent.run_prompt(input_text=output_str)
+            # Assemble initial newsletter draft
+            draft_newsletter = await assemble_agent.run_prompt(input_text=input_sections)
+            self.logger.info(
+                f"Assembled initial draft ({len(draft_newsletter.split())} words)")
+
+            # ============ Step 9b: Critic-Optimizer Loop ============
+            self.logger.info("Step 9b: Starting critic-optimizer loop")
+
+            # Create critic agent
+            critique_system_prompt, critique_user_prompt, critique_model = \
+                LangfuseClient().get_prompt("newsagent/critique_newsletter")
+
+            critic_agent = LLMagent(
+                system_prompt=critique_system_prompt,
+                user_prompt=critique_user_prompt,
+                output_type=NewsletterCritique,
+                model=critique_model,
+                verbose=self.verbose,
+                logger=self.logger
+            )
+
+            # Create optimizer agent
+            optimize_system_prompt, optimize_user_prompt, optimize_model = \
+                LangfuseClient().get_prompt("newsagent/optimize_newsletter")
+
+            optimizer_agent = LLMagent(
+                system_prompt=optimize_system_prompt,
+                user_prompt=optimize_user_prompt,
+                output_type=str,
+                model=optimize_model,
+                verbose=self.verbose,
+                logger=self.logger
+            )
+
+            # Critic-optimizer loop (max 3 iterations)
+            max_iterations = 3
+            quality_threshold = 8.5
+            current_draft = draft_newsletter
+
+            for iteration in range(1, max_iterations + 1):
+                self.logger.info(f"Iteration {iteration}/{max_iterations}")
+
+                # Critique current draft
+                critique = await critic_agent.run_prompt(newsletter=current_draft)
+
+                self.logger.info(
+                    f"  Overall score: {critique.overall_score:.1f}/10")
+                self.logger.info(
+                    f"  Theme coherence: {critique.theme_coherence:.1f}/10")
+                self.logger.info(
+                    f"  Headline quality: {critique.headline_quality:.1f}/10")
+                self.logger.info(
+                    f"  Source quality: {critique.source_quality:.1f}/10")
+                self.logger.info(f"  Issues found: {len(critique.duplicate_issues)} duplicates, "
+                                 f"{len(critique.headline_issues)} headline issues, "
+                                 f"{len(critique.section_issues)} section issues")
+
+                # Check if quality threshold met
+                if critique.overall_score >= quality_threshold:
+                    self.logger.info(
+                        f"✅ Quality threshold achieved ({critique.overall_score:.1f} >= {quality_threshold})")
+                    current_draft = current_draft  # Keep current draft
+                    break
+
+                if not critique.should_iterate:
+                    self.logger.info("Critic recommends stopping iteration")
+                    break
+
+                # Optimize based on critique
+                self.logger.info(
+                    f"  Applying {len(critique.recommendations)} recommendations")
+
+                current_draft = await optimizer_agent.run_prompt(
+                    newsletter=current_draft,
+                    critique=critique.model_dump_json(indent=2)
+                )
+
+                self.logger.info(
+                    f"  Optimized draft ({len(current_draft.split())} words)")
 
             # Store the final newsletter
-            state.final_newsletter = newsletter_content
+            state.final_newsletter = current_draft
+            newsletter_length = len(current_draft.split())
+
+            self.logger.info(f"Final newsletter: {newsletter_length} words")
+
+            # ============ Step 9c: Validate and Send ============
+            self.logger.info("Step 9c: Validating and sending newsletter")
+
+            # Validation checks
+            import re
+
+            validation_errors = []
+
+            # Check H1 present
+            if not re.search(r'^# .+', current_draft, re.MULTILINE):
+                validation_errors.append("Missing H1 title")
+
+            # Count sections (## headers)
+            sections = re.findall(r'^## (.+)', current_draft, re.MULTILINE)
+            if not (8 <= len(sections) <= 16):
+                validation_errors.append(
+                    f"Section count {len(sections)} not in range 8-16")
+
+            # Check "Other News" is last (if present)
+            if sections and "Other News" in sections and sections[-1] != "Other News":
+                validation_errors.append(
+                    "'Other News' should be final section")
+
+            if validation_errors:
+                self.logger.warning(
+                    f"Validation warnings: {'; '.join(validation_errors)}")
 
             # Send email with styled newsletter
             try:
@@ -2618,7 +2946,10 @@ class FinalizeNewsletterTool:
                 subject = f"AI News Digest - {today}"
 
                 # Convert markdown to HTML
-                newsletter_html = markdown.markdown(newsletter_content, extensions=['extra', 'codehilite'])
+                newsletter_html = markdown.markdown(
+                    current_draft,
+                    extensions=['extra', 'codehilite']
+                )
 
                 # Apply HTML styling
                 html_content = f"""
@@ -2637,23 +2968,14 @@ class FinalizeNewsletterTool:
                 """
 
                 send_gmail(subject, html_content)
-                self.logger.info(f"Sent newsletter email with subject: {subject}")
+                self.logger.info(
+                    f"✅ Sent newsletter email with subject: {subject}")
             except Exception as e:
                 self.logger.error(f"Failed to send newsletter email: {e}")
 
             # Calculate final stats
-            newsletter_length = len(newsletter_content.split())
-            sections_included = len(drafted_sections)
-
-            # Mock quality score based on content metrics
-            base_quality = 7.0
-            if sections_included >= 4:
-                base_quality += 0.5
-            if newsletter_length >= 2000:
-                base_quality += 0.5
-            if newsletter_length >= 3000:
-                base_quality += 0.5
-            final_quality_score = min(10.0, base_quality)
+            sections_included = len(state.newsletter_section_text)
+            final_quality_score = critique.overall_score if 'critique' in locals() else 8.0
 
             # Complete the step and mark workflow as complete
             state.complete_step(step_name)
@@ -2662,9 +2984,11 @@ class FinalizeNewsletterTool:
                 print(
                     f"✅ Completed Step 9: Finalized newsletter ({newsletter_length} words)")
 
-            status_msg = f"🎉 Step 9 {step_name} completed successfully! Newsletter finalized with {sections_included} sections and {newsletter_length} words."
-            status_msg += f"\n⭐ Quality score: {final_quality_score:.1f}/10"
-            status_msg += "\n📰 Complete newsletter stored in persistent state"
+            status_msg = f"🎉 Step 9 {step_name} completed successfully!"
+            status_msg += f"\n📊 {sections_included} sections, {newsletter_length} words"
+            status_msg += f"\n⭐ Final quality score: {final_quality_score:.1f}/10"
+            status_msg += f"\n🔄 Completed {iteration} critic-optimizer iteration(s)"
+            status_msg += "\n📰 Newsletter stored in persistent state and emailed"
             status_msg += "\n✅ Workflow complete! All 9 steps finished successfully."
 
             # Serialize state after completing step
@@ -2673,6 +2997,7 @@ class FinalizeNewsletterTool:
 
         except Exception as e:
             state.error_step(step_name, str(e))
+            self.logger.error(f"Step 9 failed with error: {e}", exc_info=True)
             return f"❌ Step 9 failed: {str(e)}"
 
     def create_tool(self) -> FunctionTool:
