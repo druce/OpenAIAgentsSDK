@@ -6,27 +6,13 @@ This agent implements all 9 workflow steps defined in the WorkflowStatus object.
 Each step updates the workflow status and serializes the state.
 
 """
-
-from agents import (Agent, Runner, RunContextWrapper, FunctionTool,
-                    SQLiteSession, set_default_openai_client)
-from do_rating import fn_rate_articles, bradley_terry
-from do_cluster import do_clustering, _get_embeddings_df
-from do_dedupe import process_dataframe_with_filtering
-from llm import LLMagent, LangfuseClient
-from utilities import send_gmail
-from scrape import scrape_urls_concurrent, normalize_html
-from fetch import Fetcher
-from db import Url, Site
-from log_handler import SQLiteLogHandler
-from newsletter_state import NewsletterAgentState
-from config import CANONICAL_TOPICS, DOWNLOAD_DIR, PAGES_DIR, TEXT_DIR, NEWSAGENTDB, LOGDB, DEFAULT_CONCURRENCY
-from openai import AsyncOpenAI
 import asyncio
 import time
 import logging
 import os
 import json
 import dotenv
+
 # import random
 from datetime import datetime
 from pathlib import Path
@@ -51,6 +37,21 @@ from pydantic import BaseModel, Field
 # from email.utils import parsedate_to_datetime
 # from urllib.parse import urlparse
 from bs4 import BeautifulSoup
+
+from openai import AsyncOpenAI
+from agents import (Agent, Runner, RunContextWrapper, FunctionTool,
+                    SQLiteSession, set_default_openai_client)
+from do_rating import fn_rate_articles, bradley_terry
+from do_cluster import do_clustering, _get_embeddings_df
+from do_dedupe import process_dataframe_with_filtering
+from llm import LLMagent, LangfuseClient
+from utilities import send_gmail
+from scrape import scrape_urls_concurrent, normalize_html
+from fetch import Fetcher
+from db import Url, Site
+from log_handler import SQLiteLogHandler
+from newsletter_state import NewsletterAgentState
+from config import CANONICAL_TOPICS, DOWNLOAD_DIR, PAGES_DIR, TEXT_DIR, NEWSAGENTDB, LOGDB, DEFAULT_CONCURRENCY
 
 
 # Pydantic models for structured output
@@ -252,17 +253,20 @@ class NewsletterCritique(BaseModel):
     )
 
     # Dimension scores (0-10 each)
-    theme_coherence: float = Field(
-        description="0-10: How well H1 title reflects content and sections cluster thematically"
+    h1_quality: float = Field(
+        description="0-10: H1 title is factual, specific, captures 2-3 themes, 6-12 words, active voice"
+    )
+    section_quality: float = Field(
+        description="0-10: Sections have 2-7 stories, thematic coherence, creative titles, natural flow"
     )
     headline_quality: float = Field(
-        description="0-10: Clarity, conciseness, specificity, active voice"
+        description="0-10: Headlines are 8-15 words, active voice, clear, specific, no redundancy"
     )
-    source_quality: float = Field(
-        description="0-10: Use of authoritative sources (Reuters, Bloomberg, FT, etc.)"
+    story_selection: float = Field(
+        description="0-10: No weak stories (all rating >= 5.5), no duplicates, high-value prioritized"
     )
     format_compliance: float = Field(
-        description="0-10: Adherence to markdown format rules"
+        description="0-10: Proper markdown, 8-16 sections, bullets with links, consistent formatting"
     )
 
     # Actionable feedback
@@ -271,7 +275,69 @@ class NewsletterCritique(BaseModel):
         default_factory=list
     )
     should_iterate: bool = Field(
-        description="True if score < 8.5 and issues are fixable through iteration"
+        description="True if score < 8.0 and issues are fixable through iteration"
+    )
+
+
+# Section-level critique models for Step 9a
+
+class SectionItemAction(BaseModel):
+    """Action to take on a specific story within a section"""
+    id: int = Field(description="Story ID from newsletter_section_df")
+    action: str = Field(
+        description="Action: 'keep', 'drop', 'rewrite', 'move'"
+    )
+    reason: str = Field(description="Why this action is recommended")
+    rewritten_headline: Optional[str] = Field(
+        default=None,
+        description="New headline text if action=='rewrite'"
+    )
+    target_category: Optional[str] = Field(
+        default=None,
+        description="Target category name if action=='move'"
+    )
+
+
+class SectionCritique(BaseModel):
+    """Quality critique for a single newsletter section"""
+    section_name: str = Field(description="Category name being critiqued")
+    section_title: str = Field(description="Section title")
+
+    overall_coherence: float = Field(
+        description="0-10: How well stories fit together thematically"
+    )
+    overall_quality: float = Field(
+        description="0-10: Overall section quality (considering ratings, headlines, coherence)"
+    )
+
+    should_split: bool = Field(
+        description="True if section is too heterogeneous and should be split"
+    )
+    split_recommendation: Optional[str] = Field(
+        default=None,
+        description="Explanation of how to split if should_split==True"
+    )
+
+    item_actions: List[SectionItemAction] = Field(
+        description="Recommended action for each story in section",
+        default_factory=list
+    )
+
+    summary_notes: str = Field(
+        description="Overall assessment of section strengths and weaknesses"
+    )
+
+    should_iterate: bool = Field(
+        description="True if changes needed and section should be re-critiqued"
+    )
+
+
+class OptimizedSection(BaseModel):
+    """Optimized section after applying critique recommendations"""
+    section_name: str = Field(description="Category name")
+    section_title: str = Field(description="Section title (may be updated)")
+    stories: List[Dict[str, Any]] = Field(
+        description="List of story dicts with keys: id, headline, rating, links"
     )
 
 
@@ -394,7 +460,8 @@ def setup_logging(session_id: str = "default", db_path: str = LOGDB) -> logging.
 async def mycreate_task(delay_index: int, coro, delay_seconds: float = 0.1):
     """
     Create a task with a staggered delay based on index.
-    was seeing some timeout errors, so added this to stagger the tasks
+    was seeing some timeout errors (probably due to langfuse proxy + maybe slower responses API)
+    so added this to stagger the tasks
     not currently using it, wraps tasks in a short delay to stagger them
 
     Args:
@@ -2724,14 +2791,16 @@ class DraftSectionsTool:
                 newsletter_section_obj[cat] = section
                 sections_drafted += 1
 
-            self.logger.info(f"Drafted {sections_drafted} sections, now flattening to DataFrame")
+            self.logger.info(
+                f"Drafted {sections_drafted} sections, now flattening to DataFrame")
 
             # Flatten section objects to DataFrame
             section_list = []
             for cat, section in newsletter_section_obj.items():
                 for story in section.headlines:
                     # Convert links to markdown string
-                    links_md = " ".join([f"[{link.site_name}]({link.url})" for link in story.links])
+                    links_md = " ".join(
+                        [f"[{link.site_name}]({link.url})" for link in story.links])
 
                     section_list.append({
                         'cat': cat,
@@ -2748,18 +2817,150 @@ class DraftSectionsTool:
 
             if not newsletter_section_df.empty:
                 # Reassign pruned stories to "Other" category
-                newsletter_section_df.loc[newsletter_section_df['prune'] == True, 'cat'] = 'Other'
+                newsletter_section_df.loc[newsletter_section_df['prune'],
+                                          'cat'] = 'Other'
 
                 # Update section_title for "Other" category
-                newsletter_section_df.loc[newsletter_section_df['cat'] == 'Other', 'section_title'] = 'Other News'
+                newsletter_section_df.loc[newsletter_section_df['cat']
+                                          == 'Other', 'section_title'] = 'Other News'
 
                 pruned_count = newsletter_section_df['prune'].sum()
-                self.logger.info(f"Reassigned {pruned_count} pruned stories to Other section")
+                self.logger.info(
+                    f"Reassigned {pruned_count} pruned stories to Other section")
 
                 # Store in state
-                state.newsletter_section_data = newsletter_section_df.to_dict('records')
+                state.newsletter_section_data = newsletter_section_df.to_dict(
+                    'records')
 
-                self.logger.info(f"Created newsletter_section_df with {len(newsletter_section_df)} stories across {newsletter_section_df['cat'].nunique()} categories")
+                self.logger.info(
+                    f"Created newsletter_section_df with {len(newsletter_section_df)} stories across {newsletter_section_df['cat'].nunique()} categories")
+
+                # ============ Step 8b: Critique and Optimize Individual Sections ============
+                self.logger.info(
+                    "Step 8b: Critiquing and optimizing individual sections")
+
+                # Group by category and calculate stats
+                cat_df = newsletter_section_df.groupby(["cat", "section_title"]).agg({
+                    'rating': 'mean',  # average rating per category
+                    'id': 'count'      # story count
+                }).rename(columns={'id': 'count'}).sort_values('rating', ascending=False).reset_index()
+
+                # Move singleton categories to "Other"
+                singleton_cats = cat_df[cat_df['count'] == 1]['cat'].tolist()
+                if singleton_cats:
+                    self.logger.info(
+                        f"Moving {len(singleton_cats)} singleton categories to Other: {singleton_cats}")
+                    for singleton_cat in singleton_cats:
+                        newsletter_section_df.loc[newsletter_section_df['cat']
+                                                  == singleton_cat, 'cat'] = 'Other'
+                        newsletter_section_df.loc[newsletter_section_df['cat']
+                                                  == 'Other', 'section_title'] = 'Other News'
+
+                    # Recalculate cat_df after moving singletons
+                    cat_df = newsletter_section_df.groupby(["cat", "section_title"]).agg({
+                        'rating': 'mean',
+                        'id': 'count'
+                    }).rename(columns={'id': 'count'}).sort_values('rating', ascending=False).reset_index()
+
+                cat_df_dict = dict(zip(cat_df['cat'], cat_df['section_title']))
+
+                # Get langfuse prompts for section critique
+                section_critique_system, section_critique_user, section_critique_model = \
+                    LangfuseClient().get_prompt("newsagent/critique_section")
+
+                # Process each section with critic-optimizer loop
+                unique_cats = newsletter_section_df['cat'].unique()
+                self.logger.info(f"Processing {len(unique_cats)} sections")
+
+                critique_agent = LLMagent(
+                    system_prompt=section_critique_system,
+                    user_prompt=section_critique_user,
+                    output_type=SectionCritique,
+                    model=section_critique_model,
+                    verbose=self.verbose,
+                    logger=self.logger
+                )
+
+                async def critique_wrapper(cat, target_categories):
+                    cat_stories = newsletter_section_df.loc[newsletter_section_df['cat'] == cat]
+                    section_title = cat_stories['section_title'].iloc[0]
+                    section_input = cat_stories[[
+                        'id', 'headline', 'rating', 'links']].to_dict('records')
+                    critique = await critique_agent.run_prompt(section_title=section_title, target_categories=target_categories, input_text=section_input)
+                    return (cat, critique)
+
+                tasks = []
+                for cat in unique_cats:
+                    target_categories = [
+                        str("\n".join([c for c in unique_cats if c != cat]))]
+                    tasks.append(critique_wrapper(cat, target_categories))
+                critiques = await asyncio.gather(*tasks)
+
+                # Apply critique recommendations
+                newsletter_section_df['prune'] = False
+                for cat, critique in critiques:
+                    self.logger.info(f"  {cat}: Coherence={critique.overall_coherence:.1f}/10, "
+                                   f"Quality={critique.overall_quality:.1f}/10")
+
+                    for action in critique.item_actions:
+                        story_mask = newsletter_section_df['id'] == action.id
+                        if action.action == 'drop':
+                            try:
+                                self.logger.info(
+                                    f"    DROP id={action.id}: {action.reason}")
+                                newsletter_section_df.loc[story_mask,
+                                                          'prune'] = True
+                                newsletter_section_df.loc[story_mask,
+                                                          'cat'] = 'Other'
+                                newsletter_section_df.loc[story_mask,
+                                                          'section_title'] = 'Other News'
+                            except Exception as e:
+                                self.logger.error(
+                                    f"Error dropping story: {str(e)}")
+                                raise e
+                        elif action.action == 'rewrite' and action.rewritten_headline:
+                            try:
+                                old_headline = newsletter_section_df.loc[story_mask,
+                                                                         'headline'].iloc[0]
+                                self.logger.info(
+                                    f"    REWRITE id={action.id}: {action.reason}")
+                                self.logger.info(f"      Old: {old_headline}")
+                                self.logger.info(
+                                    f"      New: {action.rewritten_headline}")
+                                newsletter_section_df.loc[story_mask,
+                                                          'headline'] = action.rewritten_headline
+                            except Exception as e:
+                                self.logger.error(
+                                    f"Error rewriting headline: {str(e)}")
+                                raise e
+
+                        elif action.action == 'move' and action.target_category:
+                            try:
+                                self.logger.info(
+                                    f"    MOVE id={action.id} to {action.target_category}: {action.reason}")
+                                newsletter_section_df.loc[story_mask,
+                                                          'cat'] = action.target_category
+                                newsletter_section_df.loc[story_mask,
+                                                          'section_title'] = cat_df_dict[action.target_category]
+                            except Exception as e:
+                                self.logger.error(
+                                    f"Error moving story: {str(e)}")
+                                raise e
+
+                stories_pruned = newsletter_section_df['prune'].sum()
+                stories_remaining = len(newsletter_section_df) - stories_pruned
+                self.logger.info(
+                    f"Pruned {stories_pruned} stories, leaving {stories_remaining}")
+
+                # Remove pruned stories
+                newsletter_section_df = newsletter_section_df.loc[~newsletter_section_df['prune']]
+
+                # Update state with optimized sections
+                state.newsletter_section_data = newsletter_section_df.to_dict(
+                    'records')
+                self.logger.info(
+                    "Step 8b complete: All sections critiqued and optimized")
+
             else:
                 self.logger.warning("No stories in newsletter sections")
                 state.newsletter_section_data = []
@@ -2767,8 +2968,10 @@ class DraftSectionsTool:
             # Complete the step
             state.complete_step(step_name)
 
-            total_stories = len(newsletter_section_df) if not newsletter_section_df.empty else 0
-            total_categories = newsletter_section_df['cat'].nunique() if not newsletter_section_df.empty else 0
+            total_stories = len(
+                newsletter_section_df) if not newsletter_section_df.empty else 0
+            total_categories = newsletter_section_df['cat'].nunique(
+            ) if not newsletter_section_df.empty else 0
             state.workflow_status_message = f"Drafted {total_stories} stories across {total_categories} sections"
 
             if self.verbose:
@@ -2816,7 +3019,8 @@ class FinalizeNewsletterTool:
         if state.is_step_complete(step_name):
             newsletter_length = len(
                 state.final_newsletter.split()) if state.final_newsletter else 0
-            sections_count = len(state.newsletter_section_df['cat'].unique()) if state.newsletter_section_data else 0
+            sections_count = len(state.newsletter_section_df['cat'].unique(
+            )) if state.newsletter_section_data else 0
             return f"Step 9 already completed! Newsletter finalized with {sections_count} sections and {newsletter_length} words."
 
         # Check if step 8 is completed
@@ -2836,32 +3040,45 @@ class FinalizeNewsletterTool:
             if not state.newsletter_section_data:
                 return "❌ No drafted sections found to finalize. Please run step 8 first."
 
-            # ============ Step 9a: Assemble Newsletter from Sections ============
-            self.logger.info("Step 9a: Assembling newsletter from section drafts")
+            # ============ Step 9a: Sort Sections ============
+            self.logger.info("Step 9a: Sorting sections by quality")
 
-            # Get newsletter section DataFrame
+            # Get newsletter section DataFrame from state (already critiqued in Step 8b)
             newsletter_section_df = state.newsletter_section_df
 
-            # Group by category and calculate stats, sort by avg rating (descending)
+            # Group by category and calculate stats
             cat_df = newsletter_section_df.groupby(["cat", "section_title"]).agg({
                 'rating': 'mean',  # average rating per category
                 'id': 'count'      # story count
-            }).rename(columns={'id': 'count'}).sort_values('rating', ascending=False).reset_index()
+            }).rename(columns={'id': 'count'}).reset_index()
 
-            self.logger.info(f"Assembling {len(cat_df)} categories")
+            # Calculate sort order: rating × log(count), with "Other" always last
+            cat_df['sort_order'] = cat_df['rating'] * np.log1p(cat_df['count'])
+            cat_df.loc[cat_df["cat"] == "Other", "sort_order"] = 0
+            cat_df = cat_df.sort_values(
+                'sort_order', ascending=False).reset_index(drop=True)
+            cat_df["sort_order"] = cat_df.index
 
-            # Build markdown sections (exclude "Other" for now)
+            # Add sort_order to newsletter_section_df
+            section_order_map = dict(zip(cat_df['cat'], cat_df['sort_order']))
+            newsletter_section_df['sort_order'] = newsletter_section_df['cat'].map(section_order_map)
+
+            # Update state with sorted sections
+            state.newsletter_section_data = newsletter_section_df.to_dict('records')
+            self.logger.info(f"Step 9a complete: Sorted {len(cat_df)} categories by rating × log(count)")
+
+            # ============ Step 9b: Assemble Newsletter Markdown ============
+            self.logger.info("Step 9b: Assembling newsletter markdown from sorted sections")
+
+            # Build markdown sections (include all categories)
             sections_md = []
             for _, row in cat_df.iterrows():
                 cat = row['cat']
-                if cat == "Other":
-                    continue
-
                 section_title = row['section_title']
-                # Get stories for this category, sorted by rating (descending), exclude pruned
+
+                # Get stories for this category, sorted by rating (descending)
                 cat_stories = newsletter_section_df[
-                    (newsletter_section_df['cat'] == cat) &
-                    (newsletter_section_df['prune'] == False)
+                    newsletter_section_df['cat'] == cat
                 ].sort_values('rating', ascending=False)
 
                 # Build markdown section
@@ -2872,7 +3089,8 @@ class FinalizeNewsletterTool:
                 sections_md.append(section_md)
 
             input_sections = "\n\n".join(sections_md)
-            self.logger.info(f"Compiled {len(sections_md)} sections into markdown input")
+            self.logger.info(
+                f"Compiled {len(sections_md)} sections into markdown input")
 
             # Get assemble_newsletter prompt from Langfuse
             assemble_system_prompt, assemble_user_prompt, model = \
@@ -2887,13 +3105,43 @@ class FinalizeNewsletterTool:
                 logger=self.logger
             )
 
-            # Assemble initial newsletter draft
+            # Assemble initial newsletter draft (without H1)
             draft_newsletter = await assemble_agent.run_prompt(input_text=input_sections)
             self.logger.info(
-                f"Assembled initial draft ({len(draft_newsletter.split())} words)")
+                f"Assembled draft without H1 ({len(draft_newsletter.split())} words)")
 
-            # ============ Step 9b: Critic-Optimizer Loop ============
-            self.logger.info("Step 9b: Starting critic-optimizer loop")
+            # ============ Step 9b: Generate H1 Title ============
+            self.logger.info("Step 9b: Generating H1 title")
+
+            # Get H1 generation prompt from Langfuse
+            h1_system_prompt, h1_user_prompt, h1_model = \
+                LangfuseClient().get_prompt("newsagent/generate_h1_title")
+
+            h1_agent = LLMagent(
+                system_prompt=h1_system_prompt,
+                user_prompt=h1_user_prompt,
+                output_type=str,
+                model=h1_model,
+                verbose=self.verbose,
+                logger=self.logger
+            )
+
+            # Generate H1 title based on newsletter content
+            h1_title = await h1_agent.run_prompt(newsletter_content=draft_newsletter)
+            h1_title = h1_title.strip()
+
+            # Remove leading # if present
+            if h1_title.startswith('#'):
+                h1_title = h1_title.lstrip('#').strip()
+
+            self.logger.info(f"Generated H1: {h1_title}")
+
+            # Prepend H1 to newsletter
+            draft_newsletter = f"# {h1_title}\n\n{draft_newsletter}"
+            self.logger.info(f"Step 9b complete: Added H1 title")
+
+            # ============ Step 9c: Critic-Optimizer Loop ============
+            self.logger.info("Step 9c: Starting critic-optimizer loop on full newsletter")
 
             # Create critic agent
             critique_system_prompt, critique_user_prompt, critique_model = \
@@ -2923,7 +3171,7 @@ class FinalizeNewsletterTool:
 
             # Critic-optimizer loop (max 3 iterations)
             max_iterations = 3
-            quality_threshold = 8.5
+            quality_threshold = 8.0
             current_draft = draft_newsletter
 
             for iteration in range(1, max_iterations + 1):
@@ -2934,15 +3182,19 @@ class FinalizeNewsletterTool:
 
                 self.logger.info(
                     f"  Overall score: {critique.overall_score:.1f}/10")
-                self.logger.info(
-                    f"  Theme coherence: {critique.theme_coherence:.1f}/10")
-                self.logger.info(
-                    f"  Headline quality: {critique.headline_quality:.1f}/10")
-                self.logger.info(
-                    f"  Source quality: {critique.source_quality:.1f}/10")
+                self.logger.info(f"  Dimension scores:")
+                self.logger.info(f"    H1 quality: {critique.h1_quality:.1f}/10")
+                self.logger.info(f"    Section quality: {critique.section_quality:.1f}/10")
+                self.logger.info(f"    Headline quality: {critique.headline_quality:.1f}/10")
+                self.logger.info(f"    Story selection: {critique.story_selection:.1f}/10")
+                self.logger.info(f"    Format compliance: {critique.format_compliance:.1f}/10")
                 self.logger.info(f"  Issues found: {len(critique.duplicate_issues)} duplicates, "
                                  f"{len(critique.headline_issues)} headline issues, "
                                  f"{len(critique.section_issues)} section issues")
+                if critique.recommendations:
+                    self.logger.info(f"  Top recommendations:")
+                    for i, rec in enumerate(critique.recommendations[:5], 1):
+                        self.logger.info(f"    {i}. {rec}")
 
                 # Check if quality threshold met
                 if critique.overall_score >= quality_threshold:
@@ -2971,10 +3223,11 @@ class FinalizeNewsletterTool:
             state.final_newsletter = current_draft
             newsletter_length = len(current_draft.split())
 
-            self.logger.info(f"Final newsletter: {newsletter_length} words")
+            self.logger.info(
+                f"Step 9c complete: Final newsletter {newsletter_length} words")
 
-            # ============ Step 9c: Validate and Send ============
-            self.logger.info("Step 9c: Validating and sending newsletter")
+            # ============ Step 9d: Validate and Send ============
+            self.logger.info("Step 9d: Validating and sending newsletter")
 
             # Validation checks
             import re
@@ -3036,7 +3289,8 @@ class FinalizeNewsletterTool:
                 self.logger.error(f"Failed to send newsletter email: {e}")
 
             # Calculate final stats
-            sections_included = newsletter_section_df['cat'].nunique() if not newsletter_section_df.empty else 0
+            sections_included = newsletter_section_df['cat'].nunique(
+            ) if not newsletter_section_df.empty else 0
             final_quality_score = critique.overall_score if 'critique' in locals() else 8.0
 
             # Complete the step and mark workflow as complete
