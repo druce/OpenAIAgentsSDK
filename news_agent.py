@@ -2900,7 +2900,7 @@ class DraftSectionsTool:
                 newsletter_section_df['prune'] = False
                 for cat, critique in critiques:
                     self.logger.info(f"  {cat}: Coherence={critique.overall_coherence:.1f}/10, "
-                                   f"Quality={critique.overall_quality:.1f}/10")
+                                     f"Quality={critique.overall_quality:.1f}/10")
 
                     for action in critique.item_actions:
                         story_mask = newsletter_section_df['id'] == action.id
@@ -3061,14 +3061,18 @@ class FinalizeNewsletterTool:
 
             # Add sort_order to newsletter_section_df
             section_order_map = dict(zip(cat_df['cat'], cat_df['sort_order']))
-            newsletter_section_df['sort_order'] = newsletter_section_df['cat'].map(section_order_map)
+            newsletter_section_df['sort_order'] = newsletter_section_df['cat'].map(
+                section_order_map)
 
             # Update state with sorted sections
-            state.newsletter_section_data = newsletter_section_df.to_dict('records')
-            self.logger.info(f"Step 9a complete: Sorted {len(cat_df)} categories by rating × log(count)")
+            state.newsletter_section_data = newsletter_section_df.to_dict(
+                'records')
+            self.logger.info(
+                f"Step 9a complete: Sorted {len(cat_df)} categories by rating × log(count)")
 
             # ============ Step 9b: Assemble Newsletter Markdown ============
-            self.logger.info("Step 9b: Assembling newsletter markdown from sorted sections")
+            self.logger.info(
+                "Step 9b: Assembling newsletter markdown from sorted sections")
 
             # Build markdown sections (include all categories)
             sections_md = []
@@ -3141,7 +3145,8 @@ class FinalizeNewsletterTool:
             self.logger.info(f"Step 9b complete: Added H1 title")
 
             # ============ Step 9c: Critic-Optimizer Loop ============
-            self.logger.info("Step 9c: Starting critic-optimizer loop on full newsletter")
+            self.logger.info(
+                "Step 9c: Starting critic-optimizer loop on full newsletter")
 
             # Create critic agent
             critique_system_prompt, critique_user_prompt, critique_model = \
@@ -3183,11 +3188,16 @@ class FinalizeNewsletterTool:
                 self.logger.info(
                     f"  Overall score: {critique.overall_score:.1f}/10")
                 self.logger.info(f"  Dimension scores:")
-                self.logger.info(f"    H1 quality: {critique.h1_quality:.1f}/10")
-                self.logger.info(f"    Section quality: {critique.section_quality:.1f}/10")
-                self.logger.info(f"    Headline quality: {critique.headline_quality:.1f}/10")
-                self.logger.info(f"    Story selection: {critique.story_selection:.1f}/10")
-                self.logger.info(f"    Format compliance: {critique.format_compliance:.1f}/10")
+                self.logger.info(
+                    f"    H1 quality: {critique.h1_quality:.1f}/10")
+                self.logger.info(
+                    f"    Section quality: {critique.section_quality:.1f}/10")
+                self.logger.info(
+                    f"    Headline quality: {critique.headline_quality:.1f}/10")
+                self.logger.info(
+                    f"    Story selection: {critique.story_selection:.1f}/10")
+                self.logger.info(
+                    f"    Format compliance: {critique.format_compliance:.1f}/10")
                 self.logger.info(f"  Issues found: {len(critique.duplicate_issues)} duplicates, "
                                  f"{len(critique.headline_issues)} headline issues, "
                                  f"{len(critique.section_issues)} section issues")
