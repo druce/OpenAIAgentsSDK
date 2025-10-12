@@ -54,11 +54,11 @@ from newsletter_state import NewsletterAgentState
 from config import CANONICAL_TOPICS, DOWNLOAD_DIR, PAGES_DIR, TEXT_DIR, NEWSAGENTDB, LOGDB, DEFAULT_CONCURRENCY
 
 
-# Pydantic models for structured outputclass NewsAgentStr(BaseModel):
-class NewsAgentStr(BaseModel):
-    """A string"""
-    NewsAgentStr: str = Field(
-        description="a string")
+# Pydantic models for structured output
+
+class StringResult(BaseModel):
+    """Generic string result wrapper for text-based LLM outputs"""
+    value: str = Field(description="The string result")
 
 
 class SectionStoryLink(BaseModel):
@@ -207,6 +207,7 @@ class DistilledStoryList(BaseModel):
 
 
 # Newsletter critique models for quality evaluation
+# Used in Step 9b for structured critique of full newsletter
 
 class DuplicateIssue(BaseModel):
     """Identified duplicate or near-duplicate story across sections"""
@@ -239,53 +240,39 @@ class SectionIssue(BaseModel):
 
 
 class NewsletterCritique(BaseModel):
-    """Comprehensive quality evaluation of newsletter draft"""
+    """Comprehensive quality evaluation of newsletter draft with structured output"""
+
+    # Core scores
     overall_score: float = Field(
         description="Overall quality score 0-10 (9-10 excellent, 8-9 good, 7-8 acceptable, <7 needs work)"
     )
 
-    # Specific issues (empty lists if none found)
-    duplicate_issues: List[DuplicateIssue] = Field(
-        default_factory=list,
-        description="List of duplicate or near-duplicate stories found"
-    )
-    headline_issues: List[HeadlineIssue] = Field(
-        default_factory=list,
-        description="List of headline quality issues"
-    )
-    section_issues: List[SectionIssue] = Field(
-        default_factory=list,
-        description="List of section quality issues"
-    )
-
     # Dimension scores (0-10 each)
-    h1_quality: float = Field(
-        description="0-10: H1 title is factual, specific, captures 2-3 themes, 6-12 words, active voice"
+    title_quality: float = Field(
+        description="0-10: Newsletter title is factual, specific, captures 2-3 themes, 6-12 words, active voice"
+    )
+    structure_quality: float = Field(
+        description="0-10: Proper markdown structure, 7-15 sections, consistent formatting, 'Other News' last"
     )
     section_quality: float = Field(
         description="0-10: Sections have 2-7 stories, thematic coherence, creative titles, natural flow"
     )
     headline_quality: float = Field(
-        description="0-10: Headlines are 8-15 words, active voice, clear, specific, no redundancy"
-    )
-    story_selection: float = Field(
-        description="0-10: No weak stories (all rating >= 5.5), no duplicates, high-value prioritized"
-    )
-    format_compliance: float = Field(
-        description="0-10: Proper markdown, 8-16 sections, bullets with links, consistent formatting"
+        description="0-10: Headlines are 8-25 words, active voice, clear, specific, no redundancy"
     )
 
-    # Actionable feedback
-    recommendations: List[str] = Field(
-        description="Top 3-5 specific, actionable improvements needed",
-        default_factory=list
-    )
+    # Decision flag
     should_iterate: bool = Field(
         description="True if score < 8.0 and issues are fixable through iteration"
     )
 
+    # Detailed critique text (markdown format)
+    critique_text: str = Field(
+        description="Detailed critique with specific issues, locations, and recommendations in markdown format"
+    )
 
 # Section-level critique models for Step 9a
+
 
 class SectionItemAction(BaseModel):
     """Action to take on a specific story within a section"""
@@ -3079,7 +3066,7 @@ class FinalizeNewsletterTool:
                 draft_newsletter += f"- {row.headline} - {row.links}\n"
 
             self.logger.info(
-                f"Compiled {len(newsletter_section_df)} sections into markdown input")
+                f"Compiled {len(newsletter_section_df)} items into markdown input")
 
             # run generate_newsletter_title prompt from Langfuse
             title_system_prompt, title_user_prompt, model = \
@@ -3087,48 +3074,111 @@ class FinalizeNewsletterTool:
             title_agent = LLMagent(
                 system_prompt=title_system_prompt,
                 user_prompt=title_user_prompt,
-                output_type=NewsAgentStr,
+                output_type=StringResult,
                 model=model,
                 verbose=self.verbose,
                 logger=self.logger
             )
             response = await title_agent.run_prompt(input_text=draft_newsletter)
-            title = response.NewsAgentStr
+            title = response.value
             self.logger.info(f"Generated title: {title}")
+
+            # Store title in state
+            state.newsletter_title = title
 
             # prepend titile
             draft_newsletter = f"{title}\n\n{draft_newsletter}"
 
             # ============ Step 9b: critic-optimizer loop ============
-            self.logger.info("Step 9: critic")
+            self.logger.info("Step 9b: Starting critic-optimizer loop")
 
+            # Initialize agents
             critique_newsletter_system_prompt, critique_newsletter_user_prompt, model = \
                 LangfuseClient().get_prompt("newsagent/critique_newsletter")
             critique_newsletter_agent = LLMagent(
                 system_prompt=critique_newsletter_system_prompt,
                 user_prompt=critique_newsletter_user_prompt,
-                output_type=NewsAgentStr,
+                output_type=NewsletterCritique,
                 model=model,
                 verbose=self.verbose,
                 logger=self.logger
             )
-            response = await critique_newsletter_agent.run_prompt(input_text=draft_newsletter)
-            critique = response.NewsAgentStr
-
-            self.logger.info("Step 9: optimizer")
 
             improve_newsletter_system_prompt, improve_newsletter_user_prompt, model = \
                 LangfuseClient().get_prompt("newsagent/improve_newsletter")
             improve_newsletter_agent = LLMagent(
                 system_prompt=improve_newsletter_system_prompt,
                 user_prompt=improve_newsletter_user_prompt,
-                output_type=NewsAgentStr,
+                output_type=StringResult,
                 model=model,
                 verbose=self.verbose,
                 logger=self.logger
             )
-            response = await improve_newsletter_agent.run_prompt(newsletter=draft_newsletter, critique=critique)
-            draft_newsletter = response.NewsAgentStr
+
+            # Loop configuration
+            max_iterations = 3
+            quality_threshold = 8.0
+            current_draft = draft_newsletter
+            final_quality_score = 0.0
+            iteration = 0
+
+            for iteration in range(1, max_iterations + 1):
+                self.logger.info(
+                    f"Step 9b: Iteration {iteration}/{max_iterations} - Running critique")
+
+                # Run critique with structured output
+                critique_response = await critique_newsletter_agent.run_prompt(input_text=current_draft)
+
+                # Extract scores directly from structured output
+                overall_score = critique_response.overall_score
+                final_quality_score = overall_score
+                should_iterate = critique_response.should_iterate
+
+                # Log scores and dimension breakdown
+                self.logger.info(
+                    f"Iteration {iteration}: Overall score = {overall_score:.1f}/10")
+                self.logger.info(
+                    f"  Title: {critique_response.title_quality:.1f}, "
+                    f"Structure: {critique_response.structure_quality:.1f}, "
+                    f"Section: {critique_response.section_quality:.1f}, "
+                    f"Headline: {critique_response.headline_quality:.1f}")
+                self.logger.info(
+                    f"Iteration {iteration}: Should iterate = {should_iterate}")
+
+                # Check if quality threshold met
+                if overall_score >= quality_threshold:
+                    self.logger.info(
+                        f"✅ Quality threshold {quality_threshold} met! Score: {overall_score:.1f}/10")
+                    break
+
+                # Check if we should iterate based on critique recommendation
+                if not should_iterate:
+                    self.logger.info(
+                        f"✅ Critique recommends no further iteration. Score: {overall_score:.1f}/10")
+                    break
+
+                # Don't optimize if this is the last iteration
+                if iteration == max_iterations:
+                    self.logger.info(
+                        f"⚠️  Max iterations {max_iterations} reached. Final score: {overall_score:.1f}/10")
+                    break
+
+                # Run optimizer
+                self.logger.info(
+                    f"Step 9b: Iteration {iteration} - Running optimizer to improve draft")
+                optimizer_response = await improve_newsletter_agent.run_prompt(
+                    newsletter=current_draft,
+                    critique=critique_response.critique_text
+                )
+
+                # Get improved newsletter from optimizer's newsletter_md field
+                current_draft = optimizer_response.value
+                self.logger.info(
+                    f"Iteration {iteration}: Optimizer completed, draft updated")
+
+            draft_newsletter = current_draft
+            self.logger.info(
+                f"Step 9b: Critic-optimizer loop complete after {iteration} iteration(s). Final score: {final_quality_score:.1f}/10")
 
             # Store the final newsletter
             state.final_newsletter = draft_newsletter
@@ -3145,11 +3195,11 @@ class FinalizeNewsletterTool:
                 import markdown
 
                 today = datetime.now().strftime("%B %d, %Y")
-                subject = f"AI News Digest - {today}"
+                subject = f"AI News for {today} - {state.newsletter_title}"
 
                 # Convert markdown to HTML
                 newsletter_html = markdown.markdown(
-                    draft_newsletter,
+                    state.final_newsletter,
                     extensions=['extra', 'codehilite']
                 )
 
@@ -3183,9 +3233,9 @@ class FinalizeNewsletterTool:
                     f"✅ Completed Step 9: Finalized newsletter ({newsletter_length} words)")
 
             status_msg = f"🎉 Step 9 {step_name} completed successfully!"
-            status_msg += f"\n📊 {sections_included} sections, {newsletter_length} words"
+            # status_msg += f"\n📊 {sections_included} sections, {newsletter_length} words"
             status_msg += f"\n⭐ Final quality score: {final_quality_score:.1f}/10"
-            # status_msg += f"\n🔄 Completed {iteration} critic-optimizer iteration(s)"
+            status_msg += f"\n🔄 Completed {iteration} critic-optimizer iteration(s)"
             status_msg += "\n📰 Newsletter stored in persistent state and emailed"
             status_msg += "\n✅ Workflow complete! All 9 steps finished successfully."
 
