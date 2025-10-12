@@ -271,7 +271,7 @@ The notebook is used for:
 
 ## 📁 Repository Structure
 
-```
+```bash
 OpenAIAgentsSDK/
 ├── Basic OpenAI Agents SDK.ipynb  # Introduction to OpenAI Agents SDK
 ├── Run Agent.ipynb                # Newsletter workflow notebook ⭐
