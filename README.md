@@ -1,8 +1,6 @@
 # Newsletter Agent System
 
-An AI-powered newsletter generation system built on the OpenAI Agents SDK that implements a 9-step workflow for automated newsletter creation from multiple news sources.
-
-Note: This is a work in progress, the intent is to port the AInewsbot repo to the OpenAI Agents SDK. Currently it runs the first 7 steps, fetching sources, filtering AI-related links, downloading articles, extracting summaries, clustering by topic, rating articles, and selecting sections. The remaining steps are mocked. Check back in a few weeks for a complete implementation.
+An AI-powered newsletter generation system built on the OpenAI Agents SDK that implements a complete 9-step workflow for automated newsletter creation from multiple news sources.
 
 ## Overview
 
@@ -88,13 +86,20 @@ The newsletter generation follows a structured 9-step process with persistent st
 - **Output**: Newsletter section outline with assigned articles
 
 ### Step 8: Draft Sections ✍️
-- **Content Creation**: Writes engaging content  and title for each section
-- **Output**: Drafted newsletter sections
+- **Content Creation**: Writes engaging headlines and content for each section
+- **Section Critique**: LLM evaluates section quality and provides improvement feedback
+- **Iterative Refinement**: Applies critique to improve section quality (up to 3 iterations)
+- **Output**: Polished newsletter sections with quality scores
 
-### Step 9: Compose Final Newsletter 🎉
-- **Assembly**: Combines all sections into final newsletter
-- **Quality Control**: Applies final formatting and polish
-- **Output**: Complete newsletter ready for distribution
+### Step 9: Finalize Newsletter 🎉
+- **Title Generation**: Creates compelling newsletter title capturing 2-3 major themes
+- **Assembly**: Combines all sections into cohesive newsletter with markdown formatting
+- **Critic-Optimizer Loop**: Iteratively improves newsletter quality using structured feedback
+  - **Critique Agent**: Evaluates overall quality, title, structure, sections, and headlines (0-10 scores)
+  - **Optimizer Agent**: Applies critique recommendations to improve newsletter
+  - **Quality Threshold**: Stops when overall score ≥ 8.0 or after 3 iterations
+  - **Dimension Tracking**: Monitors title_quality, structure_quality, section_quality, headline_quality
+- **Output**: Publication-ready newsletter with quality score and stored title
 
 ## 🏗️ Architecture
 
@@ -136,6 +141,7 @@ The newsletter generation follows a structured 9-step process with persistent st
 - GPT-5-nano for headline classification
 - GPT-4o for content summarization and newsletter writing
 - Structured output with Pydantic validation
+- Critic-optimizer loops with quality scoring and iterative refinement
 
 ## 📓 Interactive Development: test_agent.ipynb
 
@@ -275,10 +281,11 @@ python news_agent.py  # Automatically resumes from last step
 
 ### Performance Characteristics
 
-- **Speed**: Complete workflow in ~2-3 minutes (with cached content)
+- **Speed**: Complete workflow in ~3-5 minutes (with cached content)
 - **Scalability**: Handles 1000+ articles with concurrent processing
 - **Reliability**: Automatic retry logic and error recovery
-- **Quality**: High-quality AI-generated content with proper formatting
+- **Quality**: High-quality AI-generated content with iterative refinement and quality scoring
+- **Efficiency**: Early stopping in critic-optimizer loops when quality threshold met
 
 ### Content Quality
 
@@ -296,9 +303,10 @@ python news_agent.py  # Automatically resumes from last step
 
 **Output Quality**:
 - 6 topic clusters (LLM Advances, AI Safety, Business Applications, etc.)
+- 7-15 newsletter sections with 2-7 stories each
 - 30+ articles in final newsletter
 - 1200+ words of professional content
-- Quality score: 7.5-8.5/10
+- Quality score: 8.0-9.5/10 (via critic-optimizer loop)
 
 ## 🤝 Contributing
 
