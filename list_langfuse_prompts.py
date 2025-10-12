@@ -101,124 +101,141 @@ def fetch_prompt_details(client, prompt_name: str) -> dict:
         }
 
 
-def print_detailed_prompt_info(client, prompt_names: Set[str], all_prompts: Dict[str, dict]):
-    """Print detailed information about each prompt."""
+def generate_markdown_output(client, prompt_names: Set[str], all_prompts: Dict[str, dict]) -> str:
+    """Generate markdown documentation for all prompts."""
 
-    print("\n" + "=" * 80)
-    print("DETAILED PROMPT INFORMATION FROM LANGFUSE")
-    print("=" * 80)
+    markdown_lines = ["# Langfuse Prompts Documentation\n"]
 
     sorted_prompts = sorted(prompt_names)
 
     for i, prompt_name in enumerate(sorted_prompts, 1):
-        print(f"\n{'─' * 80}")
-        print(f"[{i}] {prompt_name}")
-        print('─' * 80)
-
-        # Check if we have API metadata
-        if prompt_name in all_prompts:
-            metadata = all_prompts[prompt_name]
-            print(f"  📊 Metadata (from API):")
-            print(f"     • Version: {metadata.get('version', 'N/A')}")
-            print(f"     • Type: {metadata.get('type', 'N/A')}")
-            print(f"     • Labels: {metadata.get('labels', [])}")
-            print(f"     • Tags: {metadata.get('tags', [])}")
-            print(f"     • Created: {metadata.get('created_at', 'N/A')}")
-            print(f"     • Updated: {metadata.get('updated_at', 'N/A')}")
+        markdown_lines.append(f"\n---\n")
+        markdown_lines.append(f"\n# Prompt: `{prompt_name}`\n")
 
         # Fetch full prompt details
         details = fetch_prompt_details(client, prompt_name)
 
         if 'error' in details:
-            print(f"  ⚠️  Error fetching details: {details['error']}")
+            markdown_lines.append(f"\n**⚠️ Error fetching details:** `{details['error']}`\n")
             continue
 
-        print(f"\n  🔧 Configuration:")
+        # Metadata section
+        markdown_lines.append(f"\n## Metadata\n")
+        markdown_lines.append(f"- **Version**: {details.get('version', 'N/A')}\n")
+        markdown_lines.append(f"- **Type**: {details.get('type', 'N/A')}\n")
+
+        if details.get('labels'):
+            markdown_lines.append(f"- **Labels**: {', '.join(details['labels'])}\n")
+        else:
+            markdown_lines.append(f"- **Labels**: None\n")
+
+        if details.get('tags'):
+            markdown_lines.append(f"- **Tags**: {', '.join(details['tags'])}\n")
+        else:
+            markdown_lines.append(f"- **Tags**: None\n")
+
+        # Configuration section
         if details.get('config'):
-            config_json = json.dumps(details['config'], indent=2)
-            for line in config_json.split('\n'):
-                print(f"     {line}")
-        else:
-            print(f"     • No configuration found")
+            markdown_lines.append(f"\n## Configuration\n")
+            markdown_lines.append("```json\n")
+            markdown_lines.append(json.dumps(details['config'], indent=2))
+            markdown_lines.append("\n```\n")
 
-        print(f"\n  💬 Prompt Content:")
+        # Prompt content sections
         if details.get('prompt_content'):
-            for idx, msg in enumerate(details['prompt_content']):
-                print(f"\n     [{msg['role'].upper()}] ({msg['content_length']} characters)")
-                print(f"     {'-' * 70}")
-                # Print full content with indentation
-                for line in msg['content'].split('\n'):
-                    print(f"     {line}")
-                print(f"     {'-' * 70}")
+            for msg in details['prompt_content']:
+                role = msg['role']
+                content = msg['content']
+
+                if role == 'system':
+                    markdown_lines.append(f"\n## System Prompt\n")
+                elif role == 'user':
+                    markdown_lines.append(f"\n## User Prompt\n")
+                else:
+                    markdown_lines.append(f"\n## {role.capitalize()} Prompt\n")
+
+                markdown_lines.append("```markdown\n")
+                markdown_lines.append(content)
+                markdown_lines.append("\n```\n")
         else:
-            print(f"     • No prompt content found")
+            markdown_lines.append(f"\n**No prompt content found**\n")
+
+    return ''.join(markdown_lines)
 
 
-def print_code_references(prompts_found: Dict[str, List[str]]):
-    """Print which files use which prompts."""
+def generate_code_references_markdown(prompts_found: Dict[str, List[str]]) -> str:
+    """Generate markdown for code references."""
 
-    print("\n" + "=" * 80)
-    print("CODE REFERENCES")
-    print("=" * 80)
+    markdown_lines = ["\n---\n\n# Code References\n"]
 
-    for file_path, prompts in prompts_found.items():
-        print(f"\n📁 {file_path}")
+    if not prompts_found:
+        markdown_lines.append("\nNo code references found.\n")
+        return ''.join(markdown_lines)
+
+    markdown_lines.append("\nThe following prompts are referenced in these files:\n\n")
+
+    for file_path, prompts in sorted(prompts_found.items()):
+        markdown_lines.append(f"## `{file_path}`\n\n")
         for prompt in prompts:
-            print(f"   • {prompt}")
+            markdown_lines.append(f"- `{prompt}`\n")
+        markdown_lines.append("\n")
+
+    return ''.join(markdown_lines)
 
 
-def print_summary(prompt_names: Set[str], prompts_found: Dict[str, List[str]], all_prompts: Dict[str, dict]):
-    """Print summary statistics."""
+def generate_summary_markdown(prompt_names: Set[str], prompts_found: Dict[str, List[str]], all_prompts: Dict[str, dict]) -> str:
+    """Generate summary statistics in markdown."""
 
-    print("\n" + "=" * 80)
-    print("SUMMARY")
-    print("=" * 80)
+    markdown_lines = ["\n---\n\n# Summary\n\n"]
 
-    print(f"\n📊 Statistics:")
-    print(f"   • Total unique prompts found in code: {len(prompt_names)}")
-    print(f"   • Total files with prompt references: {len(prompts_found)}")
-    print(f"   • Total prompts available in Langfuse API: {len(all_prompts)}")
+    markdown_lines.append(f"- **Total unique prompts found in code**: {len(prompt_names)}\n")
+    markdown_lines.append(f"- **Total files with prompt references**: {len(prompts_found)}\n")
+    markdown_lines.append(f"- **Total prompts available in Langfuse API**: {len(all_prompts)}\n")
 
     # Find prompts in Langfuse but not used in code
     if all_prompts:
         unused_prompts = set(all_prompts.keys()) - prompt_names
         if unused_prompts:
-            print(f"\n⚠️  Prompts in Langfuse but not referenced in code ({len(unused_prompts)}):")
+            markdown_lines.append(f"\n## ⚠️ Unused Prompts\n\n")
+            markdown_lines.append(f"Prompts in Langfuse but not referenced in code ({len(unused_prompts)}):\n\n")
             for prompt in sorted(unused_prompts):
-                print(f"   • {prompt}")
+                markdown_lines.append(f"- `{prompt}`\n")
+
+    return ''.join(markdown_lines)
 
 
 def main():
-    """Main function to run the prompt discovery and detailed reporting."""
+    """Main function to run the prompt discovery and generate markdown documentation."""
 
-    print("🔍 Searching for Langfuse prompts in the project...")
-    print()
+    import sys
+
+    # Write diagnostic info to stderr so it doesn't pollute markdown output
+    sys.stderr.write("🔍 Searching for Langfuse prompts in the project...\n")
 
     # Check environment variables
     has_public_key = bool(os.getenv('LANGFUSE_PUBLIC_KEY'))
     has_secret_key = bool(os.getenv('LANGFUSE_SECRET_KEY'))
     has_host = bool(os.getenv('LANGFUSE_HOST'))
 
-    print(f"Environment variables:")
-    print(f"  • LANGFUSE_PUBLIC_KEY: {'✓ Set' if has_public_key else '✗ Not set'}")
-    print(f"  • LANGFUSE_SECRET_KEY: {'✓ Set' if has_secret_key else '✗ Not set'}")
-    print(f"  • LANGFUSE_HOST: {'✓ Set' if has_host else '✗ Not set'} {('(' + os.getenv('LANGFUSE_HOST') + ')') if has_host else ''}")
-    print()
+    sys.stderr.write(f"\nEnvironment variables:\n")
+    sys.stderr.write(f"  • LANGFUSE_PUBLIC_KEY: {'✓ Set' if has_public_key else '✗ Not set'}\n")
+    sys.stderr.write(f"  • LANGFUSE_SECRET_KEY: {'✓ Set' if has_secret_key else '✗ Not set'}\n")
+    sys.stderr.write(f"  • LANGFUSE_HOST: {'✓ Set' if has_host else '✗ Not set'} {('(' + os.getenv('LANGFUSE_HOST') + ')') if has_host else ''}\n\n")
 
     # Initialize Langfuse client
     try:
         client = langfuse.get_client()
-        print("✓ Connected to Langfuse API\n")
+        sys.stderr.write("✓ Connected to Langfuse API\n\n")
     except Exception as e:
-        print(f"⚠️  Warning: Could not initialize Langfuse client: {e}")
-        print("   Continuing with code-based prompt discovery only...\n")
+        sys.stderr.write(f"⚠️  Warning: Could not initialize Langfuse client: {e}\n")
+        sys.stderr.write("   Continuing with code-based prompt discovery only...\n\n")
         client = None
 
     # Find prompts referenced in code
     prompts_found = find_langfuse_prompts_in_code()
 
     if not prompts_found:
-        print("❌ No Langfuse prompts found in the project code.")
+        sys.stderr.write("❌ No Langfuse prompts found in the project code.\n")
         if not client:
             return
 
@@ -230,7 +247,7 @@ def main():
     # Fetch all prompts from Langfuse API
     all_prompts_metadata = {}
     if client:
-        print("📥 Fetching prompt list from Langfuse API...")
+        sys.stderr.write("📥 Fetching prompt details from Langfuse API...\n")
         all_prompts_metadata = get_all_prompts_from_langfuse(client)
 
         # Add any prompts from API that we haven't seen in code
@@ -238,23 +255,29 @@ def main():
             all_prompt_names.update(all_prompts_metadata.keys())
 
     if not all_prompt_names:
-        print("❌ No prompts found in code or Langfuse API.")
+        sys.stderr.write("❌ No prompts found in code or Langfuse API.\n")
         return
 
-    # Print code references
-    if prompts_found:
-        print_code_references(prompts_found)
+    # Generate markdown output
+    markdown_output = []
 
-    # Print detailed information for each prompt
+    # Generate detailed prompt documentation
     if client:
-        print_detailed_prompt_info(client, all_prompt_names, all_prompts_metadata)
+        sys.stderr.write(f"📝 Generating markdown for {len(all_prompt_names)} prompts...\n")
+        markdown_output.append(generate_markdown_output(client, all_prompt_names, all_prompts_metadata))
 
-    # Print summary
-    print_summary(all_prompt_names, prompts_found, all_prompts_metadata)
+    # Add code references
+    if prompts_found:
+        markdown_output.append(generate_code_references_markdown(prompts_found))
 
-    print("\n" + "=" * 80)
-    print("✓ Analysis complete!")
-    print("=" * 80)
+    # Add summary
+    markdown_output.append(generate_summary_markdown(all_prompt_names, prompts_found, all_prompts_metadata))
+
+    # Write markdown to stdout
+    print(''.join(markdown_output))
+
+    sys.stderr.write("\n✓ Analysis complete! Markdown written to stdout.\n")
+    sys.stderr.write("   Usage: python list_langfuse_prompts.py > prompts.md\n")
 
 
 if __name__ == "__main__":

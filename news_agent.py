@@ -54,7 +54,13 @@ from newsletter_state import NewsletterAgentState
 from config import CANONICAL_TOPICS, DOWNLOAD_DIR, PAGES_DIR, TEXT_DIR, NEWSAGENTDB, LOGDB, DEFAULT_CONCURRENCY
 
 
-# Pydantic models for structured output
+# Pydantic models for structured outputclass NewsAgentStr(BaseModel):
+class NewsAgentStr(BaseModel):
+    """A string"""
+    NewsAgentStr: str = Field(
+        description="a string")
+
+
 class SectionStoryLink(BaseModel):
     url: str = Field(description="URL of the article")
     site_name: str = Field(description="Name of the website/source")
@@ -2955,15 +2961,31 @@ class DraftSectionsTool:
                 # Remove pruned stories
                 newsletter_section_df = newsletter_section_df.loc[~newsletter_section_df['prune']]
 
+                # Group by category and calculate stats
+                cat_df = newsletter_section_df.groupby(["cat", "section_title"]).agg({
+                    'rating': 'mean',  # average rating per category
+                    'id': 'count'      # story count
+                }).rename(columns={'id': 'count'}).reset_index()
+
+                # Calculate sort order: rating × log(count), with "Other" always last
+                cat_df['sort_order'] = cat_df['rating'] * \
+                    np.log1p(cat_df['count'])
+                cat_df.loc[cat_df["cat"] == "Other", "sort_order"] = 0
+                cat_df = cat_df.sort_values(
+                    'sort_order', ascending=False).reset_index(drop=True)
+                cat_df["sort_order"] = cat_df.index
+
+                # Add sort_order to newsletter_section_df
+                section_order_map = dict(
+                    zip(cat_df['cat'], cat_df['sort_order']))
+                newsletter_section_df['sort_order'] = newsletter_section_df['cat'].map(
+                    section_order_map)
+
                 # Update state with optimized sections
                 state.newsletter_section_data = newsletter_section_df.to_dict(
                     'records')
                 self.logger.info(
                     "Step 8b complete: All sections critiqued and optimized")
-
-            else:
-                self.logger.warning("No stories in newsletter sections")
-                state.newsletter_section_data = []
 
             # Complete the step
             state.complete_step(step_name)
@@ -3040,228 +3062,83 @@ class FinalizeNewsletterTool:
             if not state.newsletter_section_data:
                 return "❌ No drafted sections found to finalize. Please run step 8 first."
 
-            # ============ Step 9a: Sort Sections ============
-            self.logger.info("Step 9a: Sorting sections by quality")
+            # ============ Step 9a: write title ============
+            self.logger.info("Step 9: write title")
 
             # Get newsletter section DataFrame from state (already critiqued in Step 8b)
-            newsletter_section_df = state.newsletter_section_df
-
-            # Group by category and calculate stats
-            cat_df = newsletter_section_df.groupby(["cat", "section_title"]).agg({
-                'rating': 'mean',  # average rating per category
-                'id': 'count'      # story count
-            }).rename(columns={'id': 'count'}).reset_index()
-
-            # Calculate sort order: rating × log(count), with "Other" always last
-            cat_df['sort_order'] = cat_df['rating'] * np.log1p(cat_df['count'])
-            cat_df.loc[cat_df["cat"] == "Other", "sort_order"] = 0
-            cat_df = cat_df.sort_values(
-                'sort_order', ascending=False).reset_index(drop=True)
-            cat_df["sort_order"] = cat_df.index
-
-            # Add sort_order to newsletter_section_df
-            section_order_map = dict(zip(cat_df['cat'], cat_df['sort_order']))
-            newsletter_section_df['sort_order'] = newsletter_section_df['cat'].map(
-                section_order_map)
-
-            # Update state with sorted sections
-            state.newsletter_section_data = newsletter_section_df.to_dict(
-                'records')
-            self.logger.info(
-                f"Step 9a complete: Sorted {len(cat_df)} categories by rating × log(count)")
-
-            # ============ Step 9b: Assemble Newsletter Markdown ============
-            self.logger.info(
-                "Step 9b: Assembling newsletter markdown from sorted sections")
+            newsletter_section_df = state.newsletter_section_df.sort_values(
+                ['sort_order', 'rating'], ascending=[True, False])
 
             # Build markdown sections (include all categories)
-            sections_md = []
-            for _, row in cat_df.iterrows():
-                cat = row['cat']
-                section_title = row['section_title']
+            draft_newsletter = ""
+            last_cat = ""
+            for row in newsletter_section_df.itertuples():
+                if row.cat != last_cat:
+                    last_cat = row.cat
+                    draft_newsletter += f"# {row.section_title}\n\n"
+                draft_newsletter += f"- {row.headline} - {row.links}\n"
 
-                # Get stories for this category, sorted by rating (descending)
-                cat_stories = newsletter_section_df[
-                    newsletter_section_df['cat'] == cat
-                ].sort_values('rating', ascending=False)
-
-                # Build markdown section
-                section_md = f"## {section_title}\n\n"
-                for _, story in cat_stories.iterrows():
-                    section_md += f"- {story['headline']} - {story['links']}\n"
-
-                sections_md.append(section_md)
-
-            input_sections = "\n\n".join(sections_md)
             self.logger.info(
-                f"Compiled {len(sections_md)} sections into markdown input")
+                f"Compiled {len(newsletter_section_df)} sections into markdown input")
 
-            # Get assemble_newsletter prompt from Langfuse
-            assemble_system_prompt, assemble_user_prompt, model = \
-                LangfuseClient().get_prompt("newsagent/assemble_newsletter")
-
-            assemble_agent = LLMagent(
-                system_prompt=assemble_system_prompt,
-                user_prompt=assemble_user_prompt,
-                output_type=str,
+            # run generate_newsletter_title prompt from Langfuse
+            title_system_prompt, title_user_prompt, model = \
+                LangfuseClient().get_prompt("newsagent/generate_newsletter_title")
+            title_agent = LLMagent(
+                system_prompt=title_system_prompt,
+                user_prompt=title_user_prompt,
+                output_type=NewsAgentStr,
                 model=model,
                 verbose=self.verbose,
                 logger=self.logger
             )
+            response = await title_agent.run_prompt(input_text=draft_newsletter)
+            title = response.NewsAgentStr
+            self.logger.info(f"Generated title: {title}")
 
-            # Assemble initial newsletter draft (without H1)
-            draft_newsletter = await assemble_agent.run_prompt(input_text=input_sections)
-            self.logger.info(
-                f"Assembled draft without H1 ({len(draft_newsletter.split())} words)")
+            # prepend titile
+            draft_newsletter = f"{title}\n\n{draft_newsletter}"
 
-            # ============ Step 9b: Generate H1 Title ============
-            self.logger.info("Step 9b: Generating H1 title")
+            # ============ Step 9b: critic-optimizer loop ============
+            self.logger.info("Step 9: critic")
 
-            # Get H1 generation prompt from Langfuse
-            h1_system_prompt, h1_user_prompt, h1_model = \
-                LangfuseClient().get_prompt("newsagent/generate_h1_title")
-
-            h1_agent = LLMagent(
-                system_prompt=h1_system_prompt,
-                user_prompt=h1_user_prompt,
-                output_type=str,
-                model=h1_model,
-                verbose=self.verbose,
-                logger=self.logger
-            )
-
-            # Generate H1 title based on newsletter content
-            h1_title = await h1_agent.run_prompt(newsletter_content=draft_newsletter)
-            h1_title = h1_title.strip()
-
-            # Remove leading # if present
-            if h1_title.startswith('#'):
-                h1_title = h1_title.lstrip('#').strip()
-
-            self.logger.info(f"Generated H1: {h1_title}")
-
-            # Prepend H1 to newsletter
-            draft_newsletter = f"# {h1_title}\n\n{draft_newsletter}"
-            self.logger.info(f"Step 9b complete: Added H1 title")
-
-            # ============ Step 9c: Critic-Optimizer Loop ============
-            self.logger.info(
-                "Step 9c: Starting critic-optimizer loop on full newsletter")
-
-            # Create critic agent
-            critique_system_prompt, critique_user_prompt, critique_model = \
+            critique_newsletter_system_prompt, critique_newsletter_user_prompt, model = \
                 LangfuseClient().get_prompt("newsagent/critique_newsletter")
-
-            critic_agent = LLMagent(
-                system_prompt=critique_system_prompt,
-                user_prompt=critique_user_prompt,
-                output_type=NewsletterCritique,
-                model=critique_model,
+            critique_newsletter_agent = LLMagent(
+                system_prompt=critique_newsletter_system_prompt,
+                user_prompt=critique_newsletter_user_prompt,
+                output_type=NewsAgentStr,
+                model=model,
                 verbose=self.verbose,
                 logger=self.logger
             )
+            response = await critique_newsletter_agent.run_prompt(input_text=draft_newsletter)
+            critique = response.NewsAgentStr
 
-            # Create optimizer agent
-            optimize_system_prompt, optimize_user_prompt, optimize_model = \
-                LangfuseClient().get_prompt("newsagent/optimize_newsletter")
+            self.logger.info("Step 9: optimizer")
 
-            optimizer_agent = LLMagent(
-                system_prompt=optimize_system_prompt,
-                user_prompt=optimize_user_prompt,
-                output_type=str,
-                model=optimize_model,
+            improve_newsletter_system_prompt, improve_newsletter_user_prompt, model = \
+                LangfuseClient().get_prompt("newsagent/improve_newsletter")
+            improve_newsletter_agent = LLMagent(
+                system_prompt=improve_newsletter_system_prompt,
+                user_prompt=improve_newsletter_user_prompt,
+                output_type=NewsAgentStr,
+                model=model,
                 verbose=self.verbose,
                 logger=self.logger
             )
-
-            # Critic-optimizer loop (max 3 iterations)
-            max_iterations = 3
-            quality_threshold = 8.0
-            current_draft = draft_newsletter
-
-            for iteration in range(1, max_iterations + 1):
-                self.logger.info(f"Iteration {iteration}/{max_iterations}")
-
-                # Critique current draft
-                critique = await critic_agent.run_prompt(newsletter=current_draft)
-
-                self.logger.info(
-                    f"  Overall score: {critique.overall_score:.1f}/10")
-                self.logger.info(f"  Dimension scores:")
-                self.logger.info(
-                    f"    H1 quality: {critique.h1_quality:.1f}/10")
-                self.logger.info(
-                    f"    Section quality: {critique.section_quality:.1f}/10")
-                self.logger.info(
-                    f"    Headline quality: {critique.headline_quality:.1f}/10")
-                self.logger.info(
-                    f"    Story selection: {critique.story_selection:.1f}/10")
-                self.logger.info(
-                    f"    Format compliance: {critique.format_compliance:.1f}/10")
-                self.logger.info(f"  Issues found: {len(critique.duplicate_issues)} duplicates, "
-                                 f"{len(critique.headline_issues)} headline issues, "
-                                 f"{len(critique.section_issues)} section issues")
-                if critique.recommendations:
-                    self.logger.info(f"  Top recommendations:")
-                    for i, rec in enumerate(critique.recommendations[:5], 1):
-                        self.logger.info(f"    {i}. {rec}")
-
-                # Check if quality threshold met
-                if critique.overall_score >= quality_threshold:
-                    self.logger.info(
-                        f"✅ Quality threshold achieved ({critique.overall_score:.1f} >= {quality_threshold})")
-                    current_draft = current_draft  # Keep current draft
-                    break
-
-                if not critique.should_iterate:
-                    self.logger.info("Critic recommends stopping iteration")
-                    break
-
-                # Optimize based on critique
-                self.logger.info(
-                    f"  Applying {len(critique.recommendations)} recommendations")
-
-                current_draft = await optimizer_agent.run_prompt(
-                    newsletter=current_draft,
-                    critique=critique.model_dump_json(indent=2)
-                )
-
-                self.logger.info(
-                    f"  Optimized draft ({len(current_draft.split())} words)")
+            response = await improve_newsletter_agent.run_prompt(newsletter=draft_newsletter, critique=critique)
+            draft_newsletter = response.NewsAgentStr
 
             # Store the final newsletter
-            state.final_newsletter = current_draft
-            newsletter_length = len(current_draft.split())
+            state.final_newsletter = draft_newsletter
+            newsletter_length = len(draft_newsletter.split())
 
             self.logger.info(
                 f"Step 9c complete: Final newsletter {newsletter_length} words")
 
             # ============ Step 9d: Validate and Send ============
             self.logger.info("Step 9d: Validating and sending newsletter")
-
-            # Validation checks
-            import re
-
-            validation_errors = []
-
-            # Check H1 present
-            if not re.search(r'^# .+', current_draft, re.MULTILINE):
-                validation_errors.append("Missing H1 title")
-
-            # Count sections (## headers)
-            sections = re.findall(r'^## (.+)', current_draft, re.MULTILINE)
-            if not (8 <= len(sections) <= 16):
-                validation_errors.append(
-                    f"Section count {len(sections)} not in range 8-16")
-
-            # Check "Other News" is last (if present)
-            if sections and "Other News" in sections and sections[-1] != "Other News":
-                validation_errors.append(
-                    "'Other News' should be final section")
-
-            if validation_errors:
-                self.logger.warning(
-                    f"Validation warnings: {'; '.join(validation_errors)}")
 
             # Send email with styled newsletter
             try:
@@ -3272,7 +3149,7 @@ class FinalizeNewsletterTool:
 
                 # Convert markdown to HTML
                 newsletter_html = markdown.markdown(
-                    current_draft,
+                    draft_newsletter,
                     extensions=['extra', 'codehilite']
                 )
 
@@ -3298,11 +3175,6 @@ class FinalizeNewsletterTool:
             except Exception as e:
                 self.logger.error(f"Failed to send newsletter email: {e}")
 
-            # Calculate final stats
-            sections_included = newsletter_section_df['cat'].nunique(
-            ) if not newsletter_section_df.empty else 0
-            final_quality_score = critique.overall_score if 'critique' in locals() else 8.0
-
             # Complete the step and mark workflow as complete
             state.complete_step(step_name)
 
@@ -3313,7 +3185,7 @@ class FinalizeNewsletterTool:
             status_msg = f"🎉 Step 9 {step_name} completed successfully!"
             status_msg += f"\n📊 {sections_included} sections, {newsletter_length} words"
             status_msg += f"\n⭐ Final quality score: {final_quality_score:.1f}/10"
-            status_msg += f"\n🔄 Completed {iteration} critic-optimizer iteration(s)"
+            # status_msg += f"\n🔄 Completed {iteration} critic-optimizer iteration(s)"
             status_msg += "\n📰 Newsletter stored in persistent state and emailed"
             status_msg += "\n✅ Workflow complete! All 9 steps finished successfully."
 
