@@ -257,18 +257,26 @@ The notebook is invaluable for:
 
 ```
 OpenAIAgentsSDK/
-├── news_agent.py              # Main newsletter agent implementation
-├── test_agent.ipynb          # Interactive development notebook ⭐
-├── newsletter_state.py       # State management and persistence
-├── fetch.py                  # Multi-source content fetching
-├── scrape.py                 # Advanced web scraping utilities
-├── sources.yaml              # News source configurations
-├── config.py                 # System configuration and constants
-├── llm.py                    # LLM integration and classification
-├── log_handler.py           # Database logging system
-├── tests/                   # Comprehensive test suite
-├── download/                # Downloaded content storage
-└── requirements.txt         # Python dependencies
+├── Basic OpenAI Agents SDK.ipynb  # Introduction to OpenAI Agents SDK
+├── Run Agent.ipynb                # Newsletter workflow notebook ⭐
+├── news_agent.py                  # Main agent implementation
+├── sources.yaml                   # News source configurations
+├── config.py                      # System configuration
+├── db.py                          # Database utilities
+├── do_cluster.py                  # Topic clustering via HDBSCAN
+├── do_dedupe.py                   # Deduplication logic
+├── do_rating.py                   # Article rating with Bradley-Terry
+├── fetch.py                       # Multi-source content fetching
+├── llm.py                         # LLM integration with Langfuse
+├── scrape.py                      # Web scraping utilities
+├── dot-env.txt                    # Environment variables template
+├── headline_classifier_ground_truth.csv  # Training data
+├── list_langfuse_prompts.py       # Export Langfuse prompts
+├── prompts.md                     # Prompt documentation
+├── requirements.txt               # Python dependencies
+├── promptfoo/                     # Prompt evaluation framework
+├── LICENSE                        # MIT License
+└── README.md                      # This file
 ```
 
 ## 🔧 Configuration
