@@ -270,7 +270,7 @@ OpenAIAgentsSDK/
 ├── llm.py                         # LLM integration with Langfuse
 ├── scrape.py                      # Web scraping utilities
 ├── dot-env.txt                    # Environment variables template
-├── headline_classifier_ground_truth.csv  # Training data
+├── headline_classifier_ground_truth.csv  # Evaluation data
 ├── list_langfuse_prompts.py       # Export Langfuse prompts
 ├── prompts.md                     # Prompt documentation
 ├── requirements.txt               # Python dependencies
