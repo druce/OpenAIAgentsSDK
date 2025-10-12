@@ -6,6 +6,59 @@ An AI-powered newsletter generation system built on the OpenAI Agents SDK that i
 
 This system automatically gathers news articles from RSS feeds, HTML scraping targets, and REST APIs, filters them for AI-related content using LLM classification, downloads full article content, generates summaries, clusters articles by topic, rates content quality, and produces a polished newsletter ready for distribution.
 
+```mermaid
+  flowchart TD
+      Start([Start Newsletter Workflow]) --> Step1[Step 1: Gather URLs<br/>RSS + HTML + REST APIs<br/>17+ sources]
+
+      Step1 --> Step2[Step 2: Filter URLs<br/>LLM AI Classification<br/>Deduplication]
+
+      Step2 --> Step3[Step 3: Download Articles<br/>Playwright Scraping<br/>Content Extraction]
+
+      Step3 --> Step4[Step 4: Extract Summaries<br/>LLM Summarization<br/>3-point summaries]
+
+      Step4 --> Step5[Step 5: Cluster by Topic<br/>HDBSCAN + Embeddings<br/>Topic Assignment]
+
+      Step5 --> Step6[Step 6: Rate Articles<br/>ELO-type Comparisons<br/>Quality Scoring 1-10]
+
+      Step6 --> Step7[Step 7: Select Sections<br/>Top Articles per Topic<br/>Newsletter Outline]
+
+      Step7 --> Step8{Step 8: Draft Sections<br/>Write Headlines & Content}
+
+      Step8 --> Critique8[Section Critique<br/>Quality Evaluation]
+      Critique8 --> Check8{Score >= 8.0?}
+      Check8 -->|No & iter < 3| Improve8[Apply Improvements]
+      Improve8 --> Step8
+      Check8 -->|Yes or iter = 3| Step9[Step 9: Finalize Newsletter<br/>Generate Title<br/>Assemble Sections]
+
+      Step9 --> Critique9[Critique Agent<br/>Evaluate Quality<br/>5 dimension scores]
+
+      Critique9 --> Check9{Overall >= 8.0<br/>OR<br/>iterate = NO<br/>OR<br/>iter = 3?}
+
+      Check9 -->|No| Optimizer[Optimizer Agent<br/>Apply Recommendations<br/>Improve Newsletter]
+      Optimizer --> Critique9
+
+      Check9 -->|Yes| Final([Publication-Ready Newsletter<br/>Quality Score 8.0-9.5/10])
+
+      style Step1 fill:#e1f5ff
+      style Step2 fill:#e1f5ff
+      style Step3 fill:#e1f5ff
+      style Step4 fill:#fff4e1
+      style Step5 fill:#fff4e1
+      style Step6 fill:#fff4e1
+      style Step7 fill:#e8f5e9
+      style Step8 fill:#e8f5e9
+      style Step9 fill:#f3e5f5
+      style Critique8 fill:#ffe0e0
+      style Critique9 fill:#ffe0e0
+      style Optimizer fill:#ffe0e0
+      style Check8 fill:#fff9c4
+      style Check9 fill:#fff9c4
+      style Final fill:#c8e6c9
+  ```
+**Getting Started:**
+- [`Basic OpenAI Agents SDK.ipynb`](Basic%20OpenAI%20Agents%20SDK.ipynb) - Introduction to OpenAI Agents SDK fundamentals
+- [`Run Agent.ipynb`](Run%20Agent.ipynb) - Complete newsletter agent workflow with step-by-step execution
+
 ## 🚀 Quick Start
 
 ### Prerequisites
@@ -281,8 +334,8 @@ python news_agent.py  # Automatically resumes from last step
 
 ### Performance Characteristics
 
-- **Speed**: Complete workflow in ~3-5 minutes (with cached content)
-- **Scalability**: Handles 1000+ articles with concurrent processing
+- **Speed**: Complete workflow with 100 articles in ~15 minutes (with cached content)
+- **Scalability**: Should handles 1000+ articles with concurrent processing
 - **Reliability**: Automatic retry logic and error recovery
 - **Quality**: High-quality AI-generated content with iterative refinement and quality scoring
 - **Efficiency**: Early stopping in critic-optimizer loops when quality threshold met
@@ -307,13 +360,6 @@ python news_agent.py  # Automatically resumes from last step
 - 30+ articles in final newsletter
 - 1200+ words of professional content
 - Quality score: 8.0-9.5/10 (via critic-optimizer loop)
-
-## 🤝 Contributing
-
-1. Use `test_agent.ipynb` for interactive development
-2. Run the test suite before submitting changes
-3. Follow the existing code patterns and documentation style
-4. Add tests for new functionality
 
 ## 📜 License
 
