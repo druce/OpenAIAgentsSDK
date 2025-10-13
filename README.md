@@ -10,7 +10,7 @@ This system gathers news articles from RSS feeds, HTML scraping targets, and RES
   flowchart TD
       Start([Start Newsletter Workflow]) --> Step1[1: Gather URLs<br/>RSS + HTML + REST APIs<br/>17+ sources]
 
-      Step1 --> Step2[2: Filter URLs<br/>Deduplicate previously seen<br/>LLM AI Classification<br/>]
+      Step1 --> Step2[2: Filter URLs<br/>Deduplicate Previously Seen<br/>LLM AI Classification<br/>]
 
       Step2 --> Step3[3: Download Articles<br/>Playwright Scraping<br/>Content Extraction]
 
@@ -42,9 +42,9 @@ This system gathers news articles from RSS feeds, HTML scraping targets, and RES
       style Step1 fill:#e1f5ff
       style Step2 fill:#e1f5ff
       style Step3 fill:#e1f5ff
-      style Step4 fill:#fff4e1
-      style Step5 fill:#fff4e1
-      style Step6 fill:#fff4e1
+      style Step4 fill:#e1f5ff
+      style Step5 fill:#e1f5ff
+      style Step6 fill:#e1f5ff
       style Step7 fill:#e8f5e9
       style Step8 fill:#e8f5e9
       style Step9 fill:#f3e5f5
