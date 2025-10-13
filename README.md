@@ -42,9 +42,9 @@ This system gathers news articles from RSS feeds, HTML scraping targets, and RES
       style Step1 fill:#e1f5ff
       style Step2 fill:#e1f5ff
       style Step3 fill:#e1f5ff
-      style Step4 fill:#e1f5ff
-      style Step5 fill:#e1f5ff
-      style Step6 fill:#e1f5ff
+      style Step4 fill:#fff9c4
+      style Step5 fill:#fff9c4
+      style Step6 fill:#fff9c4
       style Step7 fill:#e8f5e9
       style Step8 fill:#e8f5e9
       style Critique8 fill:#ffe0e0
