@@ -43,8 +43,6 @@ newsapi-python
 trafilatura
 markdown
 
-chromadb
-
 # MCP (Model Context Protocol) dependencies
 mcp
 

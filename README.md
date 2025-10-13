@@ -391,6 +391,6 @@ python news_agent.py  # Automatically resumes from last step
 
 This project is licensed under the MIT License - see the LICENSE file for details.
 
-### Built with ❤️ using OpenAI Agents SDK, Playwright, and advanced AI techniques**
+### Built with ❤️ using OpenAI Agents SDK, Claude Code, Windsurf, Python, Pandas, Jupyter, Langfuse, Playwright and other great tools
 
 ---
