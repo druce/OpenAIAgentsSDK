@@ -24,7 +24,7 @@ This system gathers news articles from RSS feeds, HTML scraping targets, and RES
 
       Step7 --> Step8[8: Draft Sections<br/>Write Headlines & Content<br/>Run Critic-Optimizer Loop]
 
-      Step8 --> Critique8{Section Critique<br/>Quality Evaluation}
+      Step8 --> Critique8[Section Critique<br/>Quality Evaluation]
       Critique8 --> Check8{Score >= 8.0?}
       Check8 -->|No & iter < 3| Improve8[Apply Improvements]
       Improve8 --> Critique8
