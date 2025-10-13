@@ -18,7 +18,7 @@ This system gathers news articles from RSS feeds, HTML scraping targets, and RES
 
       Step4 --> Step5[5: Cluster by Topic<br/>HDBSCAN + Embeddings]
 
-      Step5 --> Step6[6: Rate Articles<br/>Identify on-topic, high quality<br/>using Elo-type Comparisons]
+      Step5 --> Step6[6: Rate Articles<br/>Identify<br/>on-topic, high quality<br/>using Elo-type Comparisons]
 
       Step6 --> Step7[7: Select Sections<br/>Top Articles by Topic<br/>Newsletter Outline]
 
@@ -30,7 +30,7 @@ This system gathers news articles from RSS feeds, HTML scraping targets, and RES
       Improve8 --> Step8
       Check8 -->|Yes or iter = 3| Step9[Step 9: Finalize Newsletter<br/>Generate Title<br/>Assemble Sections]
 
-      Step9 --> Critique9[Critique Full Newsletter<br/>Evaluate Quality<br/>5 dimension scores]
+      Step9 --> Critique9[Full Newsletter<br/>Critic-Optimizer Loop<br/>Evaluate Quality<br/>5 dimension scores]
 
       Critique9 --> Check9{Score >= 8.0<br/>OR<br/>iter = 3?}
 
