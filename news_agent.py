@@ -14,7 +14,7 @@ import json
 import dotenv
 
 # import random
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 # from collections import Counter
 import sqlite3
@@ -48,7 +48,7 @@ from llm import LLMagent, LangfuseClient
 from utilities import send_gmail
 from scrape import scrape_urls_concurrent, normalize_html
 from fetch import Fetcher
-from db import Url, Site
+from db import Url, Site, Article, Newsletter
 from log_handler import SQLiteLogHandler
 from newsletter_state import NewsletterAgentState
 from config import CANONICAL_TOPICS, DOWNLOAD_DIR, PAGES_DIR, TEXT_DIR, NEWSAGENTDB, LOGDB, DEFAULT_CONCURRENCY
@@ -1877,6 +1877,67 @@ class RateArticlesTool:
             except Exception as e:
                 self.logger.error(f"Failed to send email: {e}")
 
+            # Insert articles into database using Article schema
+            self.logger.info(
+                f"Inserting {len(rated_df)} articles into database")
+
+            # Ensure date column has values - use current datetime for missing dates
+            rated_df['date'] = datetime.now(timezone.utc)
+
+            try:
+                with sqlite3.connect(NEWSAGENTDB) as conn:
+                    Article.create_table(conn)  # Ensure articles table exists
+
+                    articles_inserted = 0
+                    for _, row in rated_df.iterrows():
+                        try:
+                            # Create Article instance with available data
+                            article = Article(
+                                final_url=row.get(
+                                    'final_url', row.get('url', '')),
+                                url=row.get('url', ''),
+                                source=row.get('source', row.get('src', '')),
+                                title=row.get('title', ''),
+                                published=pd.to_datetime(row.get('published')) if pd.notna(
+                                    row.get('published')) else None,
+                                rss_summary=row.get('rss_summary', ''),
+                                # Assume True since these went through AI filtering
+                                isAI=bool(row.get('isAI', True)),
+                                status=row.get('status', 'rated'),
+                                html_path=row.get('html_path', ''),
+                                last_updated=pd.to_datetime(row.get('last_updated')) if pd.notna(
+                                    row.get('last_updated')) else None,
+                                text_path=row.get('text_path', ''),
+                                content_length=int(
+                                    row.get('content_length', 0)),
+                                summary=row.get('summary', ''),
+                                short_summary=row.get('short_summary'),
+                                description=row.get('description', ''),
+                                rating=float(row.get('rating', 0.0)),
+                                cluster_label=row.get(
+                                    'cluster_label', row.get('cluster_name', '')),
+                                domain=row.get(
+                                    'domain', row.get('hostname', '')),
+                                site_name=row.get('site_name', ''),
+                                reputation=float(row.get('reputation', 0.0)) if pd.notna(
+                                    row.get('reputation')) else None,
+                                date=pd.to_datetime(row.get('date'))
+                            )
+
+                            # Use upsert to avoid conflicts on duplicate final_url
+                            article.upsert(conn)
+                            articles_inserted += 1
+
+                        except Exception as e:
+                            self.logger.warning(
+                                f"Failed to insert article {row.get('title', 'Unknown')}: {e}")
+
+                    self.logger.info(
+                        f"Successfully inserted {articles_inserted}/{len(rated_df)} articles")
+
+            except Exception as e:
+                self.logger.error(f"Database insertion failed: {e}")
+
             status_msg = f"✅ Step 5 {step_name} completed successfully! Rated {articles_rated} articles with average rating {avg_rating:.1f}/10."
             status_msg += f"\n⭐ High quality articles (≥7.0): {high_quality_count}"
             status_msg += "\n💾 Ratings stored in persistent state."
@@ -2639,6 +2700,333 @@ class DraftSectionsTool:
         self.verbose = verbose
         self.logger = logger
 
+    def _fix_singletons(self, newsletter_section_df: pd.DataFrame) -> pd.DataFrame:
+        """Move singleton categories (categories with only 1 story) to 'Other' category.
+
+        Args:
+            newsletter_section_df: DataFrame with newsletter section stories
+
+        Returns:
+            Modified DataFrame with singletons moved to Other category
+        """
+        # Group by category and calculate stats
+        cat_df = newsletter_section_df.groupby(["cat", "section_title"]).agg({
+            'rating': 'mean',
+            'id': 'count'
+        }).rename(columns={'id': 'count'}).sort_values('rating', ascending=False).reset_index()
+
+        # Find singleton categories
+        singleton_cats = cat_df[cat_df['count'] == 1]['cat'].tolist()
+
+        if singleton_cats:
+            self.logger.info(
+                f"Moving {len(singleton_cats)} singleton categories to Other: {singleton_cats}")
+
+            # Move singletons to Other
+            for singleton_cat in singleton_cats:
+                newsletter_section_df.loc[newsletter_section_df['cat']
+                                          == singleton_cat, 'cat'] = 'Other'
+                newsletter_section_df.loc[newsletter_section_df['cat']
+                                          == 'Other', 'section_title'] = 'Other News'
+
+        return newsletter_section_df
+
+    async def _critique_section(
+        self,
+        critique_agent: LLMagent,
+        cat: str,
+        newsletter_section_df: pd.DataFrame,
+        unique_cats: list
+    ) -> tuple[str, SectionCritique]:
+        """Critique a single newsletter section.
+
+        Args:
+            critique_agent: LLM agent configured for section critique
+            cat: Category name to critique
+            newsletter_section_df: DataFrame with all section stories
+            unique_cats: List of all unique category names (for move recommendations)
+
+        Returns:
+            Tuple of (category, SectionCritique object)
+        """
+        cat_stories = newsletter_section_df.loc[newsletter_section_df['cat'] == cat]
+        section_title = cat_stories['section_title'].iloc[0]
+        section_input = cat_stories[[
+            'id', 'headline', 'rating', 'links']].to_dict('records')
+
+        # Build target_categories string (all categories except current one)
+        target_categories = [
+            str("\n".join([c for c in unique_cats if c != cat]))]
+
+        critique = await critique_agent.run_prompt(
+            section_title=section_title,
+            target_categories=target_categories,
+            input_text=section_input
+        )
+
+        return (cat, critique)
+
+    def _apply_critique_actions(
+        self,
+        newsletter_section_df: pd.DataFrame,
+        critiques: list[tuple[str, SectionCritique]],
+        cat_df_dict: dict[str, str]
+    ) -> pd.DataFrame:
+        """Apply critique recommendations (drop, rewrite, move) to section stories.
+
+        Args:
+            newsletter_section_df: DataFrame with newsletter section stories
+            critiques: List of (category, SectionCritique) tuples
+            cat_df_dict: Dict mapping category name to section title
+
+        Returns:
+            Modified DataFrame with actions applied, prune column updated
+        """
+        newsletter_section_df['prune'] = False
+
+        for cat, critique in critiques:
+            self.logger.info(
+                f"  {cat}: Coherence={critique.overall_coherence:.1f}/10, "
+                f"Quality={critique.overall_quality:.1f}/10"
+            )
+
+            for action in critique.item_actions:
+                story_mask = newsletter_section_df['id'] == action.id
+
+                if action.action == 'drop':
+                    try:
+                        self.logger.info(
+                            f"    DROP id={action.id}: {action.reason}")
+                        newsletter_section_df.loc[story_mask, 'prune'] = True
+                        newsletter_section_df.loc[story_mask, 'cat'] = 'Other'
+                        newsletter_section_df.loc[story_mask,
+                                                  'section_title'] = 'Other News'
+                    except Exception as e:
+                        self.logger.error(f"Error dropping story: {str(e)}")
+                        raise e
+
+                elif action.action == 'rewrite' and action.rewritten_headline:
+                    try:
+                        old_headline = newsletter_section_df.loc[story_mask,
+                                                                 'headline'].iloc[0]
+                        self.logger.info(
+                            f"    REWRITE id={action.id}: {action.reason}")
+                        self.logger.info(f"      Old: {old_headline}")
+                        self.logger.info(
+                            f"      New: {action.rewritten_headline}")
+                        newsletter_section_df.loc[story_mask,
+                                                  'headline'] = action.rewritten_headline
+                    except Exception as e:
+                        self.logger.error(
+                            f"Error rewriting headline: {str(e)}")
+                        raise e
+
+                elif action.action == 'move' and action.target_category:
+                    try:
+                        self.logger.info(
+                            f"    MOVE id={action.id} to {action.target_category}: {action.reason}"
+                        )
+                        newsletter_section_df.loc[story_mask,
+                                                  'cat'] = action.target_category
+                        newsletter_section_df.loc[story_mask,
+                                                  'section_title'] = cat_df_dict[action.target_category]
+                    except Exception as e:
+                        self.logger.error(f"Error moving story: {str(e)}")
+                        raise e
+
+        stories_pruned = newsletter_section_df['prune'].sum()
+        stories_remaining = len(newsletter_section_df) - stories_pruned
+        self.logger.info(
+            f"Pruned {stories_pruned} stories, leaving {stories_remaining}")
+
+        return newsletter_section_df
+
+    def _calculate_section_sort_order(self, newsletter_section_df: pd.DataFrame) -> pd.DataFrame:
+        """Calculate section sort order using rating × log(count), with 'Other' always last.
+
+        Args:
+            newsletter_section_df: DataFrame with newsletter section stories
+
+        Returns:
+            DataFrame with sort_order column added to both cat_df calculation and original df
+        """
+        # Group by category and calculate stats
+        cat_df = newsletter_section_df.groupby(["cat", "section_title"]).agg({
+            'rating': 'mean',
+            'id': 'count'
+        }).rename(columns={'id': 'count'}).reset_index()
+
+        # Calculate sort order: rating × log(count), with "Other" always last
+        cat_df['sort_order'] = cat_df['rating'] * np.log1p(cat_df['count'])
+        cat_df.loc[cat_df["cat"] == "Other", "sort_order"] = 0
+        cat_df = cat_df.sort_values(
+            'sort_order', ascending=False).reset_index(drop=True)
+        cat_df["sort_order"] = cat_df.index
+
+        # Add sort_order to newsletter_section_df
+        section_order_map = dict(zip(cat_df['cat'], cat_df['sort_order']))
+        newsletter_section_df['sort_order'] = newsletter_section_df['cat'].map(
+            section_order_map)
+
+        return newsletter_section_df
+
+    async def _draft_all_sections_async(
+        self,
+        categories: list[str],
+        headline_df: pd.DataFrame,
+        write_section_agent: LLMagent
+    ) -> dict[str, Section]:
+        """Draft all newsletter sections asynchronously.
+
+        Args:
+            categories: List of category names to draft sections for
+            headline_df: DataFrame with article data
+            write_section_agent: LLM agent configured for section writing
+
+        Returns:
+            Dict mapping category name to Section object
+        """
+        async def draft_section(cat, agent):
+            """Draft a section for a given category"""
+            # Get articles for this category, sorted by rating, convert to JSON
+            cat_df = headline_df.loc[headline_df["cat"] == cat].sort_values(
+                "rating", ascending=False)
+
+            input_text = cat_df[["id", "rating", "short_summary", "site_name", "final_url"]].rename(
+                columns={"short_summary": "summary", "final_url": "url"}
+            ).to_json(orient="records")
+
+            # Call the LLM to draft the section
+            response = await agent.run_prompt(input_text=input_text)
+
+            return (cat, response)
+
+        # Draft all sections asynchronously
+        draft_tasks = [draft_section(cat, write_section_agent)
+                       for cat in categories]
+        draft_results = await asyncio.gather(*draft_tasks, return_exceptions=True)
+
+        # Store Section objects in dict
+        newsletter_section_obj = {}
+        sections_drafted = 0
+        for result in draft_results:
+            if isinstance(result, Exception):
+                self.logger.error(f"Error drafting section: {result}")
+                continue
+
+            cat, section = result
+            newsletter_section_obj[cat] = section
+            sections_drafted += 1
+
+        self.logger.info(f"Drafted {sections_drafted} sections")
+
+        return newsletter_section_obj
+
+    def _flatten_sections_to_df(self, section_objects: dict[str, Section]) -> pd.DataFrame:
+        """Convert Section Pydantic objects to flat DataFrame of stories.
+
+        Args:
+            section_objects: Dict mapping category name to Section object
+
+        Returns:
+            DataFrame with columns: cat, section_title, id, headline, rating, prune, links
+        """
+        section_list = []
+        for cat, section in section_objects.items():
+            for story in section.headlines:
+                # Convert links to markdown string
+                links_md = " ".join(
+                    [f"[{link.site_name}]({link.url})" for link in story.links])
+
+                section_list.append({
+                    'cat': cat,
+                    'section_title': section.section_title,
+                    'id': story.id,
+                    'headline': story.headline,
+                    'rating': story.rating,
+                    'prune': story.prune,
+                    'links': links_md
+                })
+
+        return pd.DataFrame(section_list)
+
+    async def _critique_and_optimize_sections(
+        self,
+        newsletter_section_df: pd.DataFrame
+    ) -> pd.DataFrame:
+        """Orchestrate Step 8b: Critique and optimize all newsletter sections.
+
+        This method coordinates the section critique workflow:
+        1. Fix singleton categories (move to Other)
+        2. Create critique agent
+        3. Critique all sections in parallel
+        4. Apply critique actions (drop/rewrite/move)
+        5. Remove pruned stories
+        6. Calculate final sort order
+
+        Args:
+            newsletter_section_df: DataFrame with drafted section stories
+
+        Returns:
+            Optimized DataFrame with critiques applied and sort order calculated
+        """
+        self.logger.info(
+            "Step 8b: Critiquing and optimizing individual sections")
+
+        # Fix singletons first
+        newsletter_section_df = self._fix_singletons(newsletter_section_df)
+
+        # Recalculate cat_df after fixing singletons
+        cat_df = newsletter_section_df.groupby(["cat", "section_title"]).agg({
+            'rating': 'mean',
+            'id': 'count'
+        }).rename(columns={'id': 'count'}).sort_values('rating', ascending=False).reset_index()
+
+        cat_df_dict = dict(zip(cat_df['cat'], cat_df['section_title']))
+
+        # Get langfuse prompts for section critique
+        section_critique_system, section_critique_user, section_critique_model = \
+            LangfuseClient().get_prompt("newsagent/critique_section")
+
+        # Create critique agent
+        critique_agent = LLMagent(
+            system_prompt=section_critique_system,
+            user_prompt=section_critique_user,
+            output_type=SectionCritique,
+            model=section_critique_model,
+            verbose=self.verbose,
+            logger=self.logger
+        )
+
+        # Process each section with critique
+        unique_cats = newsletter_section_df['cat'].unique()
+        self.logger.info(f"Processing {len(unique_cats)} sections")
+
+        # Critique all sections in parallel
+        tasks = [
+            self._critique_section(critique_agent, cat,
+                                   newsletter_section_df, unique_cats)
+            for cat in unique_cats
+        ]
+        critiques = await asyncio.gather(*tasks)
+
+        # Apply critique recommendations
+        newsletter_section_df = self._apply_critique_actions(
+            newsletter_section_df, critiques, cat_df_dict
+        )
+
+        # Remove pruned stories
+        newsletter_section_df = newsletter_section_df.loc[~newsletter_section_df['prune']]
+
+        # Calculate sort order
+        newsletter_section_df = self._calculate_section_sort_order(
+            newsletter_section_df)
+
+        self.logger.info(
+            "Step 8b complete: All sections critiqued and optimized")
+
+        return newsletter_section_df
+
     async def _draft_sections(self, ctx, args: str) -> str:
         """Execute Step 8: Draft Sections using persistent state"""
         step_name = "step_08_draft_sections"
@@ -2737,7 +3125,7 @@ class DraftSectionsTool:
                 return "❌ No categories found in selected headlines."
 
             self.logger.info(
-                f"Step 8b: Drafting sections for {len(categories)} categories (including Other) from selected stories")
+                f"Drafting sections for {len(categories)} categories (including Other) from selected stories")
 
             # Create write_section agent
             write_section_system_prompt, write_section_user_prompt, model = \
@@ -2752,68 +3140,19 @@ class DraftSectionsTool:
                 logger=self.logger
             )
 
-            async def draft_section(cat, agent):
-                """Draft a section for a given category"""
-                # Get articles for this category, sorted by rating, convert to JSON
-                cat_df = headline_df.loc[headline_df["cat"] == cat].sort_values(
-                    "rating", ascending=False)
+            # Draft all sections asynchronously using helper method
+            newsletter_section_obj = await self._draft_all_sections_async(
+                categories, headline_df, write_section_agent
+            )
 
-                input_text = cat_df[["id", "rating", "short_summary", "site_name", "final_url"]].rename(
-                    columns={"short_summary": "summary", "final_url": "url"}
-                ).to_json(orient="records")
-
-                # Call the LLM to draft the section
-                response = await agent.run_prompt(input_text=input_text)
-
-                return (cat, response)
-
-            # Draft all sections asynchronously
-            draft_tasks = [draft_section(cat, write_section_agent)
-                           for cat in categories]
-            draft_results = await asyncio.gather(*draft_tasks, return_exceptions=True)
-
-            # Store Section objects in local dict
-            newsletter_section_obj = {}
-            sections_drafted = 0
-            for result in draft_results:
-                if isinstance(result, Exception):
-                    self.logger.error(f"Error drafting section: {result}")
-                    continue
-
-                cat, section = result
-                newsletter_section_obj[cat] = section
-                sections_drafted += 1
-
-            self.logger.info(
-                f"Drafted {sections_drafted} sections, now flattening to DataFrame")
-
-            # Flatten section objects to DataFrame
-            section_list = []
-            for cat, section in newsletter_section_obj.items():
-                for story in section.headlines:
-                    # Convert links to markdown string
-                    links_md = " ".join(
-                        [f"[{link.site_name}]({link.url})" for link in story.links])
-
-                    section_list.append({
-                        'cat': cat,
-                        'section_title': section.section_title,
-                        'id': story.id,
-                        'headline': story.headline,
-                        'rating': story.rating,
-                        'prune': story.prune,
-                        'links': links_md
-                    })
-
-            # Create DataFrame
-            newsletter_section_df = pd.DataFrame(section_list)
+            # Flatten section objects to DataFrame using helper method
+            newsletter_section_df = self._flatten_sections_to_df(
+                newsletter_section_obj)
 
             if not newsletter_section_df.empty:
                 # Reassign pruned stories to "Other" category
                 newsletter_section_df.loc[newsletter_section_df['prune'],
                                           'cat'] = 'Other'
-
-                # Update section_title for "Other" category
                 newsletter_section_df.loc[newsletter_section_df['cat']
                                           == 'Other', 'section_title'] = 'Other News'
 
@@ -2821,158 +3160,15 @@ class DraftSectionsTool:
                 self.logger.info(
                     f"Reassigned {pruned_count} pruned stories to Other section")
 
-                # Store in state
-                state.newsletter_section_data = newsletter_section_df.to_dict(
-                    'records')
-
                 self.logger.info(
                     f"Created newsletter_section_df with {len(newsletter_section_df)} stories across {newsletter_section_df['cat'].nunique()} categories")
 
                 # ============ Step 8b: Critique and Optimize Individual Sections ============
-                self.logger.info(
-                    "Step 8b: Critiquing and optimizing individual sections")
-
-                # Group by category and calculate stats
-                cat_df = newsletter_section_df.groupby(["cat", "section_title"]).agg({
-                    'rating': 'mean',  # average rating per category
-                    'id': 'count'      # story count
-                }).rename(columns={'id': 'count'}).sort_values('rating', ascending=False).reset_index()
-
-                # Move singleton categories to "Other"
-                singleton_cats = cat_df[cat_df['count'] == 1]['cat'].tolist()
-                if singleton_cats:
-                    self.logger.info(
-                        f"Moving {len(singleton_cats)} singleton categories to Other: {singleton_cats}")
-                    for singleton_cat in singleton_cats:
-                        newsletter_section_df.loc[newsletter_section_df['cat']
-                                                  == singleton_cat, 'cat'] = 'Other'
-                        newsletter_section_df.loc[newsletter_section_df['cat']
-                                                  == 'Other', 'section_title'] = 'Other News'
-
-                    # Recalculate cat_df after moving singletons
-                    cat_df = newsletter_section_df.groupby(["cat", "section_title"]).agg({
-                        'rating': 'mean',
-                        'id': 'count'
-                    }).rename(columns={'id': 'count'}).sort_values('rating', ascending=False).reset_index()
-
-                cat_df_dict = dict(zip(cat_df['cat'], cat_df['section_title']))
-
-                # Get langfuse prompts for section critique
-                section_critique_system, section_critique_user, section_critique_model = \
-                    LangfuseClient().get_prompt("newsagent/critique_section")
-
-                # Process each section with critic-optimizer loop
-                unique_cats = newsletter_section_df['cat'].unique()
-                self.logger.info(f"Processing {len(unique_cats)} sections")
-
-                critique_agent = LLMagent(
-                    system_prompt=section_critique_system,
-                    user_prompt=section_critique_user,
-                    output_type=SectionCritique,
-                    model=section_critique_model,
-                    verbose=self.verbose,
-                    logger=self.logger
-                )
-
-                async def critique_wrapper(cat, target_categories):
-                    cat_stories = newsletter_section_df.loc[newsletter_section_df['cat'] == cat]
-                    section_title = cat_stories['section_title'].iloc[0]
-                    section_input = cat_stories[[
-                        'id', 'headline', 'rating', 'links']].to_dict('records')
-                    critique = await critique_agent.run_prompt(section_title=section_title, target_categories=target_categories, input_text=section_input)
-                    return (cat, critique)
-
-                tasks = []
-                for cat in unique_cats:
-                    target_categories = [
-                        str("\n".join([c for c in unique_cats if c != cat]))]
-                    tasks.append(critique_wrapper(cat, target_categories))
-                critiques = await asyncio.gather(*tasks)
-
-                # Apply critique recommendations
-                newsletter_section_df['prune'] = False
-                for cat, critique in critiques:
-                    self.logger.info(f"  {cat}: Coherence={critique.overall_coherence:.1f}/10, "
-                                     f"Quality={critique.overall_quality:.1f}/10")
-
-                    for action in critique.item_actions:
-                        story_mask = newsletter_section_df['id'] == action.id
-                        if action.action == 'drop':
-                            try:
-                                self.logger.info(
-                                    f"    DROP id={action.id}: {action.reason}")
-                                newsletter_section_df.loc[story_mask,
-                                                          'prune'] = True
-                                newsletter_section_df.loc[story_mask,
-                                                          'cat'] = 'Other'
-                                newsletter_section_df.loc[story_mask,
-                                                          'section_title'] = 'Other News'
-                            except Exception as e:
-                                self.logger.error(
-                                    f"Error dropping story: {str(e)}")
-                                raise e
-                        elif action.action == 'rewrite' and action.rewritten_headline:
-                            try:
-                                old_headline = newsletter_section_df.loc[story_mask,
-                                                                         'headline'].iloc[0]
-                                self.logger.info(
-                                    f"    REWRITE id={action.id}: {action.reason}")
-                                self.logger.info(f"      Old: {old_headline}")
-                                self.logger.info(
-                                    f"      New: {action.rewritten_headline}")
-                                newsletter_section_df.loc[story_mask,
-                                                          'headline'] = action.rewritten_headline
-                            except Exception as e:
-                                self.logger.error(
-                                    f"Error rewriting headline: {str(e)}")
-                                raise e
-
-                        elif action.action == 'move' and action.target_category:
-                            try:
-                                self.logger.info(
-                                    f"    MOVE id={action.id} to {action.target_category}: {action.reason}")
-                                newsletter_section_df.loc[story_mask,
-                                                          'cat'] = action.target_category
-                                newsletter_section_df.loc[story_mask,
-                                                          'section_title'] = cat_df_dict[action.target_category]
-                            except Exception as e:
-                                self.logger.error(
-                                    f"Error moving story: {str(e)}")
-                                raise e
-
-                stories_pruned = newsletter_section_df['prune'].sum()
-                stories_remaining = len(newsletter_section_df) - stories_pruned
-                self.logger.info(
-                    f"Pruned {stories_pruned} stories, leaving {stories_remaining}")
-
-                # Remove pruned stories
-                newsletter_section_df = newsletter_section_df.loc[~newsletter_section_df['prune']]
-
-                # Group by category and calculate stats
-                cat_df = newsletter_section_df.groupby(["cat", "section_title"]).agg({
-                    'rating': 'mean',  # average rating per category
-                    'id': 'count'      # story count
-                }).rename(columns={'id': 'count'}).reset_index()
-
-                # Calculate sort order: rating × log(count), with "Other" always last
-                cat_df['sort_order'] = cat_df['rating'] * \
-                    np.log1p(cat_df['count'])
-                cat_df.loc[cat_df["cat"] == "Other", "sort_order"] = 0
-                cat_df = cat_df.sort_values(
-                    'sort_order', ascending=False).reset_index(drop=True)
-                cat_df["sort_order"] = cat_df.index
-
-                # Add sort_order to newsletter_section_df
-                section_order_map = dict(
-                    zip(cat_df['cat'], cat_df['sort_order']))
-                newsletter_section_df['sort_order'] = newsletter_section_df['cat'].map(
-                    section_order_map)
+                newsletter_section_df = await self._critique_and_optimize_sections(newsletter_section_df)
 
                 # Update state with optimized sections
                 state.newsletter_section_data = newsletter_section_df.to_dict(
                     'records')
-                self.logger.info(
-                    "Step 8b complete: All sections critiqued and optimized")
 
             # Complete the step
             state.complete_step(step_name)
@@ -3224,6 +3420,22 @@ class FinalizeNewsletterTool:
                     f"✅ Sent newsletter email with subject: {subject}")
             except Exception as e:
                 self.logger.error(f"Failed to send newsletter email: {e}")
+
+            # Save newsletter to database
+            try:
+                with sqlite3.connect(NEWSAGENTDB) as conn:
+                    Newsletter.create_table(conn)
+                    newsletter = Newsletter(
+                        session_id=state.session_id,
+                        date=datetime.now(),
+                        final_newsletter=state.final_newsletter
+                    )
+                    newsletter.upsert(conn)
+                    self.logger.info(
+                        f"✅ Saved newsletter to database for session {state.session_id}")
+            except Exception as e:
+                self.logger.error(
+                    f"Failed to save newsletter to database: {e}")
 
             # Complete the step and mark workflow as complete
             state.complete_step(step_name)

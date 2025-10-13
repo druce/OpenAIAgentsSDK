@@ -412,3 +412,84 @@ class Site:
                 reputation = excluded.reputation
         """, (self.domain_name, self.site_name, self.reputation))
         conn.commit()
+
+
+@dataclass
+class Newsletter:
+    session_id: str
+    date: datetime
+    final_newsletter: str
+
+    @classmethod
+    def create_table(cls, conn: sqlite3.Connection):
+        """Create the newsletters table if it doesn't exist"""
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS newsletters (
+                session_id TEXT PRIMARY KEY,
+                date TEXT NOT NULL,
+                final_newsletter TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+
+    def insert(self, conn: sqlite3.Connection):
+        """Insert this Newsletter record into the database"""
+        conn.execute("""
+            INSERT INTO newsletters (session_id, date, final_newsletter)
+            VALUES (?, ?, ?)
+        """, (self.session_id, self.date.isoformat(), self.final_newsletter))
+        conn.commit()
+
+    def update(self, conn: sqlite3.Connection):
+        """Update this Newsletter record in the database"""
+        conn.execute("""
+            UPDATE newsletters SET date = ?, final_newsletter = ?
+            WHERE session_id = ?
+        """, (self.date.isoformat(), self.final_newsletter, self.session_id))
+        conn.commit()
+
+    def delete(self, conn: sqlite3.Connection):
+        """Delete this Newsletter record from the database"""
+        conn.execute("DELETE FROM newsletters WHERE session_id = ?",
+                     (self.session_id,))
+        conn.commit()
+
+    @classmethod
+    def get(cls, conn: sqlite3.Connection, session_id: str) -> Optional['Newsletter']:
+        """Get a Newsletter record by session_id"""
+        cursor = conn.execute("""
+            SELECT session_id, date, final_newsletter
+            FROM newsletters WHERE session_id = ?
+        """, (session_id,))
+        row = cursor.fetchone()
+        if row:
+            return cls(
+                session_id=row[0],
+                date=datetime.fromisoformat(row[1]),
+                final_newsletter=row[2]
+            )
+        return None
+
+    @classmethod
+    def get_all(cls, conn: sqlite3.Connection) -> list['Newsletter']:
+        """Get all Newsletter records"""
+        cursor = conn.execute("""
+            SELECT session_id, date, final_newsletter FROM newsletters
+        """)
+        rows = cursor.fetchall()
+        return [cls(
+            session_id=row[0],
+            date=datetime.fromisoformat(row[1]),
+            final_newsletter=row[2]
+        ) for row in rows]
+
+    def upsert(self, conn: sqlite3.Connection):
+        """Insert or update this Newsletter record"""
+        conn.execute("""
+            INSERT INTO newsletters (session_id, date, final_newsletter)
+            VALUES (?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                date = excluded.date,
+                final_newsletter = excluded.final_newsletter
+        """, (self.session_id, self.date.isoformat(), self.final_newsletter))
+        conn.commit()
