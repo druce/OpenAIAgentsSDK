@@ -53,7 +53,6 @@ This system gathers news articles from RSS feeds, HTML scraping targets, and RES
       style Optimizer fill:#ffe0e0
       style Check8 fill:#fff9c4
       style Check9 fill:#fff9c4
-      style Final fill:#c8e6c9
   ```
 
 **Getting Started:**
