@@ -1,28 +1,28 @@
 # Newsletter Agent System
 
-An AI-powered newsletter generation system built on the OpenAI Agents SDK that implements a complete 9-step workflow for automated newsletter creation from multiple news sources.
+An AI-powered newsletter generation system built on the OpenAI Agents SDK that implements a 9-step workflow to create a news summary autonomously from multiple news sources.
 
 ## Overview
 
-This system automatically gathers news articles from RSS feeds, HTML scraping targets, and REST APIs; filters them for AI-related content, downloads full article text, generates summaries, clusters articles by topic, rates content quality, and produces a polished newsletter ready for distribution. Used to help generate [Skynet and Chill](https://skynetandchill.beehiiv.com/).
+This system gathers news articles from RSS feeds, HTML scraping targets, and REST APIs; filters them for AI-related content, downloads full article text, generates summaries, clusters articles by topic, rates content quality, and produces a polished newsletter ready for distribution. Used to help generate [Skynet and Chill](https://skynetandchill.beehiiv.com/).
 
 ```mermaid
   flowchart TD
-      Start([Start Newsletter Workflow]) --> Step1[Step 1: Gather URLs<br/>RSS + HTML + REST APIs<br/>17+ sources]
+      Start([Start Newsletter Workflow]) --> Step1[1: Gather URLs<br/>RSS + HTML + REST APIs<br/>17+ sources]
 
-      Step1 --> Step2[Step 2: Filter URLs<br/>LLM AI Classification<br/>Deduplication]
+      Step1 --> Step2[2: Filter URLs<br/>Deduplicate previously seen<br/>LLM AI Classification<br/>]
 
-      Step2 --> Step3[Step 3: Download Articles<br/>Playwright Scraping<br/>Content Extraction]
+      Step2 --> Step3[3: Download Articles<br/>Playwright Scraping<br/>Content Extraction]
 
-      Step3 --> Step4[Step 4: Extract Summaries<br/>LLM Summarization<br/>3-point summaries]
+      Step3 --> Step4[4: LLM Summarization<br/>Bullet-point summaries]
 
-      Step4 --> Step5[Step 5: Cluster by Topic<br/>HDBSCAN + Embeddings<br/>Topic Assignment]
+      Step4 --> Step5[5: Cluster by Topic<br/>HDBSCAN + Embeddings]
 
-      Step5 --> Step6[Step 6: Rate Articles<br/>ELO-type Comparisons<br/>Quality Scoring 1-10]
+      Step5 --> Step6[6: Rate Articles<br/>Identify on-topic, high quality<br/>using Elo-type Comparisons]
 
-      Step6 --> Step7[Step 7: Select Sections<br/>Top Articles per Topic<br/>Newsletter Outline]
+      Step6 --> Step7[7: Select Sections<br/>Top Articles by Topic<br/>Newsletter Outline]
 
-      Step7 --> Step8{Step 8: Draft Sections<br/>Write Headlines & Content}
+      Step7 --> Step8{8: Draft Sections<br/>Write Headlines & Content<br/>Critic-Optimizer Loop}
 
       Step8 --> Critique8[Section Critique<br/>Quality Evaluation]
       Critique8 --> Check8{Score >= 8.0?}
@@ -30,14 +30,14 @@ This system automatically gathers news articles from RSS feeds, HTML scraping ta
       Improve8 --> Step8
       Check8 -->|Yes or iter = 3| Step9[Step 9: Finalize Newsletter<br/>Generate Title<br/>Assemble Sections]
 
-      Step9 --> Critique9[Critique Agent<br/>Evaluate Quality<br/>5 dimension scores]
+      Step9 --> Critique9[Critique Full Newsletter<br/>Evaluate Quality<br/>5 dimension scores]
 
-      Critique9 --> Check9{Overall >= 8.0<br/>OR<br/>iterate = NO<br/>OR<br/>iter = 3?}
+      Critique9 --> Check9{Score >= 8.0<br/>OR<br/>iter = 3?}
 
       Check9 -->|No| Optimizer[Optimizer Agent<br/>Apply Recommendations<br/>Improve Newsletter]
       Optimizer --> Critique9
 
-      Check9 -->|Yes| Final([Publication-Ready Newsletter<br/>Quality Score 8.0-9.5/10])
+      Check9 -->|Yes| Final([Publication-Ready Newsletter<br/>Quality Score >= 8.0])
 
       style Step1 fill:#e1f5ff
       style Step2 fill:#e1f5ff
