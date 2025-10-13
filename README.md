@@ -22,12 +22,12 @@ This system gathers news articles from RSS feeds, HTML scraping targets, and RES
 
       Step6 --> Step7[7: Select Sections<br/>Top Articles by Topic<br/>Newsletter Outline]
 
-      Step7 --> Step8{8: Draft Sections<br/>Write Headlines & Content<br/>Critic-Optimizer Loop}
+      Step7 --> Step8{8: Draft Sections<br/>Write Headlines & Content<br/>Run Critic-Optimizer Loop}
 
       Step8 --> Critique8[Section Critique<br/>Quality Evaluation]
       Critique8 --> Check8{Score >= 8.0?}
       Check8 -->|No & iter < 3| Improve8[Apply Improvements]
-      Improve8 --> Step8
+      Improve8 --> Critique8
       Check8 -->|Yes or iter = 3| Step9[Step 9: Finalize Newsletter<br/>Generate Title<br/>Assemble Sections]
 
       Step9 --> Critique9[Full Newsletter<br/>Critic-Optimizer Loop<br/>Evaluate Quality<br/>5 dimension scores]
