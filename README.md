@@ -37,7 +37,7 @@ This system gathers news articles from RSS feeds, HTML scraping targets, and RES
       Check9 -->|No| Optimizer[Optimizer Agent<br/>Apply Recommendations<br/>Improve Newsletter]
       Optimizer --> Critique9
 
-      Check9 -->|Yes| Final([Publication-Ready Newsletter<br/>Quality Score >= 8.0])
+      Check9 -->|Yes| Final([Publication-Ready<br>Newsletter<br/>Quality Score >= 8.0])
 
       style Step1 fill:#e1f5ff
       style Step2 fill:#e1f5ff
