@@ -260,7 +260,8 @@ class LLMagent(Agent):
                  output_type: Type[BaseModel],
                  model: str,
                  verbose: bool = False,
-                 logger: Optional[logging.Logger] = None):
+                 logger: Optional[logging.Logger] = None,
+                 reasoning_effort: Optional[str] = None):
         """
         Initialize the LLMagent
 
@@ -271,6 +272,7 @@ class LLMagent(Agent):
             model: Model string (e.g., "gpt-4o")
             verbose: Enable verbose logging
             logger: Optional logger instance to use instead of module logger
+            reasoning_effort: Optional reasoning effort level for reasoning models ("low", "medium", "high")
         """
         super().__init__(
             name="LLMagent",
@@ -283,6 +285,15 @@ class LLMagent(Agent):
         self.output_type = output_type
         self.verbose = verbose
         self.logger = logger or _logger
+
+        # Validate and store reasoning_effort
+        if reasoning_effort is not None:
+            valid_efforts = {"low", "medium", "high"}
+            if reasoning_effort not in valid_efforts:
+                raise ValueError(
+                    f"reasoning_effort must be one of {valid_efforts}, got: {reasoning_effort}"
+                )
+        self.reasoning_effort = reasoning_effort
 
         if self.verbose:
             self.logger.info(f"""Initialized LLMagent:
@@ -355,12 +366,15 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         wait=wait_exponential(multiplier=1, min=1, max=30),
         before_sleep=before_sleep_log(_logger, logging.WARNING),
     )
-    async def prompt_dict_chat(self, variables: Dict[str, Any]) -> Any:
+    async def prompt_dict_chat(self, variables: Dict[str, Any], reasoning_effort: Optional[str] = None) -> Any:
         """
         Make a single LLM call using OpenAI chat completions API directly
 
         Args:
             variables: Dictionary of variables to substitute in prompt templates
+            reasoning_effort: Optional reasoning effort level ("low", "medium", "high").
+                            Only applies to reasoning models (o1, o3-mini, gpt-5).
+                            Overrides instance-level reasoning_effort if provided.
 
         Returns:
             Single result of the specified output type
@@ -370,6 +384,17 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
 
         if self.verbose:
             self.logger.info(f"User message: {user_message}")
+
+        # Determine reasoning_effort to use (parameter overrides instance attribute)
+        effective_reasoning_effort = reasoning_effort if reasoning_effort is not None else self.reasoning_effort
+
+        # Check if reasoning_effort is requested but not supported
+        if effective_reasoning_effort is not None and not self._supports_reasoning_effort():
+            self.logger.warning(
+                f"reasoning_effort='{effective_reasoning_effort}' specified but model '{self.model}' "
+                f"does not support this parameter. It will be ignored."
+            )
+            effective_reasoning_effort = None
 
         # Get the OpenAI client - use the default one set up by the agents SDK
         client = AsyncOpenAI()
@@ -381,19 +406,28 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         ]
 
         try:
-            # Make the chat completion call with structured output
-            response = await client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                response_format={
+            # Prepare API call parameters
+            api_params = {
+                "model": self.model,
+                "messages": messages,
+                "response_format": {
                     "type": "json_schema",
                     "json_schema": {
                         "name": "structured_response",
                         "schema": self.output_type.model_json_schema()
                     }
                 },
-                safety_identifier="news_agent"
-            )
+                "safety_identifier": "news_agent"
+            }
+
+            # Add reasoning_effort if supported
+            if effective_reasoning_effort is not None:
+                api_params["reasoning_effort"] = effective_reasoning_effort
+                if self.verbose:
+                    self.logger.info(f"Using reasoning_effort: {effective_reasoning_effort}")
+
+            # Make the chat completion call with structured output
+            response = await client.chat.completions.create(**api_params)
 
             # Check for refusal
             message = response.choices[0].message
@@ -440,6 +474,30 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         # Check for partial matches (e.g., gpt-4.1-mini-2024-07-18)
         for supported_model in logprobs_supported_models:
             if model_name.startswith(supported_model):
+                return True
+
+        return False
+
+    def _supports_reasoning_effort(self) -> bool:
+        """
+        Check if the current model supports reasoning_effort parameter.
+
+        Returns:
+            bool: True if model supports reasoning_effort, False otherwise
+        """
+        # Models that support reasoning_effort (reasoning models only)
+        reasoning_models = {
+            "o1", "o1-preview", "o3-mini", "gpt-5"
+        }
+
+        # Check exact match or partial match for versioned models
+        model_name = self.model.lower()
+        if model_name in reasoning_models:
+            return True
+
+        # Check for partial matches (e.g., o3-mini-2025-01-31)
+        for reasoning_model in reasoning_models:
+            if model_name.startswith(reasoning_model):
                 return True
 
         return False
@@ -568,18 +626,22 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
 
         return response_text, logprobs_data
 
-    async def run_prompt(self, **kwargs) -> Any:
+    async def run_prompt(self, reasoning_effort: Optional[str] = None, **kwargs) -> Any:
         """
         Make a single LLM call with keyword argument variable substitution
         (don't use prompt to name it since the base class has a prompt method)
+
         Args:
+            reasoning_effort: Optional reasoning effort level ("low", "medium", "high").
+                            Only applies to reasoning models (o1, o3-mini, gpt-5).
+                            Overrides instance-level reasoning_effort if provided.
             **kwargs: Keyword arguments to substitute in prompt templates
 
         Returns:
             Single result of the specified output type
         """
         # Repackage kwargs into a dictionary and call prompt_dict_chat
-        return await self.prompt_dict_chat(kwargs)
+        return await self.prompt_dict_chat(kwargs, reasoning_effort=reasoning_effort)
 
     async def run_prompt_with_probs(self, target_tokens: List[str] = ["1"], **kwargs) -> Dict[str, float]:
         """
