@@ -92,7 +92,6 @@ def _introspect_output_type(output_type: Type[BaseModel]) -> tuple[Optional[str]
         - value_field: Name of the non-id field in the inner model X
     """
     import typing
-    from pydantic.fields import FieldInfo
 
     item_list_field = None
     value_field = None

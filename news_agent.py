@@ -51,7 +51,7 @@ from fetch import Fetcher
 from db import Url, Site, Article, Newsletter
 from log_handler import SQLiteLogHandler
 from newsletter_state import NewsletterAgentState
-from config import CANONICAL_TOPICS, DOWNLOAD_DIR, PAGES_DIR, TEXT_DIR, NEWSAGENTDB, LOGDB, DEFAULT_CONCURRENCY
+from config import CANONICAL_TOPICS, DOWNLOAD_DIR, PAGES_DIR, TEXT_DIR, NEWSAGENTDB, LOGDB, DEFAULT_CONCURRENCY, MAX_CRITIQUE_ITERATIONS
 
 
 # Pydantic models for structured output
@@ -1618,7 +1618,8 @@ class ExtractSummariesTool:
                 # This tells it to get the 'summary' field from each ArticleSummary
                 value_field='summary',
                 item_id_field='id',              # This maps the responses back to the correct rows
-                chunk_size=1                     # send in batches of
+                chunk_size=1,                    # send in batches of
+                max_concurrency=1000             # process up to 1000 concurrent requests
             )
 
             # Clean up text_content column
@@ -1704,7 +1705,8 @@ class ExtractSummariesTool:
                 # This tells it to get the 'short_summary' field from each ArticleSummary
                 value_field='short_summary',
                 item_id_field='id',              # This maps the responses back to the correct rows
-                chunk_size=1                     # send in batches of
+                chunk_size=1,                    # send in batches of
+                max_concurrency=1000             # process up to 1000 concurrent requests
             )
             headline_df['short_summary'] = ai_articles_df['short_summary']
 
@@ -2952,43 +2954,44 @@ class DraftSectionsTool:
 
     async def _critique_and_optimize_sections(
         self,
-        newsletter_section_df: pd.DataFrame
+        newsletter_section_df: pd.DataFrame,
+        headline_df: pd.DataFrame
     ) -> pd.DataFrame:
-        """Orchestrate Step 8b: Critique and optimize all newsletter sections.
+        """Orchestrate Step 8b: Iteratively critique and optimize all newsletter sections.
 
-        This method coordinates the section critique workflow:
-        1. Fix singleton categories (move to Other)
-        2. Create critique agent
-        3. Critique all sections in parallel
-        4. Apply critique actions (drop/rewrite/move)
-        5. Remove pruned stories
-        6. Calculate final sort order
+        This method coordinates the section critique workflow with iteration:
+        1. Fix singleton categories (move to Other) - one-time
+        2. Create critique and write agents - one-time
+        3. Loop (max 2-3 iterations):
+           a. Critique all sections in parallel
+           b. Apply critique actions (drop/rewrite/move)
+           c. Check quality scores
+           d. Re-draft sections below threshold (if not last iteration)
+        4. Remove pruned stories
+        5. Calculate final sort order
 
         Args:
             newsletter_section_df: DataFrame with drafted section stories
+            headline_df: Original headline DataFrame with article data (needed for re-drafting)
 
         Returns:
             Optimized DataFrame with critiques applied and sort order calculated
         """
         self.logger.info(
-            "Step 8b: Critiquing and optimizing individual sections")
+            "Step 8b: Starting iterative critique-optimize loop for sections")
 
-        # Fix singletons first
+        # Configuration
+        max_iterations = MAX_CRITIQUE_ITERATIONS
+        quality_threshold = 7.0  # Sections need 7.0+ coherence AND quality
+
+        # Fix singletons first (one-time)
         newsletter_section_df = self._fix_singletons(newsletter_section_df)
-
-        # Recalculate cat_df after fixing singletons
-        cat_df = newsletter_section_df.groupby(["cat", "section_title"]).agg({
-            'rating': 'mean',
-            'id': 'count'
-        }).rename(columns={'id': 'count'}).sort_values('rating', ascending=False).reset_index()
-
-        cat_df_dict = dict(zip(cat_df['cat'], cat_df['section_title']))
 
         # Get langfuse prompts for section critique
         section_critique_system, section_critique_user, section_critique_model = \
             LangfuseClient().get_prompt("newsagent/critique_section")
 
-        # Create critique agent
+        # Create critique agent (one-time)
         critique_agent = LLMagent(
             system_prompt=section_critique_system,
             user_prompt=section_critique_user,
@@ -2998,32 +3001,117 @@ class DraftSectionsTool:
             logger=self.logger
         )
 
-        # Process each section with critique
-        unique_cats = newsletter_section_df['cat'].unique()
-        self.logger.info(f"Processing {len(unique_cats)} sections")
-
-        # Critique all sections in parallel
-        tasks = [
-            self._critique_section(critique_agent, cat,
-                                   newsletter_section_df, unique_cats)
-            for cat in unique_cats
-        ]
-        critiques = await asyncio.gather(*tasks)
-
-        # Apply critique recommendations
-        newsletter_section_df = self._apply_critique_actions(
-            newsletter_section_df, critiques, cat_df_dict
+        # Create write_section agent for re-drafting (one-time)
+        write_system, write_user, write_model = LangfuseClient().get_prompt("newsagent/write_section")
+        write_section_agent = LLMagent(
+            system_prompt=write_system,
+            user_prompt=write_user,
+            output_type=Section,
+            model=write_model,
+            verbose=self.verbose,
+            logger=self.logger
         )
 
-        # Remove pruned stories
+        # Iteration loop
+        iteration = 0
+        for iteration in range(1, max_iterations + 1):
+            self.logger.info(
+                f"Step 8b: Iteration {iteration}/{max_iterations}")
+
+            # Get current categories
+            unique_cats = newsletter_section_df['cat'].unique()
+            self.logger.info(f"Critiquing {len(unique_cats)} sections")
+
+            # Critique all sections in parallel
+            tasks = [
+                self._critique_section(critique_agent, cat,
+                                       newsletter_section_df, unique_cats)
+                for cat in unique_cats
+            ]
+            critiques = await asyncio.gather(*tasks)
+
+            # Log scores and identify sections needing improvement
+            sections_to_redraft = []
+            all_sections_good = True
+
+            for cat, critique in critiques:
+                coherence = critique.overall_coherence
+                quality = critique.overall_quality
+                should_iterate = critique.should_iterate
+
+                self.logger.info(
+                    f"  {cat}: Coherence={coherence:.1f}, Quality={quality:.1f}, Iterate={should_iterate}")
+
+                # Check if section needs improvement
+                if (coherence < quality_threshold or quality < quality_threshold) and should_iterate:
+                    sections_to_redraft.append(cat)
+                    all_sections_good = False
+
+            # Apply critique actions (drop/rewrite/move) - always do this
+            cat_df = newsletter_section_df.groupby(["cat", "section_title"]).agg({
+                'rating': 'mean',
+                'id': 'count'
+            }).rename(columns={'id': 'count'}).sort_values('rating', ascending=False).reset_index()
+            cat_df_dict = dict(zip(cat_df['cat'], cat_df['section_title']))
+
+            newsletter_section_df = self._apply_critique_actions(
+                newsletter_section_df, critiques, cat_df_dict
+            )
+
+            # Check stopping conditions
+            if all_sections_good:
+                self.logger.info(
+                    f"✅ All sections meet quality threshold {quality_threshold}")
+                break
+
+            if iteration == max_iterations:
+                self.logger.info(
+                    f"⚠️  Max iterations reached. {len(sections_to_redraft)} sections below threshold: {sections_to_redraft}")
+                break
+
+            # Re-draft sections that need improvement
+            if sections_to_redraft:
+                self.logger.info(
+                    f"Re-drafting {len(sections_to_redraft)} sections: {sections_to_redraft}")
+
+                # Prepare re-draft tasks
+                redraft_tasks = []
+                for cat in sections_to_redraft:
+                    # Get original article data for this category
+                    cat_df = headline_df.loc[headline_df["cat"] == cat].sort_values(
+                        "rating", ascending=False)
+                    input_text = cat_df[["id", "rating", "short_summary", "site_name", "final_url"]].rename(
+                        columns={"short_summary": "summary", "final_url": "url"}
+                    ).to_json(orient="records")
+
+                    redraft_tasks.append(
+                        (cat, write_section_agent.run_prompt(input_text=input_text)))
+
+                # Execute re-drafts in parallel
+                redraft_results = await asyncio.gather(*[task[1] for task in redraft_tasks])
+
+                # Update newsletter_section_df with re-drafted sections
+                for (cat, _), new_section in zip(redraft_tasks, redraft_results):
+                    # Remove old section
+                    newsletter_section_df = newsletter_section_df[newsletter_section_df['cat'] != cat]
+
+                    # Add new section (convert Section object to DataFrame)
+                    new_section_df = self._flatten_sections_to_df(
+                        {cat: new_section})
+                    newsletter_section_df = pd.concat(
+                        [newsletter_section_df, new_section_df], ignore_index=True)
+
+                self.logger.info(f"Re-drafted {len(sections_to_redraft)} sections")
+
+        # Final cleanup: remove pruned stories
         newsletter_section_df = newsletter_section_df.loc[~newsletter_section_df['prune']]
 
-        # Calculate sort order
+        # Calculate final sort order
         newsletter_section_df = self._calculate_section_sort_order(
             newsletter_section_df)
 
         self.logger.info(
-            "Step 8b complete: All sections critiqued and optimized")
+            f"Step 8b complete after {iteration} iteration(s): All sections critiqued and optimized")
 
         return newsletter_section_df
 
@@ -3164,7 +3252,8 @@ class DraftSectionsTool:
                     f"Created newsletter_section_df with {len(newsletter_section_df)} stories across {newsletter_section_df['cat'].nunique()} categories")
 
                 # ============ Step 8b: Critique and Optimize Individual Sections ============
-                newsletter_section_df = await self._critique_and_optimize_sections(newsletter_section_df)
+                newsletter_section_df = await self._critique_and_optimize_sections(
+                    newsletter_section_df, headline_df)
 
                 # Update state with optimized sections
                 state.newsletter_section_data = newsletter_section_df.to_dict(
@@ -3312,7 +3401,7 @@ class FinalizeNewsletterTool:
             )
 
             # Loop configuration
-            max_iterations = 3
+            max_iterations = MAX_CRITIQUE_ITERATIONS
             quality_threshold = 8.0
             current_draft = draft_newsletter
             final_quality_score = 0.0

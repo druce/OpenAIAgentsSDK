@@ -9,7 +9,7 @@ SHORT_REQUEST_TIMEOUT = 60
 DOMAIN_RATE_LIMIT = 5.0
 
 DEFAULT_CONCURRENCY = 16
-
+MAX_CRITIQUE_ITERATIONS = 2
 FIREFOX_PROFILE_PATH = os.getenv('FIREFOX_PROFILE_PATH')
 if not FIREFOX_PROFILE_PATH:
     raise ValueError(
@@ -53,7 +53,7 @@ IGNORE_LIST = ["www.bloomberg.com", "bloomberg.com",
                "wsj.com", "www.wsj.com"]
 
 MIN_TITLE_LEN = 28
-SLEEP_TIME = 7
+SLEEP_TIME = 5
 MAX_TOKENS = 8192  # for embeddings
 
 MODEL_FAMILY = {'gpt-4o-2024-11-20': 'openai',
