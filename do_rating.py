@@ -350,13 +350,13 @@ async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFra
     battle_history = np.zeros((n_stories, n_stories), dtype=int)
 
     # Setup battle agent
-    system, user, model = get_langfuse_client(
+    system, user, model, reasoning_effort = get_langfuse_client(
         logger=logger).get_prompt("newsagent/battle_prompt")
     battle_agent = LLMagent(
         system_prompt=system,
         user_prompt=user,
         model=model,
-        reasoning_effort="low",
+        reasoning_effort="low",  # Override Langfuse value for this specific use case
         output_type=StoryOrderList,
         verbose=False,
         logger=logger

@@ -68,7 +68,7 @@ Read these news items carefully and output the ids in order from most important 
 # Prompt: `newsagent/canonical_topic`
 
 ## Metadata
-- **Version**: 6
+- **Version**: 7
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -76,7 +76,7 @@ Read these news items carefully and output the ids in order from most important 
 ## Configuration
 ```json
 {
-  "model": "gpt-5-mini"
+  "model": "gpt-5-nano"
 }
 ```
 
@@ -105,7 +105,7 @@ Topic of interest → **{topic}**
 # Prompt: `newsagent/cat_assignment`
 
 ## Metadata
-- **Version**: 6
+- **Version**: 7
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -113,7 +113,7 @@ Topic of interest → **{topic}**
 ## Configuration
 ```json
 {
-  "model": "gpt-5-mini"
+  "model": "gpt-5-nano"
 }
 ```
 
@@ -746,7 +746,7 @@ Summarize the article below:
 # Prompt: `newsagent/extract_topics`
 
 ## Metadata
-- **Version**: 6
+- **Version**: 7
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -754,7 +754,7 @@ Summarize the article below:
 ## Configuration
 ```json
 {
-  "model": "gpt-5-mini"
+  "model": "gpt-5-nano"
 }
 ```
 
@@ -794,7 +794,7 @@ Extract up to 5 distinct, broad topics from the news summary below:
 # Prompt: `newsagent/filter_urls`
 
 ## Metadata
-- **Version**: 7
+- **Version**: 8
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -802,7 +802,7 @@ Extract up to 5 distinct, broad topics from the news summary below:
 ## Configuration
 ```json
 {
-  "model": "gpt-5-mini"
+  "model": "gpt-5-nano"
 }
 ```
 
@@ -1277,7 +1277,7 @@ Think carefully about whether the story is low quality for an AI newsletter, the
 # Prompt: `newsagent/sitename`
 
 ## Metadata
-- **Version**: 3
+- **Version**: 4
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -1285,7 +1285,7 @@ Think carefully about whether the story is low quality for an AI newsletter, the
 ## Configuration
 ```json
 {
-  "model": "gpt-5-mini"
+  "model": "gpt-5-nano"
 }
 ```
 
@@ -1323,7 +1323,7 @@ Please analyze the following domains according to these criteria:
 # Prompt: `newsagent/topic_cleanup`
 
 ## Metadata
-- **Version**: 10
+- **Version**: 11
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -1331,7 +1331,7 @@ Please analyze the following domains according to these criteria:
 ## Configuration
 ```json
 {
-  "model": "gpt-5-mini"
+  "model": "gpt-5-nano"
 }
 ```
 

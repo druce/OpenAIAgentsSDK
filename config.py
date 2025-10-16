@@ -253,3 +253,57 @@ CANONICAL_TOPICS = [
     'Korea',
     'Taiwan',
 ]
+
+# Langfuse tracing configuration
+_LANGFUSE_CLIENT = None
+
+
+def get_langfuse_client():
+    """
+    Get or create singleton Langfuse client with optimized settings for batch processing.
+
+    Returns:
+        Langfuse client instance or None if tracing is disabled
+    """
+    global _LANGFUSE_CLIENT
+
+    tracing_enabled = os.getenv(
+        'LANGFUSE_TRACING_ENABLED', 'false').lower() == 'true'
+
+    if not tracing_enabled:
+        return None
+
+    if _LANGFUSE_CLIENT is None:
+        try:
+            import langfuse
+            _LANGFUSE_CLIENT = langfuse.Langfuse(
+                enabled=tracing_enabled,
+                # Batch up to 100 events before flushing to Langfuse backend for processing
+                flush_at=100,
+                flush_interval=2.0,  # Flush every 2 seconds
+                max_retries=3,       # Retry failed requests
+                timeout=10           # Timeout for API calls (seconds)
+            )
+        except ImportError:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Langfuse tracing enabled but langfuse package not available"
+            )
+            return None
+
+    return _LANGFUSE_CLIENT
+
+
+def flush_langfuse_traces():
+    """
+    Flush any pending Langfuse traces to ensure they are sent before program exit.
+    Call this at the end of the workflow or before program termination.
+    """
+    global _LANGFUSE_CLIENT
+    if _LANGFUSE_CLIENT is not None:
+        try:
+            _LANGFUSE_CLIENT.flush()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                f"Failed to flush Langfuse traces: {e}")

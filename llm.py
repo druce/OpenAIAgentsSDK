@@ -157,7 +157,7 @@ class LangfuseClient:
         wait=wait_exponential(multiplier=1, min=1, max=10),
         before_sleep=before_sleep_log(_logger, logging.WARNING),
     )
-    def get_prompt(self, prompt_name: str) -> tuple[str, str, str]:
+    def get_prompt(self, prompt_name: str) -> tuple[str, str, str, str]:
         """
         Retrieve a prompt from Langfuse and extract system/user prompts and model configuration.
 
@@ -165,7 +165,7 @@ class LangfuseClient:
             prompt_name: Name of the prompt in Langfuse (e.g., 'newsagent/headline_classifier')
 
         Returns:
-            Tuple containing (system_prompt, user_prompt, model)
+            Tuple containing (system_prompt, user_prompt, model, reasoning_effort)
 
         Raises:
             ValueError: If prompt format is invalid or missing required content
@@ -203,12 +203,13 @@ class LangfuseClient:
             # Extract configuration
             config = lf_prompt.config if hasattr(lf_prompt, 'config') else {}
             model = config.get("model", "gpt-5")
+            reasoning_effort = config.get("reasoning_effort", "medium")
 
             if self.logger:
                 self.logger.info(
-                    f"Parsed prompt '{prompt_name}': model={model}, system_len={len(system_prompt)}, user_len={len(user_prompt)}")
+                    f"Parsed prompt '{prompt_name}': model={model}, reasoning_effort={reasoning_effort}, system_len={len(system_prompt)}, user_len={len(user_prompt)}")
 
-            return (system_prompt, user_prompt, model)
+            return (system_prompt, user_prompt, model, reasoning_effort)
 
         except Exception as e:
             error_msg = f"Failed to retrieve prompt '{prompt_name}': {e}"
@@ -237,6 +238,7 @@ class LangfuseClient:
             user_prompt=prompt_data[1],
             output_type=output_type,
             model=prompt_data[2],
+            reasoning_effort=prompt_data[3],
             verbose=verbose,
             logger=logger or self.logger
         )
@@ -261,7 +263,10 @@ class LLMagent(Agent):
                  model: str,
                  verbose: bool = False,
                  logger: Optional[logging.Logger] = None,
-                 reasoning_effort: Optional[str] = None):
+                 reasoning_effort: Optional[str] = None,
+                 trace_enable: Optional[bool] = None,
+                 trace_tag: Optional[str] = None,
+                 trace_metadata: Optional[dict] = None):
         """
         Initialize the LLMagent
 
@@ -273,6 +278,9 @@ class LLMagent(Agent):
             verbose: Enable verbose logging
             logger: Optional logger instance to use instead of module logger
             reasoning_effort: Optional reasoning effort level for reasoning models ("low", "medium", "high")
+            trace_enable: Enable Langfuse tracing for this agent (overrides LANGFUSE_TRACING_ENABLED env var)
+            trace_tag: Tag for Langfuse traces (e.g., "step_04_extract_summaries")
+            trace_metadata: Additional metadata to attach to traces
         """
         super().__init__(
             name="LLMagent",
@@ -295,12 +303,35 @@ class LLMagent(Agent):
                 )
         self.reasoning_effort = reasoning_effort
 
+        # Configure Langfuse tracing
+        import os
+        env_trace_enable = os.getenv('LANGFUSE_TRACING_ENABLED', 'false').lower() == 'true'
+        self.trace_enable = trace_enable if trace_enable is not None else env_trace_enable
+        self.trace_tag = trace_tag
+        self.trace_metadata = trace_metadata or {}
+
+        # Initialize appropriate OpenAI client
+        if self.trace_enable:
+            try:
+                from langfuse.openai import AsyncOpenAI as LangfuseAsyncOpenAI
+                self.openai_client = LangfuseAsyncOpenAI()
+                if self.verbose:
+                    self.logger.info(f"Initialized with Langfuse tracing enabled (tag: {self.trace_tag})")
+            except ImportError:
+                self.logger.warning("Langfuse tracing requested but langfuse.openai not available, using standard client")
+                self.openai_client = AsyncOpenAI()
+                self.trace_enable = False
+        else:
+            self.openai_client = AsyncOpenAI()
+
         if self.verbose:
             self.logger.info(f"""Initialized LLMagent:
 system_prompt: {self.system_prompt}
 user_prompt: {self.user_prompt}
 output_type: {output_type.__name__}
 model: {self.model}
+trace_enable: {self.trace_enable}
+trace_tag: {self.trace_tag}
 schema: {json.dumps(output_type.model_json_schema(), indent=2)}
 """)
 
@@ -396,14 +427,30 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             )
             effective_reasoning_effort = None
 
-        # Get the OpenAI client - use the default one set up by the agents SDK
-        client = AsyncOpenAI()
+        # Use instance OpenAI client (Langfuse-wrapped if tracing enabled)
+        client = self.openai_client
 
         # Prepare messages for chat completion
         messages = [
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": user_message}
         ]
+
+        # Add Langfuse metadata if tracing enabled
+        if self.trace_enable:
+            try:
+                from langfuse.decorators import langfuse_context
+                langfuse_context.update_current_observation(
+                    name=f"llm_{self.trace_tag}" if self.trace_tag else "llm_call",
+                    metadata={
+                        "step_name": self.trace_tag,
+                        "model": self.model,
+                        "reasoning_effort": effective_reasoning_effort,
+                        **self.trace_metadata
+                    }
+                )
+            except Exception as e:
+                self.logger.warning(f"Failed to update Langfuse observation metadata: {e}")
 
         try:
             # Prepare API call parameters
@@ -582,14 +629,30 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         if self.verbose:
             self.logger.info(f"User message (with logprobs): {user_message}")
 
-        # Get the OpenAI client
-        client = AsyncOpenAI()
+        # Use instance OpenAI client (Langfuse-wrapped if tracing enabled)
+        client = self.openai_client
 
         # Prepare messages for chat completion
         messages = [
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": user_message}
         ]
+
+        # Add Langfuse metadata if tracing enabled
+        if self.trace_enable:
+            try:
+                from langfuse.decorators import langfuse_context
+                langfuse_context.update_current_observation(
+                    name=f"llm_{self.trace_tag}_logprobs" if self.trace_tag else "llm_call_logprobs",
+                    metadata={
+                        "step_name": self.trace_tag,
+                        "model": self.model,
+                        "logprobs_enabled": True,
+                        **self.trace_metadata
+                    }
+                )
+            except Exception as e:
+                self.logger.warning(f"Failed to update Langfuse observation metadata: {e}")
 
         try:
             # Make the chat completion call with logprobs (NO structured output)
@@ -1302,7 +1365,7 @@ async def run_prompt_on_dataframe(
     lf_client = get_langfuse_client(logger=logger)
 
     # Fetch prompt from Langfuse
-    system_prompt, user_prompt, model = lf_client.get_prompt(prompt_name)
+    system_prompt, user_prompt, model, reasoning_effort = lf_client.get_prompt(prompt_name)
 
     # Auto-detect fields if not provided
     if item_list_field is None or value_field is None:
@@ -1327,6 +1390,7 @@ async def run_prompt_on_dataframe(
         user_prompt=user_prompt,
         output_type=output_type,
         model=model,
+        reasoning_effort=reasoning_effort,
         verbose=verbose,
         logger=logger
     )

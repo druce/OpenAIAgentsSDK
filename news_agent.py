@@ -44,7 +44,7 @@ from agents import (Agent, Runner, RunContextWrapper, FunctionTool,
 from do_rating import fn_rate_articles, bradley_terry
 from do_cluster import do_clustering, _get_embeddings_df
 from do_dedupe import process_dataframe_with_filtering
-from llm import LLMagent, LangfuseClient
+from llm import LLMagent, LangfuseClient, get_langfuse_client
 from utilities import send_gmail
 from scrape import scrape_urls_concurrent, normalize_html
 from fetch import Fetcher
@@ -970,8 +970,8 @@ class FilterUrlsTool:
                 self.logger.info(
                     f"🔍 Filtering {total_articles} headlines for AI relevance using LLM...")
 
-            filter_system_prompt, filter_user_prompt, model = \
-                LangfuseClient().get_prompt("newsagent/filter_urls")
+            filter_system_prompt, filter_user_prompt, model, reasoning_effort = \
+                get_langfuse_client(logger=self.logger).get_prompt("newsagent/filter_urls")
 
             # Create LLM agent for AI classification
             classifier = LLMagent(
@@ -981,7 +981,15 @@ class FilterUrlsTool:
                 model=model,
                 reasoning_effort='high',
                 verbose=self.verbose,
-                logger=self.logger
+                logger=self.logger,
+                trace_enable=False,
+                trace_tag=step_name,
+                trace_metadata={
+                    "agent_name": "classifier",
+                    "session_id": state.session_id,
+                    "article_count": len(headline_df),
+                    "workflow_step": 2
+                }
             )
 
             headline_df['isAI'] = \
@@ -1249,7 +1257,7 @@ class DownloadArticlesTool:
                         f"Generating site names for {len(domains_to_process)} domains using LLM")
 
                 # Get prompt from Langfuse
-                system_prompt, user_prompt, model = LangfuseClient().get_prompt("newsagent/sitename")
+                system_prompt, user_prompt, model, reasoning_effort = get_langfuse_client(logger=self.logger).get_prompt("newsagent/sitename")
 
                 # Create LLM agent for site name generation
                 sitename_agent = LLMagent(
@@ -1259,7 +1267,15 @@ class DownloadArticlesTool:
                     model=model,
                     reasoning_effort='high',
                     verbose=self.verbose,
-                    logger=self.logger
+                    logger=self.logger,
+                    trace_enable=True,
+                    trace_tag=step_name,
+                    trace_metadata={
+                        "agent_name": "sitename_agent",
+                        "session_id": state.session_id,
+                        "domain_count": len(domains_to_process),
+                        "workflow_step": 3
+                    }
                 )
 
                 # Create DataFrame for processing (just domain names)
@@ -1600,8 +1616,8 @@ class ExtractSummariesTool:
                 self._read_text_file)
 
             # Get prompt and model from Langfuse
-            system_prompt, user_prompt, model = LangfuseClient(
-            ).get_prompt("newsagent/extract_summaries")
+            system_prompt, user_prompt, model, reasoning_effort = get_langfuse_client(
+                logger=self.logger).get_prompt("newsagent/extract_summaries")
 
             if self.logger:
                 self.logger.info(f"Using model '{model}' for summarization")
@@ -1613,7 +1629,15 @@ class ExtractSummariesTool:
                 output_type=ArticleSummaryList,
                 model=model,
                 verbose=self.verbose,
-                logger=self.logger
+                logger=self.logger,
+                trace_enable=False,
+                trace_tag=step_name,
+                trace_metadata={
+                    "agent_name": "summary_agent",
+                    "session_id": state.session_id,
+                    "article_count": len(ai_articles_df),
+                    "workflow_step": 4
+                }
             )
 
             # Use filter_dataframe for batch summarization
@@ -1700,15 +1724,23 @@ class ExtractSummariesTool:
             ai_articles_df['input_text'] = ai_articles_df.apply(
                 _get_input_text, axis=1)
 
-            system_prompt, user_prompt, model = LangfuseClient(
-            ).get_prompt("newsagent/item_distiller")
+            system_prompt, user_prompt, model, reasoning_effort = get_langfuse_client(
+                logger=self.logger).get_prompt("newsagent/item_distiller")
             distill_agent = LLMagent(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 output_type=DistilledStoryList,
                 model=model,
                 verbose=self.verbose,
-                logger=self.logger
+                logger=self.logger,
+                trace_enable=False,
+                trace_tag=step_name,
+                trace_metadata={
+                    "agent_name": "distill_agent",
+                    "session_id": state.session_id,
+                    "article_count": len(ai_articles_df),
+                    "workflow_step": 4
+                }
             )
             ai_articles_df['short_summary'] = await distill_agent.filter_dataframe(
                 ai_articles_df[['id', 'input_text']],
@@ -2095,8 +2127,8 @@ class ClusterByTopicTool:
             self.logger.info("Starting topic extraction for clustering")
 
         # Get prompt and model from Langfuse
-        system_prompt, user_prompt, model = LangfuseClient(
-        ).get_prompt("newsagent/extract_topics")
+        system_prompt, user_prompt, model, reasoning_effort = get_langfuse_client(
+            logger=self.logger).get_prompt("newsagent/extract_topics")
 
         if self.logger:
             self.logger.info(f"Using model '{model}' for topic extraction")
@@ -2111,7 +2143,15 @@ class ClusterByTopicTool:
             model=model,
             verbose=self.verbose,
             logger=self.logger,
-            reasoning_effort='high'
+            reasoning_effort='high',
+            trace_enable=False,
+            trace_tag=self.step_name,
+            trace_metadata={
+                "agent_name": "topic_agent",
+                "session_id": self.state.session_id,
+                "article_count": len(articles_with_summaries),
+                "workflow_step": 6
+            }
         )
 
         # Extract topics using filter_dataframe
@@ -2147,7 +2187,7 @@ class ClusterByTopicTool:
             List of boolean values indicating relevance to the topic
         """
         # Get prompt and model from Langfuse
-        system_prompt, user_prompt, model = LangfuseClient().get_prompt(
+        system_prompt, user_prompt, model, reasoning_effort = get_langfuse_client(logger=self.logger).get_prompt(
             "newsagent/canonical_topic")
 
         # Create LLMagent for canonical topic classification
@@ -2158,7 +2198,15 @@ class ClusterByTopicTool:
             model=model,
             verbose=False,  # too much output , always false
             logger=self.logger,
-            reasoning_effort='high'
+            reasoning_effort='high',
+            trace_enable=False,
+            trace_tag=self.step_name,
+            trace_metadata={
+                "agent_name": "canonical_agent",
+                "session_id": self.state.session_id,
+                "article_count": len(headline_df),
+                "workflow_step": 6
+            }
         )
 
         # Use filter_dataframe to classify against the canonical topic
@@ -2227,8 +2275,8 @@ class ClusterByTopicTool:
         Returns:
             DataFrame with cleaned topics_list column
         """
-        system_prompt, user_prompt, model = LangfuseClient(
-        ).get_prompt("newsagent/topic_cleanup")
+        system_prompt, user_prompt, model, reasoning_effort = get_langfuse_client(
+            logger=self.logger).get_prompt("newsagent/topic_cleanup")
 
         if self.logger:
             self.logger.info(
@@ -2252,7 +2300,15 @@ class ClusterByTopicTool:
             model=model,
             verbose=self.verbose,
             logger=self.logger,
-            reasoning_effort='high'
+            reasoning_effort='high',
+            trace_enable=False,
+            trace_tag=self.step_name,
+            trace_metadata={
+                "agent_name": "cleanup_agent",
+                "session_id": self.state.session_id,
+                "article_count": len(headline_df),
+                "workflow_step": 6
+            }
         )
 
         # Use filter_dataframe to clean up topics
@@ -2478,7 +2534,7 @@ class SelectSectionsTool:
 
             self.logger.info("Free form categorization of articles")
 
-            system_prompt, user_prompt, model = LangfuseClient().get_prompt(
+            system_prompt, user_prompt, model, reasoning_effort = get_langfuse_client(logger=self.logger).get_prompt(
                 "newsagent/cat_proposal")
 
             cat_proposal_agent = LLMagent(
@@ -2488,7 +2544,15 @@ class SelectSectionsTool:
                 model=model,
                 reasoning_effort='low',
                 verbose=self.verbose,
-                logger=self.logger
+                logger=self.logger,
+                trace_enable=False,
+                trace_tag=step_name,
+                trace_metadata={
+                    "agent_name": "cat_proposal_agent",
+                    "session_id": state.session_id,
+                    "article_count": len(headline_df),
+                    "workflow_step": 7
+                }
             )
 
             headline_df["input_text"] = headline_df.apply(
@@ -2504,8 +2568,8 @@ class SelectSectionsTool:
 
             self.logger.info(f"Cleaning up initial categories: {initial_cats}")
 
-            system_prompt, user_prompt, model = LangfuseClient(
-            ).get_prompt("newsagent/cat_cleanup")
+            system_prompt, user_prompt, model, reasoning_effort = get_langfuse_client(
+                logger=self.logger).get_prompt("newsagent/cat_cleanup")
 
             cat_cleanup_agent = LLMagent(
                 system_prompt=system_prompt,
@@ -2522,8 +2586,8 @@ class SelectSectionsTool:
             self.logger.info(f"Final categories: {final_cats_str}")
 
             # loop over items and assign to cats
-            system_prompt, user_prompt, model = LangfuseClient(
-            ).get_prompt("newsagent/cat_assignment")
+            system_prompt, user_prompt, model, reasoning_effort = get_langfuse_client(
+                logger=self.logger).get_prompt("newsagent/cat_assignment")
 
             cat_assignment_agent = LLMagent(
                 system_prompt=system_prompt,
@@ -2532,7 +2596,15 @@ class SelectSectionsTool:
                 model=model,
                 verbose=self.verbose,
                 logger=self.logger,
-                reasoning_effort='high'
+                reasoning_effort='high',
+                trace_enable=False,
+                trace_tag=step_name,
+                trace_metadata={
+                    "agent_name": "cat_assignment_agent",
+                    "session_id": state.session_id,
+                    "article_count": len(headline_df),
+                    "workflow_step": 7
+                }
             )
 
             async def assign_topic(idx, input_text, topics_str=None):
@@ -2563,7 +2635,7 @@ class SelectSectionsTool:
 
             # dedupe articles
             self.logger.info("Deduping articles")
-            system_prompt, user_prompt, model = LangfuseClient().get_prompt(
+            system_prompt, user_prompt, model, reasoning_effort = get_langfuse_client(logger=self.logger).get_prompt(
                 "newsagent/dedupe_articles")
 
             dedupe_agent = LLMagent(
@@ -2572,7 +2644,15 @@ class SelectSectionsTool:
                 output_type=DupeRecordList,
                 model=model,
                 verbose=self.verbose,
-                logger=self.logger
+                logger=self.logger,
+                trace_enable=False,
+                trace_tag=step_name,
+                trace_metadata={
+                    "agent_name": "dedupe_agent",
+                    "session_id": state.session_id,
+                    "article_count": len(headline_df),
+                    "workflow_step": 7
+                }
             )
 
             async def run_dedupe(input_text):
@@ -3023,8 +3103,8 @@ class DraftSectionsTool:
         newsletter_section_df = self._fix_singletons(newsletter_section_df)
 
         # Get langfuse prompts for section critique
-        section_critique_system, section_critique_user, section_critique_model = \
-            LangfuseClient().get_prompt("newsagent/critique_section")
+        section_critique_system, section_critique_user, section_critique_model, section_critique_reasoning_effort = \
+            get_langfuse_client(logger=self.logger).get_prompt("newsagent/critique_section")
 
         # Create critique agent (one-time)
         critique_agent = LLMagent(
@@ -3033,19 +3113,35 @@ class DraftSectionsTool:
             output_type=SectionCritique,
             model=section_critique_model,
             verbose=self.verbose,
-            logger=self.logger
+            logger=self.logger,
+            trace_enable=False,
+            trace_tag=self.step_name,
+            trace_metadata={
+                "agent_name": "critique_agent",
+                "session_id": self.state.session_id,
+                "section_count": len(newsletter_section_df),
+                "workflow_step": 8
+            }
         )
 
         # Create write_section agent for re-drafting (one-time)
-        write_system, write_user, write_model = LangfuseClient(
-        ).get_prompt("newsagent/write_section")
+        write_system, write_user, write_model, write_reasoning_effort = get_langfuse_client(
+            logger=self.logger).get_prompt("newsagent/write_section")
         write_section_agent = LLMagent(
             system_prompt=write_system,
             user_prompt=write_user,
             output_type=Section,
             model=write_model,
             verbose=self.verbose,
-            logger=self.logger
+            logger=self.logger,
+            trace_enable=False,
+            trace_tag=self.step_name,
+            trace_metadata={
+                "agent_name": "write_section_agent",
+                "session_id": self.state.session_id,
+                "section_count": len(newsletter_section_df),
+                "workflow_step": 8
+            }
         )
 
         # Iteration loop
@@ -3254,8 +3350,8 @@ class DraftSectionsTool:
                 f"Drafting sections for {len(categories)} categories (including Other) from selected stories")
 
             # Create write_section agent
-            write_section_system_prompt, write_section_user_prompt, model = \
-                LangfuseClient().get_prompt("newsagent/write_section")
+            write_section_system_prompt, write_section_user_prompt, model, reasoning_effort = \
+                get_langfuse_client(logger=self.logger).get_prompt("newsagent/write_section")
 
             write_section_agent = LLMagent(
                 system_prompt=write_section_system_prompt,
@@ -3392,15 +3488,22 @@ class FinalizeNewsletterTool:
                 f"Compiled {len(newsletter_section_df)} items into markdown input")
 
             # run generate_newsletter_title prompt from Langfuse
-            title_system_prompt, title_user_prompt, model = \
-                LangfuseClient().get_prompt("newsagent/generate_newsletter_title")
+            title_system_prompt, title_user_prompt, model, reasoning_effort = \
+                get_langfuse_client(logger=self.logger).get_prompt("newsagent/generate_newsletter_title")
             title_agent = LLMagent(
                 system_prompt=title_system_prompt,
                 user_prompt=title_user_prompt,
                 output_type=StringResult,
                 model=model,
                 verbose=self.verbose,
-                logger=self.logger
+                logger=self.logger,
+                trace_enable=False,
+                trace_tag=step_name,
+                trace_metadata={
+                    "agent_name": "title_agent",
+                    "session_id": state.session_id,
+                    "workflow_step": 9
+                }
             )
             response = await title_agent.run_prompt(input_text=draft_newsletter)
             title = response.value
@@ -3416,26 +3519,40 @@ class FinalizeNewsletterTool:
             self.logger.info("Step 9b: Starting critic-optimizer loop")
 
             # Initialize agents
-            critique_newsletter_system_prompt, critique_newsletter_user_prompt, model = \
-                LangfuseClient().get_prompt("newsagent/critique_newsletter")
+            critique_newsletter_system_prompt, critique_newsletter_user_prompt, model, reasoning_effort = \
+                get_langfuse_client(logger=self.logger).get_prompt("newsagent/critique_newsletter")
             critique_newsletter_agent = LLMagent(
                 system_prompt=critique_newsletter_system_prompt,
                 user_prompt=critique_newsletter_user_prompt,
                 output_type=NewsletterCritique,
                 model=model,
                 verbose=self.verbose,
-                logger=self.logger
+                logger=self.logger,
+                trace_enable=False,
+                trace_tag=step_name,
+                trace_metadata={
+                    "agent_name": "critique_newsletter_agent",
+                    "session_id": state.session_id,
+                    "workflow_step": 9
+                }
             )
 
-            improve_newsletter_system_prompt, improve_newsletter_user_prompt, model = \
-                LangfuseClient().get_prompt("newsagent/improve_newsletter")
+            improve_newsletter_system_prompt, improve_newsletter_user_prompt, model, reasoning_effort = \
+                get_langfuse_client(logger=self.logger).get_prompt("newsagent/improve_newsletter")
             improve_newsletter_agent = LLMagent(
                 system_prompt=improve_newsletter_system_prompt,
                 user_prompt=improve_newsletter_user_prompt,
                 output_type=StringResult,
                 model=model,
                 verbose=self.verbose,
-                logger=self.logger
+                logger=self.logger,
+                trace_enable=False,
+                trace_tag=step_name,
+                trace_metadata={
+                    "agent_name": "improve_newsletter_agent",
+                    "session_id": state.session_id,
+                    "workflow_step": 9
+                }
             )
 
             # Loop configuration
