@@ -1,44 +1,19 @@
 import os
 import yaml
-import json
-import yaml
-import time
-import random
 import logging
-
-from pathlib import Path
 
 from datetime import datetime, timedelta
 
 import asyncio
-import nest_asyncio
 import aiohttp
 import feedparser
 import requests
 
-import pydantic
-from pydantic import BaseModel, Field, RootModel
-from typing import Dict, TypedDict, Type, List, Optional, Any
-from dataclasses import dataclass, field
-from enum import Enum
+from typing import Dict, List, Optional, Any
 
-import numpy as np
-import pandas as pd
-
-import openai
-from openai import AsyncOpenAI
-
-import agents
-from agents.exceptions import InputGuardrailTripwireTriggered
-from agents import (Agent, Runner, Tool, ModelSettings, FunctionTool, InputGuardrail, GuardrailFunctionOutput,
-                    SQLiteSession, set_default_openai_api, set_default_openai_client
-                    )
-
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+# from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from playwright.async_api import async_playwright
 
-from prompt_loader import PromptLoader
-from log_handler import SQLiteLogHandler, setup_sqlite_logging, sanitize_error_for_logging, log
 # Removed utilities imports - functionality merged into newsletter_state.py
 from config import DOWNLOAD_DIR
 from scrape import get_browser, scrape_source, parse_source_file

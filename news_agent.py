@@ -871,9 +871,9 @@ class FilterUrlsTool:
 
             if self.logger:
                 self.logger.info(f"🔍 Filtering {total_articles} headlines...")
-                if state.process_since:
+                if state.reprocess_since:
                     self.logger.info(
-                        f"🔄 Checking for duplicates seen before {state.process_since.isoformat()}")
+                        f"🔄 Checking for duplicates seen before {state.reprocess_since.isoformat()}")
                 else:
                     self.logger.info(
                         "🔄 Checking for duplicates (all urls without date restrictions)")
@@ -896,13 +896,15 @@ class FilterUrlsTool:
                     dupe_df['is_new'] = True
                     for row in dupe_df.itertuples():
                         url_to_check = row.url
-                        print("checking", url_to_check)
+                        # print("checking", url_to_check)
                         if not url_to_check:  # should never happen
+                            print("no url to check, should never happen!")
                             continue
+                        # look up in Urls table by url, or matching source+title (sometimes multiple variations)
                         existing_url = Url.get_by_url_or_source_and_title(
                             conn, url_to_check, row.source, row.title)
                         if existing_url is None:  # not found
-                            print("url not found - inserting new URL")
+                            print(f"new - keeping {url_to_check}")
                             new_url = Url(
                                 initial_url=url_to_check,
                                 final_url='',
@@ -913,17 +915,20 @@ class FilterUrlsTool:
                             )
                             new_url.insert(conn)
                             continue
-                        if state.process_since:
-                            if existing_url.created_at is not None and existing_url.created_at > state.process_since:
-                                # URL exists but seen after process_since - treat as new
-                                print("found url after cutoff")
+                        if state.reprocess_since:
+                            if existing_url.created_at is not None and existing_url.created_at > state.reprocess_since:
+                                # URL exists but seen after reprocess_since - treat as new
+                                print(
+                                    f"found after cutoff - keeping {url_to_check}")
                                 continue
                             # found url and seen prior to cutoff - treat as duplicate
-                            print("found before cutoff")
+                            print(
+                                f"found before cutoff - ignoring as duplicate {url_to_check}")
                             dupe_df.at[row.Index, 'is_new'] = False
                         else:
-                            # No process_since set - treat any existing URLs as duplicates
-                            print("found url, no cutoff set - treating as duplicate")
+                            # No reprocess_since set - treat any existing URLs as duplicates
+                            print(
+                                f"found with no cutoff set - ignoring as duplicate {url_to_check}")
                             dupe_df.at[row.Index, 'is_new'] = False
 
                 # Filter DataFrame to only new URLs
@@ -931,16 +936,16 @@ class FilterUrlsTool:
                 duplicate_count = original_count - len(headline_df)
 
                 if self.verbose:
-                    if state.process_since is not None:
+                    if state.reprocess_since is not None:
                         print(
-                            f"🔄 Filtered out {duplicate_count} URLs seen before {state.process_since.isoformat()}, processing {len(headline_df)} new URLs")
+                            f"🔄 Filtered out {duplicate_count} URLs seen before {state.reprocess_since.isoformat()}, processing {len(headline_df)} new URLs")
                     else:
                         print(
                             f"🔄 Filtered out {duplicate_count} duplicate URLs, processing {len(headline_df)} new URLs")
                 if self.logger:
-                    if state.process_since is not None:
+                    if state.reprocess_since is not None:
                         self.logger.info(
-                            f"URL deduplication with process_since: {duplicate_count} URLs filtered (seen before {state.process_since.isoformat()}), {len(headline_df)} new URLs remain")
+                            f"URL deduplication with reprocess_since: {duplicate_count} URLs filtered (seen before {state.reprocess_since.isoformat()}), {len(headline_df)} new URLs remain")
                     else:
                         self.logger.info(
                             f"URL deduplication: {duplicate_count} duplicates filtered, {len(headline_df)} new URLs remain")
@@ -948,8 +953,8 @@ class FilterUrlsTool:
                 # If no new URLs remain, complete step early
                 if headline_df.empty:
                     state.complete_step(step_name)
-                    if state.process_since is not None:
-                        return f"✅ Step 2 completed! All {original_count} URLs were seen before {state.process_since.isoformat()} - no new content to process."
+                    if state.reprocess_since is not None:
+                        return f"✅ Step 2 completed! All {original_count} URLs were seen before {state.reprocess_since.isoformat()} - no new content to process."
                     else:
                         return f"✅ Step 2 completed! All {original_count} URLs were duplicates - no new content to process."
 
@@ -974,6 +979,7 @@ class FilterUrlsTool:
                 user_prompt=filter_user_prompt,
                 output_type=AIClassificationList,
                 model=model,
+                reasoning_effort='high',
                 verbose=self.verbose,
                 logger=self.logger
             )
@@ -1251,6 +1257,7 @@ class DownloadArticlesTool:
                     user_prompt=user_prompt,
                     output_type=SiteNameGenerationList,
                     model=model,
+                    reasoning_effort='high',
                     verbose=self.verbose,
                     logger=self.logger
                 )
@@ -1359,6 +1366,11 @@ class DownloadArticlesTool:
 
             # Store updated headline data in state
             state.headline_data = ai_df.to_dict('records')
+
+            print("Missing files:")
+            with pd.option_context('display.max_columns', None, 'display.width', None, 'display.max_colwidth', None):
+                display(ai_df[['title', 'status', 'final_url']
+                              ].loc[ai_df["html_path"] == ""])
 
             # Complete the step
             state.complete_step(step_name)
@@ -2098,7 +2110,8 @@ class ClusterByTopicTool:
             output_type=TopicExtractionList,
             model=model,
             verbose=self.verbose,
-            logger=self.logger
+            logger=self.logger,
+            reasoning_effort='high'
         )
 
         # Extract topics using filter_dataframe
@@ -2144,7 +2157,8 @@ class ClusterByTopicTool:
             output_type=CanonicalTopicClassificationList,
             model=model,
             verbose=False,  # too much output , always false
-            logger=self.logger
+            logger=self.logger,
+            reasoning_effort='high'
         )
 
         # Use filter_dataframe to classify against the canonical topic
@@ -2237,7 +2251,8 @@ class ClusterByTopicTool:
             output_type=TopicExtractionList,
             model=model,
             verbose=self.verbose,
-            logger=self.logger
+            logger=self.logger,
+            reasoning_effort='high'
         )
 
         # Use filter_dataframe to clean up topics
@@ -2471,6 +2486,7 @@ class SelectSectionsTool:
                 user_prompt=user_prompt,
                 output_type=TopicCategoryList,
                 model=model,
+                reasoning_effort='low',
                 verbose=self.verbose,
                 logger=self.logger
             )
@@ -2496,6 +2512,7 @@ class SelectSectionsTool:
                 user_prompt=user_prompt,
                 output_type=TopicCategoryList,
                 model=model,
+                reasoning_effort='low',
                 verbose=self.verbose,
                 logger=self.logger
             )
@@ -2514,7 +2531,8 @@ class SelectSectionsTool:
                 output_type=TopicHeadline,
                 model=model,
                 verbose=self.verbose,
-                logger=self.logger
+                logger=self.logger,
+                reasoning_effort='high'
             )
 
             async def assign_topic(idx, input_text, topics_str=None):
@@ -2795,6 +2813,12 @@ class DraftSectionsTool:
             for action in critique.item_actions:
                 story_mask = newsletter_section_df['id'] == action.id
 
+                # Get story headline for better error messages
+                story_headline = ""
+                if story_mask.any():
+                    story_headline = newsletter_section_df.loc[story_mask, 'headline'].iloc[
+                        0] if 'headline' in newsletter_section_df.columns else f"id={action.id}"
+
                 if action.action == 'drop':
                     try:
                         self.logger.info(
@@ -2804,8 +2828,9 @@ class DraftSectionsTool:
                         newsletter_section_df.loc[story_mask,
                                                   'section_title'] = 'Other News'
                     except Exception as e:
-                        self.logger.error(f"Error dropping story: {str(e)}")
-                        raise e
+                        self.logger.error(
+                            f"Error dropping story '{story_headline}': {str(e)}")
+                        # Continue processing other actions
 
                 elif action.action == 'rewrite' and action.rewritten_headline:
                     try:
@@ -2820,11 +2845,20 @@ class DraftSectionsTool:
                                                   'headline'] = action.rewritten_headline
                     except Exception as e:
                         self.logger.error(
-                            f"Error rewriting headline: {str(e)}")
-                        raise e
+                            f"Error rewriting headline '{story_headline}': {str(e)}")
+                        # Continue processing other actions
 
                 elif action.action == 'move' and action.target_category:
                     try:
+                        # Validate target_category exists before moving
+                        if action.target_category not in cat_df_dict:
+                            self.logger.warning(
+                                f"Cannot move story '{story_headline}' (id={action.id}): "
+                                f"target category '{action.target_category}' does not exist. "
+                                f"Available categories: {list(cat_df_dict.keys())}"
+                            )
+                            continue  # Skip this action and continue to next
+
                         self.logger.info(
                             f"    MOVE id={action.id} to {action.target_category}: {action.reason}"
                         )
@@ -2833,8 +2867,9 @@ class DraftSectionsTool:
                         newsletter_section_df.loc[story_mask,
                                                   'section_title'] = cat_df_dict[action.target_category]
                     except Exception as e:
-                        self.logger.error(f"Error moving story: {str(e)}")
-                        raise e
+                        self.logger.error(
+                            f"Error moving story '{story_headline}' (id={action.id}) to '{action.target_category}': {str(e)}")
+                        # Continue processing other actions
 
         stories_pruned = newsletter_section_df['prune'].sum()
         stories_remaining = len(newsletter_section_df) - stories_pruned
@@ -3002,7 +3037,8 @@ class DraftSectionsTool:
         )
 
         # Create write_section agent for re-drafting (one-time)
-        write_system, write_user, write_model = LangfuseClient().get_prompt("newsagent/write_section")
+        write_system, write_user, write_model = LangfuseClient(
+        ).get_prompt("newsagent/write_section")
         write_section_agent = LLMagent(
             system_prompt=write_system,
             user_prompt=write_user,
@@ -3081,7 +3117,8 @@ class DraftSectionsTool:
                     cat_df = headline_df.loc[headline_df["cat"] == cat].sort_values(
                         "rating", ascending=False)
                     input_text = cat_df[["id", "rating", "short_summary", "site_name", "final_url"]].rename(
-                        columns={"short_summary": "summary", "final_url": "url"}
+                        columns={"short_summary": "summary",
+                                 "final_url": "url"}
                     ).to_json(orient="records")
 
                     redraft_tasks.append(
@@ -3101,7 +3138,8 @@ class DraftSectionsTool:
                     newsletter_section_df = pd.concat(
                         [newsletter_section_df, new_section_df], ignore_index=True)
 
-                self.logger.info(f"Re-drafted {len(sections_to_redraft)} sections")
+                self.logger.info(
+                    f"Re-drafted {len(sections_to_redraft)} sections")
 
         # Final cleanup: remove pruned stories
         newsletter_section_df = newsletter_section_df.loc[~newsletter_section_df['prune']]
@@ -3835,9 +3873,24 @@ async def main():
         raise ValueError("OPENAI_API_KEY environment variable not set")
 
     # Create agent with persistent state (timeout set in __init__)
-    agent = NewsletterAgent(session_id="test_newsletter",
-                            verbose=True, timeout=300.0)
 
+    do_download = True
+    reprocess_since = None
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
+    session_id = f"test_newsletter_{timestamp}"
+
+    print(session_id)
+    state = NewsletterAgentState(session_id=session_id,
+                                 db_path="newsletter_agent.db",
+                                 do_download=do_download,
+                                 reprocess_since=reprocess_since,
+                                 verbose=False,
+                                 timeout=300.0,
+                                 )
+
+    agent = NewsletterAgent(session_id=session_id,
+                            state=state, verbose=False, timeout=30)
+    state.serialize_to_db("initialize")
     # User prompt to run complete workflow
     user_prompt = "Run all the workflow steps in order and create the newsletter"
 

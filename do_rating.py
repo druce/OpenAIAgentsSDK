@@ -3,10 +3,7 @@ from typing import List, Tuple, Optional
 import numpy as np
 import math
 import pandas as pd
-import sqlite3
 from datetime import datetime, timezone, timedelta
-from config import NEWSAGENTDB
-from db import Article
 import logging
 # import random
 import asyncio
@@ -359,6 +356,7 @@ async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFra
         system_prompt=system,
         user_prompt=user,
         model=model,
+        reasoning_effort="low",
         output_type=StoryOrderList,
         verbose=False,
         logger=logger
@@ -454,7 +452,7 @@ async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFra
         if len(all_results) > min_rounds:  # do at least 1/2 of max rounds
             last_two = (all_results[-1] + all_results[-2]) / 2
             prev_two = (all_results[-3] + all_results[-4]) / 2
-            logger.info(f"last_two: {last_two}, prev_two: {prev_two}")
+            logger.info(f"last_two: {last_two:.2f}, prev_two: {prev_two:.2f}")
             if (last_two) < convergence_threshold:
                 logger.info("Convergence threshold achieved - stopping")
                 break

@@ -68,7 +68,7 @@ Read these news items carefully and output the ids in order from most important 
 # Prompt: `newsagent/canonical_topic`
 
 ## Metadata
-- **Version**: 5
+- **Version**: 6
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -76,7 +76,7 @@ Read these news items carefully and output the ids in order from most important 
 ## Configuration
 ```json
 {
-  "model": "gpt-5-nano"
+  "model": "gpt-5-mini"
 }
 ```
 
@@ -105,7 +105,7 @@ Topic of interest → **{topic}**
 # Prompt: `newsagent/cat_assignment`
 
 ## Metadata
-- **Version**: 4
+- **Version**: 6
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -113,7 +113,7 @@ Topic of interest → **{topic}**
 ## Configuration
 ```json
 {
-  "model": "gpt-5-nano"
+  "model": "gpt-5-mini"
 }
 ```
 
@@ -341,7 +341,7 @@ Think carefully and output categories for this list of stories
 # Prompt: `newsagent/critique_newsletter`
 
 ## Metadata
-- **Version**: 9
+- **Version**: 10
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -349,7 +349,7 @@ Think carefully and output categories for this list of stories
 ## Configuration
 ```json
 {
-  "model": "gpt-5"
+  "model": "gpt-5-mini"
 }
 ```
 
@@ -367,7 +367,7 @@ Evaluate the newsletter across the dimensions provided, return a JSON object in 
 - 6-15 words, active voice
 - Authoritative and newsy tone
 
-**structure_quality: (0-10)**
+**structure_quality: (0-10)** 
 - Correct structure: just newsletter headline, sections with titles and bullet points with links
 - Proper markdown: # for newsletter title, ## for section titles, bullet headlines within sections, links within each headline
 - 7-15 sections, "Other News" is last if present.
@@ -442,7 +442,7 @@ Provide:
 # Prompt: `newsagent/critique_section`
 
 ## Metadata
-- **Version**: 4
+- **Version**: 5
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -450,7 +450,7 @@ Provide:
 ## Configuration
 ```json
 {
-  "model": "gpt-5"
+  "model": "gpt-5-mini"
 }
 ```
 
@@ -475,7 +475,7 @@ Quality Guidelines:
 You will NOT:
   - Recommend changing source links
   - Recommend adding new information, content, or sources
-
+  
 Return a structured critique with specific actions for each story by ID in the specified schema.
 ```
 
@@ -483,7 +483,7 @@ Return a structured critique with specific actions for each story by ID in the s
 ```markdown
 **Section Title:** {section_title}
 
-**Available target_category values**:
+**Available target_category values**: 
 {target_categories}
 
 **Headlines:**
@@ -513,8 +513,8 @@ Return a structured critique with specific actions for each story by ID in the s
 You are an **AI News Deduplicator**.
 
 # Objective
-You will receive a JSON array of news summaries.
-Each item has a numeric `"id"` and a `"summary"` field (markdown text).
+You will receive a JSON array of news summaries.  
+Each item has a numeric `"id"` and a `"summary"` field (markdown text).  
 Your task: identify and mark duplicate articles that describe the **same core event**.
 
 # Output Rules
@@ -562,15 +562,15 @@ Deduplicate the following news articles:
 # Prompt: `newsagent/draft_newsletter`
 
 ## Metadata
-- **Version**: 1
+- **Version**: 4
 - **Type**: None
-- **Labels**: production
+- **Labels**: production, latest
 - **Tags**: None
 
 ## Configuration
 ```json
 {
-  "model": "gpt-5"
+  "model": "gpt-5-mini"
 }
 ```
 
@@ -591,33 +591,53 @@ You will receive an initial draft like:
 ## section title
 - headline text - [Source Name](https://link)
 - headline text - [Source Name](https://link)
-...
+...  
 
 # OUTPUT (STRICT FORMAT)
 
-1. Start with a single H1 title that reflects the day’s overall themes.
+# <Newsletter Title>
 
+## <Section Title>
+- <Edited headline> - [Source](link)
+- <Edited headline> - [Source](link)
+
+## <Section Title>
+- <Edited headline> - [Source](link)
+...
+
+## Other News
+- <Edited headline> - [Source](link)
+- <Edited headline> - [Source](link)
+...
+
+# NOTES:
+1. Start with a single H1 title that reflects the day’s overall themes:
+# Newsletter Title
 2. Then produce 8–15 sections plus one final catch-all section titled “Other News.”
-
-3. Each section:
-
-	• Markdown H2: ## Section Title (≤ 6 words; punchy/punny but clear and accurate)
-
-	• Up to 7 bullets (no limit in Other News)
-
-	• Each bullet: concise, edited headline, followed by a single source link in the exact format:
-	- No extra commentary, notes, or summaries outside this structure.
-
+3. Each section: section title (≤ 6 words; punchy/punny but clear and accurate), followed by up to 7 headlines with one or more links each
+4. Section Format (follow exactly):
+## Section Title
 - Edited headline - [Source](link)
+- Edited headline - [Source](link) [Source](link)
+- Edited headline - [Source](link)
+...
 
 # EDITING RULES
 
-• Integrity: Do not invent facts, numbers, or links. Use only what’s in the draft. Rewrite for clarity and conciseness only. 
+• Integrity: Do not add new facts, numbers, or links. Use only what’s in the draft. Rewrite for clarity and conciseness only. 
 • Prioritize: importance (policy/markets/safety/lives/scale), recency, novelty, reliability, clarity.
 • Theme first: Cluster related items; split very large themes; merge thin ones.
 • Cull: Drop weak, redundant, low-credibility, or uninteresting items.
 • De-dupe: Remove near-duplicates; if multiple links cover the same event, keep the strongest single source.
 • Source quality: Prefer primary, authoritative outlets (e.g., Reuters, FT, Bloomberg, official sites).
+• Consistency: American English, smart capitalization, consistent numerals (use digits for 10+; include currency symbols; write months as words).
+• Sections:
+	• Titles: ≤6 words, punchy and faithful to the bullets; avoid puns if they reduce clarity.
+	• Ordering: Order sections by overall importance; inside sections, order by significance then recency.
+	• 8–15 sections plus one final catch-all section titled “Other News.”
+	• Up to 7 bullets per section (no limit in Other News)
+	• Each bullet: concise, edited headline, followed by a single source link in the exact format above: No extra commentary, notes, or summaries outside this structure.
+    
 • Headlines:
 	• Active voice, present tense where reasonable.
 	• Clear, concrete, specific; include key numbers, dates, or geographies when they add clarity.
@@ -625,37 +645,23 @@ You will receive an initial draft like:
 	• Keep to ~16 words / ≤110 characters when possible.
 	• Correct obvious grammar, name, and unit issues; do not alter facts.
 
-• Section titles: ≤6 words, punchy and faithful to the bullets; avoid puns if they reduce clarity.
-
-• Ordering: Order sections by overall importance; inside sections, order by significance then recency.
-
-• Consistency: American English, smart capitalization, consistent numerals (use digits for 10+; include currency symbols; write months as words).
-
-# THEMING HINTS
+# THEMING HINTS 
 
 Consider buckets like: Markets & Valuations; Chips & Compute; Agentic Apps; Enterprise Suites; Policy & Antitrust; Safety & Trust; Power & Infrastructure; Funding & Deals; Research; Autonomy/Robotics; Global Strategy; Media & Society. Combine or split to fit the day’s material.
 
 ## STEP-BY-STEP METHOD
 
 1. Ingest & Mark: Read all bullets; flag high-impact items (policy, legal, macro, large $, safety risks).
-
 2. Cluster: Group items into coherent themes; identify overlaps and duplicates.
-
 3. Score each item (0–3) on:
-
 	- Impact (many people, many dollars and industry economics)
 	-  Recency/Event freshness
 	- Reliability
 	- Novelty/firsts.
-
 4. Select top items per cluster; drop low scores and duplicates.
-
 5. Structure sections (8–15) + Other News; ensure balanced coverage across beats.
-
 6. Edit headlines for clarity, brevity, and numbers; pick the best single source per bullet.
-
 7. Title the newsletter with a crisp H1 that captures the day’s through-lines.
-
 8. Quality checks:
 	- No section >7 bullets (except Other News can be any length).
 	- Section titles ≤6 words and match their bullets.
@@ -667,47 +673,7 @@ Consider buckets like: Markets & Valuations; Chips & Compute; Agentic Apps; Ente
 - High signal-to-noise; no fluff or repetition.
 - Accurate facts; strong sources; crisp headlines.
 - Exactly one final section titled “Other News.”
-
-
-# OUTPUT TEMPLATE (EXACT SHAPE)
-
-
-
-# <Newsletter Title>
-
-
-
-## <Section Title>
-
-
-
-- <Edited headline> - [Source](link)
-
-- <Edited headline> - [Source](link)
-
-
-
-## <Section Title>
-
-
-
-- <Edited headline> - [Source](link)
-
-...
-
-
-
-## Other News
-
-
-
-- <Edited headline> - [Source](link)
-
-- <Edited headline> - [Source](link)
-
-...
-
-
+  
 
 ```
 
@@ -715,7 +681,7 @@ Consider buckets like: Markets & Valuations; Chips & Compute; Agentic Apps; Ente
 ```markdown
 
 INITIAL DRAFT:
-{input_str}
+{input_test}
 ```
 
 ---
@@ -780,7 +746,7 @@ Summarize the article below:
 # Prompt: `newsagent/extract_topics`
 
 ## Metadata
-- **Version**: 5
+- **Version**: 6
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -788,7 +754,7 @@ Summarize the article below:
 ## Configuration
 ```json
 {
-  "model": "gpt-5-nano"
+  "model": "gpt-5-mini"
 }
 ```
 
@@ -828,7 +794,7 @@ Extract up to 5 distinct, broad topics from the news summary below:
 # Prompt: `newsagent/filter_urls`
 
 ## Metadata
-- **Version**: 6
+- **Version**: 7
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -836,7 +802,7 @@ Extract up to 5 distinct, broad topics from the news summary below:
 ## Configuration
 ```json
 {
-  "model": "gpt-5-nano"
+  "model": "gpt-5-mini"
 }
 ```
 
@@ -877,7 +843,7 @@ Input:
 # Prompt: `newsagent/generate_newsletter_title`
 
 ## Metadata
-- **Version**: 6
+- **Version**: 7
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -885,7 +851,7 @@ Input:
 ## Configuration
 ```json
 {
-  "model": "gpt-5"
+  "model": "gpt-5-mini"
 }
 ```
 
@@ -971,7 +937,7 @@ No markdown, no explanations, just the JSON.
 
 ## User Prompt
 ```markdown
-Classify the following headline(s):
+Classify the following headline(s): 
 {input_str}
 ```
 
@@ -980,15 +946,15 @@ Classify the following headline(s):
 # Prompt: `newsagent/improve_newsletter`
 
 ## Metadata
-- **Version**: 2
+- **Version**: 4
 - **Type**: None
-- **Labels**: production
+- **Labels**: production, latest
 - **Tags**: None
 
 ## Configuration
 ```json
 {
-  "model": "gpt-5"
+  "model": "gpt-5-mini"
 }
 ```
 
@@ -1003,14 +969,14 @@ You will receive:
 **Your task:**
 - Rewrite the newsletter.
 - Make sure to address ALL APPROPRIATE issues and critique recommendations.
-- You may modify or ignore recommendations you determine to be INAPPROPRIATE per the guidelines below.
+- You may modify or ignore recommendations which are INAPPROPRIATE per the guidelines below.
 
 **What you will fix, paying attention to critique recommendations:**
 - Edit for format, clarity, and structure
 - Improve headlines to be as concise and clear as possible
 - Improve section titles to be both creative/punny AND clear
-- Remove duplicate and nonessential headlines
-- Change order of headlines or sections
+- Remove duplicate and nonessential headlines 
+- Change order of headlines or sections 
 - Rewrite titles, sections, headlines for clarity, format, and impact
 - Split/merge sections
 - Fix any formatting issues
@@ -1025,7 +991,7 @@ Return the complete rewritten newsletter in markdown with:
 - 7-15 sections (## Section Title)
 - Bullet points with 1-3 links (- Headline - [Source1](url1) [Source2](url2))
 
-Prioritize clarity and impact, and check carefully that all appropriate issues in the critique are addressed.
+Check carefully that all appropriate issues in the critique are addressed.
 
 
 ```
@@ -1101,9 +1067,9 @@ SUMMARY REQUIREMENTS
 	•	Tone: Objective — no hype, adjectives, or speculation.
 	•	Start directly with the event or finding; Cut straight to the substantive content or actor.
 	•	Never start with “Secondary source reports…” or “Commentary argues…”
-	•	Prefer active voice
+	•	Prefer active voice 
 	•	no emojis or exclamation points.
-
+    
 CONTENT PRIORITIES (in strict order)
 	1.	Concrete facts, figures, or statistics.
 	2.	Primary source attribution (people, institutions, reports cited within the article — not the news outlet).
@@ -1357,7 +1323,7 @@ Please analyze the following domains according to these criteria:
 # Prompt: `newsagent/topic_cleanup`
 
 ## Metadata
-- **Version**: 9
+- **Version**: 10
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -1365,7 +1331,7 @@ Please analyze the following domains according to these criteria:
 ## Configuration
 ```json
 {
-  "model": "gpt-5-nano"
+  "model": "gpt-5-mini"
 }
 ```
 
@@ -1449,7 +1415,7 @@ Create a unifying title for these headlines.
 # Prompt: `newsagent/write_section`
 
 ## Metadata
-- **Version**: 4
+- **Version**: 5
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -1457,7 +1423,7 @@ Create a unifying title for these headlines.
 ## Configuration
 ```json
 {
-  "model": "gpt-5"
+  "model": "gpt-5-mini"
 }
 ```
 
@@ -1486,18 +1452,18 @@ Transform the list of news stories into a well-structured newsletter section wit
 - Merge into one story per cluster with multiple links.
 - sources = all URLs in the cluster, preserving original input order.
 - Do not rewrite URLs or site_names; keep exactly as given.
-
+    
 3. **Write headlines**: For each story, write a crisp headline-style headline derived from the short summary or summaries
-- Make each headlines ≤ 25 words: crystal clear, punchy, informative, specific, factual, non-clickbaity, active voice.
+- Make each headlines ≤ 25 words: crystal clear, punchy, informative, specific, factual, non-clickbaity, active voice. 
 - include key numbers/dates/entities if present
 
 4. **Order for narrative**: Arrange headlines to create a logical, compelling flow
 - biggest/most consequential overview first,
 - related follow-ups/contrasts,
 - end with forward-looking or lighter items.
-
+    
 5. **Prune off-topic and low-qality headlines**
-- set prune flag to true on headlines which don’t fit with the primary topic and section title.
+- set prune flag to true on headlines which don’t fit with the primary topic and section title. 
 ```
 
 ## User Prompt
