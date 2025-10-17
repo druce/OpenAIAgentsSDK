@@ -5,7 +5,7 @@
 # Prompt: `newsagent/battle_prompt`
 
 ## Metadata
-- **Version**: 5
+- **Version**: 6
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -13,7 +13,8 @@
 ## Configuration
 ```json
 {
-  "model": "gpt-5-mini"
+  "model": "gpt-5-mini",
+  "reasoning_effort": "low"
 }
 ```
 
@@ -68,7 +69,7 @@ Read these news items carefully and output the ids in order from most important 
 # Prompt: `newsagent/canonical_topic`
 
 ## Metadata
-- **Version**: 7
+- **Version**: 8
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -76,7 +77,8 @@ Read these news items carefully and output the ids in order from most important 
 ## Configuration
 ```json
 {
-  "model": "gpt-5-nano"
+  "model": "gpt-5-nano",
+  "reasoning_effort": "medium"
 }
 ```
 
@@ -105,7 +107,7 @@ Topic of interest → **{topic}**
 # Prompt: `newsagent/cat_assignment`
 
 ## Metadata
-- **Version**: 7
+- **Version**: 8
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -113,7 +115,8 @@ Topic of interest → **{topic}**
 ## Configuration
 ```json
 {
-  "model": "gpt-5-nano"
+  "model": "gpt-5-nano",
+  "reasoning_effort": "medium"
 }
 ```
 
@@ -170,7 +173,7 @@ NEWS ITEM
 # Prompt: `newsagent/cat_cleanup`
 
 ## Metadata
-- **Version**: 2
+- **Version**: 3
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -178,7 +181,8 @@ NEWS ITEM
 ## Configuration
 ```json
 {
-  "model": "gpt-5-mini"
+  "model": "gpt-5-mini",
+  "reasoning_effort": "medium"
 }
 ```
 
@@ -263,7 +267,7 @@ Think careful and output the cleaned list for these topics:
 # Prompt: `newsagent/cat_proposal`
 
 ## Metadata
-- **Version**: 4
+- **Version**: 5
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -271,7 +275,8 @@ Think careful and output the cleaned list for these topics:
 ## Configuration
 ```json
 {
-  "model": "gpt-5-mini"
+  "model": "gpt-5-mini",
+  "reasoning_effort": "medium"
 }
 ```
 
@@ -341,7 +346,7 @@ Think carefully and output categories for this list of stories
 # Prompt: `newsagent/critique_newsletter`
 
 ## Metadata
-- **Version**: 10
+- **Version**: 11
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -349,7 +354,8 @@ Think carefully and output categories for this list of stories
 ## Configuration
 ```json
 {
-  "model": "gpt-5-mini"
+  "model": "gpt-5-mini",
+  "reasoning_effort": "medium"
 }
 ```
 
@@ -442,7 +448,7 @@ Provide:
 # Prompt: `newsagent/critique_section`
 
 ## Metadata
-- **Version**: 5
+- **Version**: 6
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -450,7 +456,8 @@ Provide:
 ## Configuration
 ```json
 {
-  "model": "gpt-5-mini"
+  "model": "gpt-5-mini",
+  "reasoning_effort": "medium"
 }
 ```
 
@@ -495,7 +502,7 @@ Return a structured critique with specific actions for each story by ID in the s
 # Prompt: `newsagent/dedupe_articles`
 
 ## Metadata
-- **Version**: 2
+- **Version**: 4
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -503,7 +510,8 @@ Return a structured critique with specific actions for each story by ID in the s
 ## Configuration
 ```json
 {
-  "model": "gpt-5-mini"
+  "model": "gpt-5-mini",
+  "reasoning_effort": "low"
 }
 ```
 
@@ -562,7 +570,7 @@ Deduplicate the following news articles:
 # Prompt: `newsagent/draft_newsletter`
 
 ## Metadata
-- **Version**: 4
+- **Version**: 5
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -570,7 +578,8 @@ Deduplicate the following news articles:
 ## Configuration
 ```json
 {
-  "model": "gpt-5-mini"
+  "model": "gpt-5-mini",
+  "reasoning_effort": "high"
 }
 ```
 
@@ -689,7 +698,7 @@ INITIAL DRAFT:
 # Prompt: `newsagent/extract_summaries`
 
 ## Metadata
-- **Version**: 11
+- **Version**: 12
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -697,7 +706,8 @@ INITIAL DRAFT:
 ## Configuration
 ```json
 {
-  "model": "gpt-5-mini"
+  "model": "gpt-5-mini",
+  "reasoning_effort": "medium"
 }
 ```
 
@@ -746,7 +756,7 @@ Summarize the article below:
 # Prompt: `newsagent/extract_topics`
 
 ## Metadata
-- **Version**: 7
+- **Version**: 8
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -754,7 +764,8 @@ Summarize the article below:
 ## Configuration
 ```json
 {
-  "model": "gpt-5-nano"
+  "model": "gpt-5-nano",
+  "reasoning_effort": "medium"
 }
 ```
 
@@ -794,7 +805,7 @@ Extract up to 5 distinct, broad topics from the news summary below:
 # Prompt: `newsagent/filter_urls`
 
 ## Metadata
-- **Version**: 8
+- **Version**: 9
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -802,7 +813,8 @@ Extract up to 5 distinct, broad topics from the news summary below:
 ## Configuration
 ```json
 {
-  "model": "gpt-5-nano"
+  "model": "gpt-5-nano",
+  "reasoning_effort": "medium"
 }
 ```
 
@@ -843,7 +855,7 @@ Input:
 # Prompt: `newsagent/generate_newsletter_title`
 
 ## Metadata
-- **Version**: 7
+- **Version**: 8
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -851,7 +863,8 @@ Input:
 ## Configuration
 ```json
 {
-  "model": "gpt-5-mini"
+  "model": "gpt-5-mini",
+  "reasoning_effort": "high"
 }
 ```
 
@@ -900,7 +913,7 @@ Analyze the content carefully and identify the 2-3 dominant themes. Write a fact
 # Prompt: `newsagent/headline_classifier`
 
 ## Metadata
-- **Version**: 4
+- **Version**: 5
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -908,7 +921,8 @@ Analyze the content carefully and identify the 2-3 dominant themes. Write a fact
 ## Configuration
 ```json
 {
-  "model": "gpt-5-mini"
+  "model": "gpt-5-mini",
+  "reasoning_effort": "medium"
 }
 ```
 
@@ -946,7 +960,7 @@ Classify the following headline(s):
 # Prompt: `newsagent/improve_newsletter`
 
 ## Metadata
-- **Version**: 4
+- **Version**: 5
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -954,7 +968,8 @@ Classify the following headline(s):
 ## Configuration
 ```json
 {
-  "model": "gpt-5-mini"
+  "model": "gpt-5-mini",
+  "reasoning_effort": "high"
 }
 ```
 
@@ -1017,7 +1032,7 @@ Return the complete rewritten newsletter in markdown.
 # Prompt: `newsagent/item_distiller`
 
 ## Metadata
-- **Version**: 6
+- **Version**: 7
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -1025,7 +1040,8 @@ Return the complete rewritten newsletter in markdown.
 ## Configuration
 ```json
 {
-  "model": "gpt-5-mini"
+  "model": "gpt-5-mini",
+  "reasoning_effort": "medium"
 }
 ```
 
@@ -1277,7 +1293,7 @@ Think carefully about whether the story is low quality for an AI newsletter, the
 # Prompt: `newsagent/sitename`
 
 ## Metadata
-- **Version**: 4
+- **Version**: 5
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -1285,7 +1301,8 @@ Think carefully about whether the story is low quality for an AI newsletter, the
 ## Configuration
 ```json
 {
-  "model": "gpt-5-nano"
+  "model": "gpt-5-nano",
+  "reasoning_effort": "medium"
 }
 ```
 
@@ -1323,7 +1340,7 @@ Please analyze the following domains according to these criteria:
 # Prompt: `newsagent/topic_cleanup`
 
 ## Metadata
-- **Version**: 11
+- **Version**: 12
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -1331,7 +1348,8 @@ Please analyze the following domains according to these criteria:
 ## Configuration
 ```json
 {
-  "model": "gpt-5-nano"
+  "model": "gpt-5-nano",
+  "reasoning_effort": "medium"
 }
 ```
 
@@ -1377,7 +1395,7 @@ Think carefully and select ** at most 7 ** topics for each article, that best ca
 # Prompt: `newsagent/topic_writer`
 
 ## Metadata
-- **Version**: 2
+- **Version**: 3
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -1385,7 +1403,8 @@ Think carefully and select ** at most 7 ** topics for each article, that best ca
 ## Configuration
 ```json
 {
-  "model": "gpt-5-mini"
+  "model": "gpt-5-mini",
+  "reasoning_effort": "medium"
 }
 ```
 
@@ -1415,7 +1434,7 @@ Create a unifying title for these headlines.
 # Prompt: `newsagent/write_section`
 
 ## Metadata
-- **Version**: 5
+- **Version**: 6
 - **Type**: None
 - **Labels**: production, latest
 - **Tags**: None
@@ -1423,7 +1442,8 @@ Create a unifying title for these headlines.
 ## Configuration
 ```json
 {
-  "model": "gpt-5-mini"
+  "model": "gpt-5-mini",
+  "reasoning_effort": "high"
 }
 ```
 
@@ -1513,7 +1533,6 @@ The following prompts are referenced in these files:
 
 ## `news_agent.py`
 
-- `newsagent/filter_urls`
 - `newsagent/sitename`
 - `newsagent/extract_summaries`
 - `newsagent/item_distiller`
@@ -1521,12 +1540,7 @@ The following prompts are referenced in these files:
 - `newsagent/topic_cleanup`
 - `newsagent/cat_cleanup`
 - `newsagent/cat_assignment`
-- `newsagent/critique_section`
 - `newsagent/write_section`
-- `newsagent/write_section`
-- `newsagent/generate_newsletter_title`
-- `newsagent/critique_newsletter`
-- `newsagent/improve_newsletter`
 
 ## `test_agent-1-Copy1.py`
 

@@ -439,8 +439,8 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         # Add Langfuse metadata if tracing enabled
         if self.trace_enable:
             try:
-                from langfuse.decorators import langfuse_context
-                langfuse_context.update_current_observation(
+                lf_client = langfuse.get_client()
+                lf_client.update_current_span(
                     name=f"llm_{self.trace_tag}" if self.trace_tag else "llm_call",
                     metadata={
                         "step_name": self.trace_tag,
@@ -641,8 +641,8 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         # Add Langfuse metadata if tracing enabled
         if self.trace_enable:
             try:
-                from langfuse.decorators import langfuse_context
-                langfuse_context.update_current_observation(
+                lf_client = langfuse.get_client()
+                lf_client.update_current_span(
                     name=f"llm_{self.trace_tag}_logprobs" if self.trace_tag else "llm_call_logprobs",
                     metadata={
                         "step_name": self.trace_tag,

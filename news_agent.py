@@ -44,7 +44,7 @@ from agents import (Agent, Runner, RunContextWrapper, FunctionTool,
 from do_rating import fn_rate_articles, bradley_terry
 from do_cluster import do_clustering, _get_embeddings_df
 from do_dedupe import process_dataframe_with_filtering
-from llm import LLMagent, LangfuseClient, get_langfuse_client
+from llm import LLMagent, get_langfuse_client
 from utilities import send_gmail
 from scrape import scrape_urls_concurrent, normalize_html
 from fetch import Fetcher
@@ -971,7 +971,8 @@ class FilterUrlsTool:
                     f"🔍 Filtering {total_articles} headlines for AI relevance using LLM...")
 
             filter_system_prompt, filter_user_prompt, model, reasoning_effort = \
-                get_langfuse_client(logger=self.logger).get_prompt("newsagent/filter_urls")
+                get_langfuse_client(logger=self.logger).get_prompt(
+                    "newsagent/filter_urls")
 
             # Create LLM agent for AI classification
             classifier = LLMagent(
@@ -979,7 +980,7 @@ class FilterUrlsTool:
                 user_prompt=filter_user_prompt,
                 output_type=AIClassificationList,
                 model=model,
-                reasoning_effort='high',
+                reasoning_effort=reasoning_effort,
                 verbose=self.verbose,
                 logger=self.logger,
                 trace_enable=False,
@@ -1257,7 +1258,8 @@ class DownloadArticlesTool:
                         f"Generating site names for {len(domains_to_process)} domains using LLM")
 
                 # Get prompt from Langfuse
-                system_prompt, user_prompt, model, reasoning_effort = get_langfuse_client(logger=self.logger).get_prompt("newsagent/sitename")
+                system_prompt, user_prompt, model, reasoning_effort = get_langfuse_client(
+                    logger=self.logger).get_prompt("newsagent/sitename")
 
                 # Create LLM agent for site name generation
                 sitename_agent = LLMagent(
@@ -1265,7 +1267,7 @@ class DownloadArticlesTool:
                     user_prompt=user_prompt,
                     output_type=SiteNameGenerationList,
                     model=model,
-                    reasoning_effort='high',
+                    reasoning_effort=reasoning_effort,
                     verbose=self.verbose,
                     logger=self.logger,
                     trace_enable=True,
@@ -1628,6 +1630,7 @@ class ExtractSummariesTool:
                 user_prompt=user_prompt,
                 output_type=ArticleSummaryList,
                 model=model,
+                reasoning_effort=reasoning_effort,
                 verbose=self.verbose,
                 logger=self.logger,
                 trace_enable=False,
@@ -1731,6 +1734,7 @@ class ExtractSummariesTool:
                 user_prompt=user_prompt,
                 output_type=DistilledStoryList,
                 model=model,
+                reasoning_effort=reasoning_effort,
                 verbose=self.verbose,
                 logger=self.logger,
                 trace_enable=False,
@@ -2141,11 +2145,11 @@ class ClusterByTopicTool:
             user_prompt=user_prompt,
             output_type=TopicExtractionList,
             model=model,
+            reasoning_effort=reasoning_effort,
             verbose=self.verbose,
             logger=self.logger,
-            reasoning_effort='high',
             trace_enable=False,
-            trace_tag=self.step_name,
+            trace_tag=self.state.current_step,
             trace_metadata={
                 "agent_name": "topic_agent",
                 "session_id": self.state.session_id,
@@ -2198,9 +2202,9 @@ class ClusterByTopicTool:
             model=model,
             verbose=False,  # too much output , always false
             logger=self.logger,
-            reasoning_effort='high',
+            reasoning_effort=reasoning_effort,
             trace_enable=False,
-            trace_tag=self.step_name,
+            trace_tag=self.state.current_step,
             trace_metadata={
                 "agent_name": "canonical_agent",
                 "session_id": self.state.session_id,
@@ -2300,9 +2304,9 @@ class ClusterByTopicTool:
             model=model,
             verbose=self.verbose,
             logger=self.logger,
-            reasoning_effort='high',
+            reasoning_effort=reasoning_effort,
             trace_enable=False,
-            trace_tag=self.step_name,
+            trace_tag=self.state.current_step,
             trace_metadata={
                 "agent_name": "cleanup_agent",
                 "session_id": self.state.session_id,
@@ -2329,6 +2333,7 @@ class ClusterByTopicTool:
 
         # Access the persistent state
         state: NewsletterAgentState = ctx.context
+        self.state = state
 
         # Check if step already completed via persistent state
         if state.is_step_complete(step_name):
@@ -2542,7 +2547,7 @@ class SelectSectionsTool:
                 user_prompt=user_prompt,
                 output_type=TopicCategoryList,
                 model=model,
-                reasoning_effort='low',
+                reasoning_effort=reasoning_effort,
                 verbose=self.verbose,
                 logger=self.logger,
                 trace_enable=False,
@@ -2576,7 +2581,7 @@ class SelectSectionsTool:
                 user_prompt=user_prompt,
                 output_type=TopicCategoryList,
                 model=model,
-                reasoning_effort='low',
+                reasoning_effort=reasoning_effort,
                 verbose=self.verbose,
                 logger=self.logger
             )
@@ -2596,7 +2601,7 @@ class SelectSectionsTool:
                 model=model,
                 verbose=self.verbose,
                 logger=self.logger,
-                reasoning_effort='high',
+                reasoning_effort=reasoning_effort,
                 trace_enable=False,
                 trace_tag=step_name,
                 trace_metadata={
@@ -2643,6 +2648,7 @@ class SelectSectionsTool:
                 user_prompt=user_prompt,
                 output_type=DupeRecordList,
                 model=model,
+                reasoning_effort=reasoning_effort,
                 verbose=self.verbose,
                 logger=self.logger,
                 trace_enable=False,
@@ -3104,7 +3110,8 @@ class DraftSectionsTool:
 
         # Get langfuse prompts for section critique
         section_critique_system, section_critique_user, section_critique_model, section_critique_reasoning_effort = \
-            get_langfuse_client(logger=self.logger).get_prompt("newsagent/critique_section")
+            get_langfuse_client(logger=self.logger).get_prompt(
+                "newsagent/critique_section")
 
         # Create critique agent (one-time)
         critique_agent = LLMagent(
@@ -3112,10 +3119,11 @@ class DraftSectionsTool:
             user_prompt=section_critique_user,
             output_type=SectionCritique,
             model=section_critique_model,
+            reasoning_effort=section_critique_reasoning_effort,
             verbose=self.verbose,
             logger=self.logger,
             trace_enable=False,
-            trace_tag=self.step_name,
+            trace_tag=self.state.current_step,
             trace_metadata={
                 "agent_name": "critique_agent",
                 "session_id": self.state.session_id,
@@ -3132,10 +3140,11 @@ class DraftSectionsTool:
             user_prompt=write_user,
             output_type=Section,
             model=write_model,
+            reasoning_effort=write_reasoning_effort,
             verbose=self.verbose,
             logger=self.logger,
             trace_enable=False,
-            trace_tag=self.step_name,
+            trace_tag=self.state.current_step,
             trace_metadata={
                 "agent_name": "write_section_agent",
                 "session_id": self.state.session_id,
@@ -3255,6 +3264,7 @@ class DraftSectionsTool:
 
         # Access the persistent state
         state: NewsletterAgentState = ctx.context
+        self.state = state
 
         # Check if step already completed via persistent state
         if state.is_step_complete(step_name):
@@ -3351,13 +3361,15 @@ class DraftSectionsTool:
 
             # Create write_section agent
             write_section_system_prompt, write_section_user_prompt, model, reasoning_effort = \
-                get_langfuse_client(logger=self.logger).get_prompt("newsagent/write_section")
+                get_langfuse_client(logger=self.logger).get_prompt(
+                    "newsagent/write_section")
 
             write_section_agent = LLMagent(
                 system_prompt=write_section_system_prompt,
                 user_prompt=write_section_user_prompt,
                 output_type=Section,
                 model=model,
+                reasoning_effort=reasoning_effort,
                 verbose=self.verbose,
                 logger=self.logger
             )
@@ -3489,12 +3501,14 @@ class FinalizeNewsletterTool:
 
             # run generate_newsletter_title prompt from Langfuse
             title_system_prompt, title_user_prompt, model, reasoning_effort = \
-                get_langfuse_client(logger=self.logger).get_prompt("newsagent/generate_newsletter_title")
+                get_langfuse_client(logger=self.logger).get_prompt(
+                    "newsagent/generate_newsletter_title")
             title_agent = LLMagent(
                 system_prompt=title_system_prompt,
                 user_prompt=title_user_prompt,
                 output_type=StringResult,
                 model=model,
+                reasoning_effort=reasoning_effort,
                 verbose=self.verbose,
                 logger=self.logger,
                 trace_enable=False,
@@ -3520,12 +3534,14 @@ class FinalizeNewsletterTool:
 
             # Initialize agents
             critique_newsletter_system_prompt, critique_newsletter_user_prompt, model, reasoning_effort = \
-                get_langfuse_client(logger=self.logger).get_prompt("newsagent/critique_newsletter")
+                get_langfuse_client(logger=self.logger).get_prompt(
+                    "newsagent/critique_newsletter")
             critique_newsletter_agent = LLMagent(
                 system_prompt=critique_newsletter_system_prompt,
                 user_prompt=critique_newsletter_user_prompt,
                 output_type=NewsletterCritique,
                 model=model,
+                reasoning_effort=reasoning_effort,
                 verbose=self.verbose,
                 logger=self.logger,
                 trace_enable=False,
@@ -3538,12 +3554,14 @@ class FinalizeNewsletterTool:
             )
 
             improve_newsletter_system_prompt, improve_newsletter_user_prompt, model, reasoning_effort = \
-                get_langfuse_client(logger=self.logger).get_prompt("newsagent/improve_newsletter")
+                get_langfuse_client(logger=self.logger).get_prompt(
+                    "newsagent/improve_newsletter")
             improve_newsletter_agent = LLMagent(
                 system_prompt=improve_newsletter_system_prompt,
                 user_prompt=improve_newsletter_user_prompt,
                 output_type=StringResult,
                 model=model,
+                reasoning_effort=reasoning_effort,
                 verbose=self.verbose,
                 logger=self.logger,
                 trace_enable=False,
