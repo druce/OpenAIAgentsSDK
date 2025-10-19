@@ -12,6 +12,7 @@ import logging
 import os
 import json
 import dotenv
+import argparse
 
 # import random
 from datetime import datetime, timezone
@@ -984,13 +985,7 @@ class FilterUrlsTool:
                 verbose=self.verbose,
                 logger=self.logger,
                 trace_enable=False,
-                trace_tag=step_name,
-                trace_metadata={
-                    "agent_name": "classifier",
-                    "session_id": state.session_id,
-                    "article_count": len(headline_df),
-                    "workflow_step": 2
-                }
+                trace_tag_list=[step_name, "classifier"]
             )
 
             headline_df['isAI'] = \
@@ -1271,13 +1266,7 @@ class DownloadArticlesTool:
                     verbose=self.verbose,
                     logger=self.logger,
                     trace_enable=True,
-                    trace_tag=step_name,
-                    trace_metadata={
-                        "agent_name": "sitename_agent",
-                        "session_id": state.session_id,
-                        "domain_count": len(domains_to_process),
-                        "workflow_step": 3
-                    }
+                    trace_tag_list=[step_name, "sitename_agent"]
                 )
 
                 # Create DataFrame for processing (just domain names)
@@ -1634,13 +1623,7 @@ class ExtractSummariesTool:
                 verbose=self.verbose,
                 logger=self.logger,
                 trace_enable=False,
-                trace_tag=step_name,
-                trace_metadata={
-                    "agent_name": "summary_agent",
-                    "session_id": state.session_id,
-                    "article_count": len(ai_articles_df),
-                    "workflow_step": 4
-                }
+                trace_tag_list=[step_name, "summary_agent"]
             )
 
             # Use filter_dataframe for batch summarization
@@ -1738,13 +1721,7 @@ class ExtractSummariesTool:
                 verbose=self.verbose,
                 logger=self.logger,
                 trace_enable=False,
-                trace_tag=step_name,
-                trace_metadata={
-                    "agent_name": "distill_agent",
-                    "session_id": state.session_id,
-                    "article_count": len(ai_articles_df),
-                    "workflow_step": 4
-                }
+                trace_tag_list=[step_name, "distill_agent"]
             )
             ai_articles_df['short_summary'] = await distill_agent.filter_dataframe(
                 ai_articles_df[['id', 'input_text']],
@@ -2149,13 +2126,7 @@ class ClusterByTopicTool:
             verbose=self.verbose,
             logger=self.logger,
             trace_enable=False,
-            trace_tag=self.state.current_step,
-            trace_metadata={
-                "agent_name": "topic_agent",
-                "session_id": self.state.session_id,
-                "article_count": len(articles_with_summaries),
-                "workflow_step": 6
-            }
+            trace_tag_list=[self.state.current_step, "topic_agent"]
         )
 
         # Extract topics using filter_dataframe
@@ -2204,13 +2175,7 @@ class ClusterByTopicTool:
             logger=self.logger,
             reasoning_effort=reasoning_effort,
             trace_enable=False,
-            trace_tag=self.state.current_step,
-            trace_metadata={
-                "agent_name": "canonical_agent",
-                "session_id": self.state.session_id,
-                "article_count": len(headline_df),
-                "workflow_step": 6
-            }
+            trace_tag_list=[self.state.current_step, "canonical_agent"]
         )
 
         # Use filter_dataframe to classify against the canonical topic
@@ -2306,13 +2271,7 @@ class ClusterByTopicTool:
             logger=self.logger,
             reasoning_effort=reasoning_effort,
             trace_enable=False,
-            trace_tag=self.state.current_step,
-            trace_metadata={
-                "agent_name": "cleanup_agent",
-                "session_id": self.state.session_id,
-                "article_count": len(headline_df),
-                "workflow_step": 6
-            }
+            trace_tag_list=[self.state.current_step, "cleanup_agent"]
         )
 
         # Use filter_dataframe to clean up topics
@@ -2551,13 +2510,7 @@ class SelectSectionsTool:
                 verbose=self.verbose,
                 logger=self.logger,
                 trace_enable=False,
-                trace_tag=step_name,
-                trace_metadata={
-                    "agent_name": "cat_proposal_agent",
-                    "session_id": state.session_id,
-                    "article_count": len(headline_df),
-                    "workflow_step": 7
-                }
+                trace_tag_list=[step_name, "cat_proposal_agent"]
             )
 
             headline_df["input_text"] = headline_df.apply(
@@ -2603,13 +2556,7 @@ class SelectSectionsTool:
                 logger=self.logger,
                 reasoning_effort=reasoning_effort,
                 trace_enable=False,
-                trace_tag=step_name,
-                trace_metadata={
-                    "agent_name": "cat_assignment_agent",
-                    "session_id": state.session_id,
-                    "article_count": len(headline_df),
-                    "workflow_step": 7
-                }
+                trace_tag_list=[step_name, "cat_assignment_agent"]
             )
 
             async def assign_topic(idx, input_text, topics_str=None):
@@ -2652,13 +2599,7 @@ class SelectSectionsTool:
                 verbose=self.verbose,
                 logger=self.logger,
                 trace_enable=False,
-                trace_tag=step_name,
-                trace_metadata={
-                    "agent_name": "dedupe_agent",
-                    "session_id": state.session_id,
-                    "article_count": len(headline_df),
-                    "workflow_step": 7
-                }
+                trace_tag_list=[step_name, "dedupe_agent"]
             )
 
             async def run_dedupe(input_text):
@@ -3123,13 +3064,7 @@ class DraftSectionsTool:
             verbose=self.verbose,
             logger=self.logger,
             trace_enable=False,
-            trace_tag=self.state.current_step,
-            trace_metadata={
-                "agent_name": "critique_agent",
-                "session_id": self.state.session_id,
-                "section_count": len(newsletter_section_df),
-                "workflow_step": 8
-            }
+            trace_tag_list=[self.state.current_step, "critique_agent"]
         )
 
         # Create write_section agent for re-drafting (one-time)
@@ -3144,13 +3079,7 @@ class DraftSectionsTool:
             verbose=self.verbose,
             logger=self.logger,
             trace_enable=False,
-            trace_tag=self.state.current_step,
-            trace_metadata={
-                "agent_name": "write_section_agent",
-                "session_id": self.state.session_id,
-                "section_count": len(newsletter_section_df),
-                "workflow_step": 8
-            }
+            trace_tag_list=[self.state.current_step, "write_section_agent"]
         )
 
         # Iteration loop
@@ -3512,12 +3441,7 @@ class FinalizeNewsletterTool:
                 verbose=self.verbose,
                 logger=self.logger,
                 trace_enable=False,
-                trace_tag=step_name,
-                trace_metadata={
-                    "agent_name": "title_agent",
-                    "session_id": state.session_id,
-                    "workflow_step": 9
-                }
+                trace_tag_list=[step_name, "title_agent"]
             )
             response = await title_agent.run_prompt(input_text=draft_newsletter)
             title = response.value
@@ -3545,12 +3469,7 @@ class FinalizeNewsletterTool:
                 verbose=self.verbose,
                 logger=self.logger,
                 trace_enable=False,
-                trace_tag=step_name,
-                trace_metadata={
-                    "agent_name": "critique_newsletter_agent",
-                    "session_id": state.session_id,
-                    "workflow_step": 9
-                }
+                trace_tag_list=[step_name, "critique_newsletter_agent"]
             )
 
             improve_newsletter_system_prompt, improve_newsletter_user_prompt, model, reasoning_effort = \
@@ -3565,12 +3484,7 @@ class FinalizeNewsletterTool:
                 verbose=self.verbose,
                 logger=self.logger,
                 trace_enable=False,
-                trace_tag=step_name,
-                trace_metadata={
-                    "agent_name": "improve_newsletter_agent",
-                    "session_id": state.session_id,
-                    "workflow_step": 9
-                }
+                trace_tag_list=[step_name, "improve_newsletter_agent"]
             )
 
             # Loop configuration
@@ -3998,7 +3912,18 @@ Remember: Your state is persistent. You can safely resume from any point. Never 
 
 async def main():
     """Main function to create agent and run complete workflow"""
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(
+        description="Newsletter Agent - Complete Workflow")
+    parser.add_argument('-d', '--do_download', action='store_true', default=False,
+                        help='Enable web fetch, by default use existing HTML files in htmldata directory')
+    parser.add_argument('-r', '--reprocess-since', type=str, default='',
+                        help='Force processing of articles before this date even if already processed (YYYY-MM-DD HH:MM:SS format)')
+    args = parser.parse_args()
+
     print("🚀 Creating NewsletterAgent...")
+    print(
+        f"📋 Arguments: do_download={args.do_download}, reprocess_since={args.reprocess_since or 'None'}")
 
     # Load environment variables like the notebook does
     dotenv.load_dotenv()
@@ -4009,8 +3934,9 @@ async def main():
 
     # Create agent with persistent state (timeout set in __init__)
 
-    do_download = True
-    reprocess_since = None
+    # Use command line arguments
+    do_download = args.do_download
+    reprocess_since = args.reprocess_since if args.reprocess_since else None
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
     session_id = f"test_newsletter_{timestamp}"
 

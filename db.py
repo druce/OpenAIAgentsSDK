@@ -12,13 +12,15 @@ class Url:
     source: str
     isAI: bool
     created_at: Optional[datetime]
+    id: Optional[int] = None  # Auto-increment primary key
 
     @classmethod
     def create_table(cls, conn: sqlite3.Connection):
         """Create the urls table if it doesn't exist"""
         conn.execute("""
             CREATE TABLE IF NOT EXISTS urls (
-                initial_url TEXT PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                initial_url TEXT NOT NULL UNIQUE,
                 final_url TEXT NOT NULL,
                 title TEXT NOT NULL,
                 source TEXT NOT NULL,
@@ -30,11 +32,12 @@ class Url:
 
     def insert(self, conn: sqlite3.Connection):
         """Insert this URL record into the database"""
-        conn.execute("""
+        cursor = conn.execute("""
             INSERT INTO urls (initial_url, final_url, title, source, isAI, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
         """, (self.initial_url, self.final_url, self.title, self.source, self.isAI,
               self.created_at.isoformat() if self.created_at else None))
+        self.id = cursor.lastrowid  # Capture auto-generated id
         conn.commit()
 
     def update(self, conn: sqlite3.Connection):
@@ -57,18 +60,19 @@ class Url:
     def get(cls, conn: sqlite3.Connection, initial_url: str) -> Optional['Url']:
         """Get a URL record by initial_url"""
         cursor = conn.execute("""
-            SELECT initial_url, final_url, title, source, isAI, created_at
+            SELECT id, initial_url, final_url, title, source, isAI, created_at
             FROM urls WHERE initial_url = ?
         """, (initial_url,))
         row = cursor.fetchone()
         if row:
             return cls(
-                initial_url=row[0],
-                final_url=row[1],
-                title=row[2],
-                source=row[3],
-                isAI=bool(row[4]),
-                created_at=datetime.fromisoformat(row[5]) if row[5] else None
+                initial_url=row[1],
+                final_url=row[2],
+                title=row[3],
+                source=row[4],
+                isAI=bool(row[5]),
+                created_at=datetime.fromisoformat(row[6]) if row[6] else None,
+                id=row[0]
             )
         return None
 
@@ -76,34 +80,36 @@ class Url:
     def get_all(cls, conn: sqlite3.Connection) -> list['Url']:
         """Get all URL records"""
         cursor = conn.execute("""
-            SELECT initial_url, final_url, title, source, isAI, created_at FROM urls
+            SELECT id, initial_url, final_url, title, source, isAI, created_at FROM urls
         """)
         rows = cursor.fetchall()
         return [cls(
-            initial_url=row[0],
-            final_url=row[1],
-            title=row[2],
-            source=row[3],
-            isAI=bool(row[4]),
-            created_at=datetime.fromisoformat(row[5]) if row[5] else None
+            initial_url=row[1],
+            final_url=row[2],
+            title=row[3],
+            source=row[4],
+            isAI=bool(row[5]),
+            created_at=datetime.fromisoformat(row[6]) if row[6] else None,
+            id=row[0]
         ) for row in rows]
 
     @classmethod
     def get_by_source_and_title(cls, conn: sqlite3.Connection, source: str, title: str) -> Optional['Url']:
         """Get a URL record by matching both source and title"""
         cursor = conn.execute("""
-            SELECT initial_url, final_url, title, source, isAI, created_at
+            SELECT id, initial_url, final_url, title, source, isAI, created_at
             FROM urls WHERE source = ? AND title = ?
         """, (source, title))
         row = cursor.fetchone()
         if row:
             return cls(
-                initial_url=row[0],
-                final_url=row[1],
-                title=row[2],
-                source=row[3],
-                isAI=bool(row[4]),
-                created_at=datetime.fromisoformat(row[5]) if row[5] else None
+                initial_url=row[1],
+                final_url=row[2],
+                title=row[3],
+                source=row[4],
+                isAI=bool(row[5]),
+                created_at=datetime.fromisoformat(row[6]) if row[6] else None,
+                id=row[0]
             )
         return None
 
@@ -157,13 +163,15 @@ class Article:
     site_name: str
     reputation: Optional[float]
     date: Optional[datetime]
+    id: Optional[int] = None  # Auto-increment primary key
 
     @classmethod
     def create_table(cls, conn: sqlite3.Connection):
         """Create the articles table if it doesn't exist"""
         conn.execute("""
             CREATE TABLE IF NOT EXISTS articles (
-                final_url TEXT PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                final_url TEXT NOT NULL UNIQUE,
                 url TEXT NOT NULL,
                 source TEXT NOT NULL,
                 title TEXT NOT NULL,
@@ -190,7 +198,7 @@ class Article:
 
     def insert(self, conn: sqlite3.Connection):
         """Insert this Article record into the database"""
-        conn.execute("""
+        cursor = conn.execute("""
             INSERT INTO articles (final_url, url, source, title, published, rss_summary, isAI, status, html_path, last_updated, text_path, content_length, summary, short_summary, description, rating, cluster_label, domain, site_name, reputation, date)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
@@ -203,6 +211,7 @@ class Article:
             self.reputation,
             self.date.isoformat() if self.date else None
         ))
+        self.id = cursor.lastrowid  # Capture auto-generated id
         conn.commit()
 
     def update(self, conn: sqlite3.Connection):
@@ -232,34 +241,35 @@ class Article:
     def get(cls, conn: sqlite3.Connection, final_url: str) -> Optional['Article']:
         """Get an Article record by final_url"""
         cursor = conn.execute("""
-            SELECT final_url, url, source, title, published, rss_summary, isAI, status, html_path, last_updated, text_path, content_length, summary, short_summary, description, rating, cluster_label, domain, site_name, reputation, date
+            SELECT id, final_url, url, source, title, published, rss_summary, isAI, status, html_path, last_updated, text_path, content_length, summary, short_summary, description, rating, cluster_label, domain, site_name, reputation, date
             FROM articles WHERE final_url = ?
         """, (final_url,))
         row = cursor.fetchone()
         if row:
             return cls(
-                final_url=row[0],
-                url=row[1],
-                source=row[2],
-                title=row[3],
-                published=datetime.fromisoformat(row[4]) if row[4] else None,
-                rss_summary=row[5],
-                isAI=bool(row[6]),
-                status=row[7],
-                html_path=row[8],
+                final_url=row[1],
+                url=row[2],
+                source=row[3],
+                title=row[4],
+                published=datetime.fromisoformat(row[5]) if row[5] else None,
+                rss_summary=row[6],
+                isAI=bool(row[7]),
+                status=row[8],
+                html_path=row[9],
                 last_updated=datetime.fromisoformat(
-                    row[9]) if row[9] else None,
-                text_path=row[10],
-                content_length=row[11],
-                summary=row[12],
-                short_summary=row[13],
-                description=row[14],
-                rating=row[15],
-                cluster_label=row[16],
-                domain=row[17],
-                site_name=row[18],
-                reputation=row[19],
-                date=datetime.fromisoformat(row[20]) if row[20] else None
+                    row[10]) if row[10] else None,
+                text_path=row[11],
+                content_length=row[12],
+                summary=row[13],
+                short_summary=row[14],
+                description=row[15],
+                rating=row[16],
+                cluster_label=row[17],
+                domain=row[18],
+                site_name=row[19],
+                reputation=row[20],
+                date=datetime.fromisoformat(row[21]) if row[21] else None,
+                id=row[0]
             )
         return None
 
@@ -267,31 +277,32 @@ class Article:
     def get_all(cls, conn: sqlite3.Connection) -> list['Article']:
         """Get all Article records"""
         cursor = conn.execute("""
-            SELECT final_url, url, source, title, published, rss_summary, isAI, status, html_path, last_updated, text_path, content_length, summary, short_summary, description, rating, cluster_label, domain, site_name, reputation, date FROM articles
+            SELECT id, final_url, url, source, title, published, rss_summary, isAI, status, html_path, last_updated, text_path, content_length, summary, short_summary, description, rating, cluster_label, domain, site_name, reputation, date FROM articles
         """)
         rows = cursor.fetchall()
         return [cls(
-            final_url=row[0],
-            url=row[1],
-            source=row[2],
-            title=row[3],
-            published=datetime.fromisoformat(row[4]) if row[4] else None,
-            rss_summary=row[5],
-            isAI=bool(row[6]),
-            status=row[7],
-            html_path=row[8],
-            last_updated=datetime.fromisoformat(row[9]) if row[9] else None,
-            text_path=row[10],
-            content_length=row[11],
-            summary=row[12],
-            short_summary=row[13],
-            description=row[14],
-            rating=row[15],
-            cluster_label=row[16],
-            domain=row[17],
-            site_name=row[18],
-            reputation=row[19],
-            date=datetime.fromisoformat(row[20]) if row[20] else None
+            final_url=row[1],
+            url=row[2],
+            source=row[3],
+            title=row[4],
+            published=datetime.fromisoformat(row[5]) if row[5] else None,
+            rss_summary=row[6],
+            isAI=bool(row[7]),
+            status=row[8],
+            html_path=row[9],
+            last_updated=datetime.fromisoformat(row[10]) if row[10] else None,
+            text_path=row[11],
+            content_length=row[12],
+            summary=row[13],
+            short_summary=row[14],
+            description=row[15],
+            rating=row[16],
+            cluster_label=row[17],
+            domain=row[18],
+            site_name=row[19],
+            reputation=row[20],
+            date=datetime.fromisoformat(row[21]) if row[21] else None,
+            id=row[0]
         ) for row in rows]
 
     def upsert(self, conn: sqlite3.Connection):
@@ -338,13 +349,15 @@ class Site:
     domain_name: str
     site_name: str
     reputation: float
+    id: Optional[int] = None  # Auto-increment primary key
 
     @classmethod
     def create_table(cls, conn: sqlite3.Connection):
         """Create the sites table if it doesn't exist"""
         conn.execute("""
             CREATE TABLE IF NOT EXISTS sites (
-                domain_name TEXT PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                domain_name TEXT NOT NULL UNIQUE,
                 site_name TEXT NOT NULL,
                 reputation REAL NOT NULL
             )
@@ -353,10 +366,11 @@ class Site:
 
     def insert(self, conn: sqlite3.Connection):
         """Insert this Site record into the database"""
-        conn.execute("""
+        cursor = conn.execute("""
             INSERT INTO sites (domain_name, site_name, reputation)
             VALUES (?, ?, ?)
         """, (self.domain_name, self.site_name, self.reputation))
+        self.id = cursor.lastrowid  # Capture auto-generated id
         conn.commit()
 
     def update(self, conn: sqlite3.Connection):
@@ -377,15 +391,16 @@ class Site:
     def get(cls, conn: sqlite3.Connection, domain_name: str) -> Optional['Site']:
         """Get a Site record by domain_name"""
         cursor = conn.execute("""
-            SELECT domain_name, site_name, reputation
+            SELECT id, domain_name, site_name, reputation
             FROM sites WHERE domain_name = ?
         """, (domain_name,))
         row = cursor.fetchone()
         if row:
             return cls(
-                domain_name=row[0],
-                site_name=row[1],
-                reputation=row[2]
+                domain_name=row[1],
+                site_name=row[2],
+                reputation=row[3],
+                id=row[0]
             )
         return None
 
@@ -393,13 +408,14 @@ class Site:
     def get_all(cls, conn: sqlite3.Connection) -> list['Site']:
         """Get all Site records"""
         cursor = conn.execute("""
-            SELECT domain_name, site_name, reputation FROM sites
+            SELECT id, domain_name, site_name, reputation FROM sites
         """)
         rows = cursor.fetchall()
         return [cls(
-            domain_name=row[0],
-            site_name=row[1],
-            reputation=row[2]
+            domain_name=row[1],
+            site_name=row[2],
+            reputation=row[3],
+            id=row[0]
         ) for row in rows]
 
     def upsert(self, conn: sqlite3.Connection):
@@ -419,13 +435,15 @@ class Newsletter:
     session_id: str
     date: datetime
     final_newsletter: str
+    id: Optional[int] = None  # Auto-increment primary key
 
     @classmethod
     def create_table(cls, conn: sqlite3.Connection):
         """Create the newsletters table if it doesn't exist"""
         conn.execute("""
             CREATE TABLE IF NOT EXISTS newsletters (
-                session_id TEXT PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL UNIQUE,
                 date TEXT NOT NULL,
                 final_newsletter TEXT NOT NULL
             )
@@ -434,10 +452,11 @@ class Newsletter:
 
     def insert(self, conn: sqlite3.Connection):
         """Insert this Newsletter record into the database"""
-        conn.execute("""
+        cursor = conn.execute("""
             INSERT INTO newsletters (session_id, date, final_newsletter)
             VALUES (?, ?, ?)
         """, (self.session_id, self.date.isoformat(), self.final_newsletter))
+        self.id = cursor.lastrowid  # Capture auto-generated id
         conn.commit()
 
     def update(self, conn: sqlite3.Connection):
@@ -458,15 +477,16 @@ class Newsletter:
     def get(cls, conn: sqlite3.Connection, session_id: str) -> Optional['Newsletter']:
         """Get a Newsletter record by session_id"""
         cursor = conn.execute("""
-            SELECT session_id, date, final_newsletter
+            SELECT id, session_id, date, final_newsletter
             FROM newsletters WHERE session_id = ?
         """, (session_id,))
         row = cursor.fetchone()
         if row:
             return cls(
-                session_id=row[0],
-                date=datetime.fromisoformat(row[1]),
-                final_newsletter=row[2]
+                session_id=row[1],
+                date=datetime.fromisoformat(row[2]),
+                final_newsletter=row[3],
+                id=row[0]
             )
         return None
 
@@ -474,13 +494,14 @@ class Newsletter:
     def get_all(cls, conn: sqlite3.Connection) -> list['Newsletter']:
         """Get all Newsletter records"""
         cursor = conn.execute("""
-            SELECT session_id, date, final_newsletter FROM newsletters
+            SELECT id, session_id, date, final_newsletter FROM newsletters
         """)
         rows = cursor.fetchall()
         return [cls(
-            session_id=row[0],
-            date=datetime.fromisoformat(row[1]),
-            final_newsletter=row[2]
+            session_id=row[1],
+            date=datetime.fromisoformat(row[2]),
+            final_newsletter=row[3],
+            id=row[0]
         ) for row in rows]
 
     def upsert(self, conn: sqlite3.Connection):

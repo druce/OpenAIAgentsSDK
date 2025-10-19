@@ -27,6 +27,7 @@ import math
 from typing import Any, Dict, List, Type, Optional, Tuple
 from pydantic import BaseModel
 import pandas as pd
+import os
 
 import openai
 from openai import AsyncOpenAI, BadRequestError
@@ -265,8 +266,7 @@ class LLMagent(Agent):
                  logger: Optional[logging.Logger] = None,
                  reasoning_effort: Optional[str] = None,
                  trace_enable: Optional[bool] = None,
-                 trace_tag: Optional[str] = None,
-                 trace_metadata: Optional[dict] = None):
+                 trace_tag_list: Optional[List[str]] = None):
         """
         Initialize the LLMagent
 
@@ -279,8 +279,7 @@ class LLMagent(Agent):
             logger: Optional logger instance to use instead of module logger
             reasoning_effort: Optional reasoning effort level for reasoning models ("low", "medium", "high")
             trace_enable: Enable Langfuse tracing for this agent (overrides LANGFUSE_TRACING_ENABLED env var)
-            trace_tag: Tag for Langfuse traces (e.g., "step_04_extract_summaries")
-            trace_metadata: Additional metadata to attach to traces
+            trace_tag_list: List of tags for Langfuse traces (e.g., ["step_04_extract_summaries", "summary_agent"])
         """
         super().__init__(
             name="LLMagent",
@@ -291,6 +290,7 @@ class LLMagent(Agent):
         self.system_prompt = system_prompt
         self.user_prompt = user_prompt
         self.output_type = output_type
+        self.trace_tag = trace_tag_list
         self.verbose = verbose
         self.logger = logger or _logger
 
@@ -304,11 +304,9 @@ class LLMagent(Agent):
         self.reasoning_effort = reasoning_effort
 
         # Configure Langfuse tracing
-        import os
-        env_trace_enable = os.getenv('LANGFUSE_TRACING_ENABLED', 'false').lower() == 'true'
+        env_trace_enable = os.getenv(
+            'LANGFUSE_TRACING_ENABLED', 'false').lower() == 'true'
         self.trace_enable = trace_enable if trace_enable is not None else env_trace_enable
-        self.trace_tag = trace_tag
-        self.trace_metadata = trace_metadata or {}
 
         # Initialize appropriate OpenAI client
         if self.trace_enable:
@@ -316,9 +314,11 @@ class LLMagent(Agent):
                 from langfuse.openai import AsyncOpenAI as LangfuseAsyncOpenAI
                 self.openai_client = LangfuseAsyncOpenAI()
                 if self.verbose:
-                    self.logger.info(f"Initialized with Langfuse tracing enabled (tag: {self.trace_tag})")
+                    self.logger.info(
+                        f"Initialized with Langfuse tracing enabled (tags: {self.trace_tag})")
             except ImportError:
-                self.logger.warning("Langfuse tracing requested but langfuse.openai not available, using standard client")
+                self.logger.warning(
+                    "Langfuse tracing requested but langfuse.openai not available, using standard client")
                 self.openai_client = AsyncOpenAI()
                 self.trace_enable = False
         else:
@@ -334,6 +334,22 @@ trace_enable: {self.trace_enable}
 trace_tag: {self.trace_tag}
 schema: {json.dumps(output_type.model_json_schema(), indent=2)}
 """)
+
+    def _build_langfuse_metadata(self) -> Dict[str, Any]:
+        """
+        Build metadata dict for Langfuse tracing with tags.
+
+        Returns:
+            Dictionary with langfuse_tags if trace_tag is populated
+
+        Note: When using langfuse.openai wrapper, tags should be passed as a list.
+        The Langfuse wrapper handles this format specially.
+        """
+        metadata = {}
+        if self.trace_tag:
+            # Langfuse expects tags as a list/array
+            metadata["langfuse_tags"] = self.trace_tag
+        return metadata
 
     def _format_prompts(self, variables: Dict[str, Any]) -> str:
         """
@@ -436,21 +452,8 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             {"role": "user", "content": user_message}
         ]
 
-        # Add Langfuse metadata if tracing enabled
-        if self.trace_enable:
-            try:
-                lf_client = langfuse.get_client()
-                lf_client.update_current_span(
-                    name=f"llm_{self.trace_tag}" if self.trace_tag else "llm_call",
-                    metadata={
-                        "step_name": self.trace_tag,
-                        "model": self.model,
-                        "reasoning_effort": effective_reasoning_effort,
-                        **self.trace_metadata
-                    }
-                )
-            except Exception as e:
-                self.logger.warning(f"Failed to update Langfuse observation metadata: {e}")
+        # Note: Langfuse tracing is handled automatically by langfuse.openai.AsyncOpenAI wrapper
+        # The wrapper captures model, messages, and response data without needing explicit metadata updates
 
         try:
             # Prepare API call parameters
@@ -467,11 +470,17 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                 "safety_identifier": "news_agent"
             }
 
+            # Only add metadata when Langfuse tracing is enabled
+            # (standard OpenAI API doesn't accept metadata without store=True)
+            if self.trace_enable:
+                api_params["metadata"] = self._build_langfuse_metadata()
+
             # Add reasoning_effort if supported
             if effective_reasoning_effort is not None:
                 api_params["reasoning_effort"] = effective_reasoning_effort
                 if self.verbose:
-                    self.logger.info(f"Using reasoning_effort: {effective_reasoning_effort}")
+                    self.logger.info(
+                        f"Using reasoning_effort: {effective_reasoning_effort}")
 
             # Make the chat completion call with structured output
             response = await client.chat.completions.create(**api_params)
@@ -638,31 +647,26 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             {"role": "user", "content": user_message}
         ]
 
-        # Add Langfuse metadata if tracing enabled
-        if self.trace_enable:
-            try:
-                lf_client = langfuse.get_client()
-                lf_client.update_current_span(
-                    name=f"llm_{self.trace_tag}_logprobs" if self.trace_tag else "llm_call_logprobs",
-                    metadata={
-                        "step_name": self.trace_tag,
-                        "model": self.model,
-                        "logprobs_enabled": True,
-                        **self.trace_metadata
-                    }
-                )
-            except Exception as e:
-                self.logger.warning(f"Failed to update Langfuse observation metadata: {e}")
+        # Note: Langfuse tracing is handled automatically by langfuse.openai.AsyncOpenAI wrapper
+        # The wrapper captures model, messages, logprobs, and response data automatically
 
         try:
+            # Prepare API call parameters
+            api_params = {
+                "model": self.model,
+                "messages": messages,
+                "logprobs": True,
+                "top_logprobs": top_logprobs,
+                "safety_identifier": "news_agent"
+            }
+
+            # Only add metadata when Langfuse tracing is enabled
+            # (standard OpenAI API doesn't accept metadata without store=True)
+            if self.trace_enable:
+                api_params["metadata"] = self._build_langfuse_metadata()
+
             # Make the chat completion call with logprobs (NO structured output)
-            response = await client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                logprobs=True,
-                top_logprobs=top_logprobs,
-                safety_identifier="news_agent"
-            )
+            response = await client.chat.completions.create(**api_params)
 
             # Check for refusal
             message = response.choices[0].message
@@ -1365,7 +1369,8 @@ async def run_prompt_on_dataframe(
     lf_client = get_langfuse_client(logger=logger)
 
     # Fetch prompt from Langfuse
-    system_prompt, user_prompt, model, reasoning_effort = lf_client.get_prompt(prompt_name)
+    system_prompt, user_prompt, model, reasoning_effort = lf_client.get_prompt(
+        prompt_name)
 
     # Auto-detect fields if not provided
     if item_list_field is None or value_field is None:
