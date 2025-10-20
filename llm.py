@@ -25,7 +25,7 @@ import json
 import logging
 import math
 from typing import Any, Dict, List, Type, Optional, Tuple
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 import pandas as pd
 import os
 
@@ -375,6 +375,7 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             openai.APIConnectionError,
             openai.APITimeoutError,
             openai.InternalServerError,
+            ValidationError,  # Retry on Pydantic validation errors (e.g., LLM returned wrong schema)
         )),
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=1, min=1, max=30),
@@ -396,7 +397,18 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         if self.verbose:
             self.logger.info(f"User message: {user_message}")
 
-        results = await Runner.run(self, user_message)
+        try:
+            results = await Runner.run(self, user_message)
+        except ValidationError as e:
+            # Log detailed information about validation failure
+            self.logger.error(
+                f"Pydantic validation error for {self.output_type.__name__}: {e}"
+            )
+            self.logger.error(
+                f"Expected schema: {self.output_type.model_json_schema()}"
+            )
+            # Re-raise to trigger tenacity retry
+            raise
 
         if self.verbose:
             self.logger.info(f"Result: {results}")
@@ -407,7 +419,8 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         retry=retry_if_exception_type((
             openai.APIConnectionError,
             openai.APITimeoutError,
-            openai.InternalServerError
+            openai.InternalServerError,
+            ValidationError,  # Retry on Pydantic validation errors (e.g., LLM returned wrong schema)
         )),
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=1, min=1, max=30),
@@ -496,7 +509,20 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             # Parse the JSON response into the Pydantic model
             response_text = message.content
             response_json = json.loads(response_text)
-            result = self.output_type.model_validate(response_json)
+
+            try:
+                result = self.output_type.model_validate(response_json)
+            except ValidationError as e:
+                # Log detailed information about validation failure
+                self.logger.error(
+                    f"Pydantic validation error for {self.output_type.__name__}: {e}"
+                )
+                self.logger.error(f"Response JSON: {response_json}")
+                self.logger.error(
+                    f"Expected schema: {self.output_type.model_json_schema()}"
+                )
+                # Re-raise to trigger tenacity retry
+                raise
 
         except BadRequestError as e:
             self.logger.error(f"BadRequestError: {e}")
@@ -1116,7 +1142,7 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             If return_series=True: pandas Series with values for DataFrame column assignment
             Otherwise: Single concatenated result object (if item_list_field specified) or list of results
         """
-        print("concurrency: ", max_concurrency)
+        # print("concurrency: ", max_concurrency)
         if input_df.empty:
             return []
 

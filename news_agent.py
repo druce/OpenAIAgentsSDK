@@ -659,7 +659,7 @@ class GatherUrlsTool:
         """Clean up download directory"""
         if os.path.exists(download_dir):
             if self.logger:
-                self.logger.info(f"Cleaning {download_dir}: ")
+                self.logger.info(f"Cleaning out {download_dir}: ")
 
             # Remove all files and subdirectories in download_dir
             try:
@@ -670,24 +670,25 @@ class GatherUrlsTool:
                     elif os.path.isdir(item_path):
                         shutil.rmtree(item_path)
                 if self.logger:
-                    self.logger.info(f"Successfully cleaned {download_dir}")
+                    self.logger.info(
+                        f"Successfully cleaned out {download_dir}")
             except Exception as cleanup_error:
                 if self.logger:
                     self.logger.warning(
-                        f"Failed to clean {download_dir}: {cleanup_error}")
+                        f"Failed to clean out {download_dir}: {cleanup_error}")
 
     async def _fetch_urls(self, ctx, args: str) -> str:
         """Execute Step 1: Gather URLs using persistent state"""
         if self.logger:
             self.logger.info("Starting Step 1: Gather URLs")
 
-        step_name = "step_01_fetch_urls"
+        step_name = "gather_urls"
 
         # Access the persistent state
         state: NewsletterAgentState = ctx.context
 
         # Check if step already completed via persistent state
-        if state.is_step_complete("step_01_fetch_urls"):
+        if state.is_step_complete("gather_urls"):
             total_articles = len(state.headline_data)
             if self.logger:
                 self.logger.info(
@@ -774,7 +775,6 @@ class GatherUrlsTool:
             state.headline_data = headline_df.to_dict('records')
 
             # Complete the step using unified status system
-            state.complete_step(step_name)
 
             if self.verbose:
                 print(
@@ -797,6 +797,8 @@ class GatherUrlsTool:
 
             # Serialize state after completing step
             state.serialize_to_db(step_name)
+
+            state.complete_step(step_name, message=status_msg)
             return status_msg
 
         except Exception as e:
@@ -843,7 +845,7 @@ class FilterUrlsTool:
         if self.logger:
             self.logger.info("Starting Step 2: Filter URLs")
 
-        step_name = "step_02_filter_urls"
+        step_name = "filter_urls"
 
         # Access the persistent state
         state: NewsletterAgentState = ctx.context
@@ -855,7 +857,7 @@ class FilterUrlsTool:
             return f"Step 2 already completed! Filtered {total_count} articles, {ai_related_count} identified as AI-related."
 
         # Check if step 1 is completed and no errors
-        if not state.is_step_complete("step_01_fetch_urls") or not state.headline_data:
+        if not state.is_step_complete("gather_urls") or not state.headline_data:
             return f"❌ Cannot execute Step 2: Step 1 (Gather URLs) must be completed first. Current status: {state.get_current_step()}"
 
         # Check if workflow is blocked by errors
@@ -953,7 +955,6 @@ class FilterUrlsTool:
 
                 # If no new URLs remain, complete step early
                 if headline_df.empty:
-                    state.complete_step(step_name)
                     if state.reprocess_since is not None:
                         return f"✅ Step 2 completed! All {original_count} URLs were seen before {state.reprocess_since.isoformat()} - no new content to process."
                     else:
@@ -994,9 +995,6 @@ class FilterUrlsTool:
             # Update state with AI classification results
             state.headline_data = headline_df.to_dict('records')
 
-            # Complete step using unified status system
-            state.complete_step(step_name)
-
             ai_related_count = sum(
                 1 for article in state.headline_data if article.get('isAI') is True)
             total_count = len(state.headline_data)
@@ -1017,6 +1015,9 @@ class FilterUrlsTool:
             else:
                 status_msg = f"✅ Step 2 {step_name} completed successfully! Filtered {total_articles} headlines to {ai_related_count} AI-related articles."
 
+            # Complete step using unified status system with status message
+            state.complete_step(step_name, message=status_msg)
+
             if self.logger:
                 log_msg = f"Completed Step 2: {ai_related_count} AI-related articles"
                 if duplicate_count > 0:
@@ -1025,6 +1026,7 @@ class FilterUrlsTool:
 
             # Serialize state after completing step
             state.serialize_to_db(step_name)
+            state.complete_step(step_name, message=status_msg)
             return status_msg
 
         except Exception as e:
@@ -1071,7 +1073,7 @@ class DownloadArticlesTool:
         if self.logger:
             self.logger.info("Starting Step 3: Download Articles")
 
-        step_name = "step_03_download_articles"
+        step_name = "download_articles"
 
         # Access the persistent state
         state: NewsletterAgentState = ctx.context
@@ -1086,7 +1088,7 @@ class DownloadArticlesTool:
             return f"Step 3 already completed! Filtered {total_count} articles, {ai_related_count} identified as AI-related."
 
         # Check if step 2 is completed and no errors
-        if not state.is_step_complete("step_02_filter_urls"):
+        if not state.is_step_complete("filter_urls"):
             return f"❌ Cannot execute Step 3: Step 2 (Filter URLs) must be completed first. Current status: {step_name}"
 
         # Check if workflow is blocked by errors
@@ -1380,7 +1382,6 @@ class DownloadArticlesTool:
                               ].loc[ai_df["html_path"] == ""])
 
             # Complete the step
-            state.complete_step(step_name)
 
             if self.verbose:
                 print(
@@ -1395,6 +1396,8 @@ class DownloadArticlesTool:
 
             # Serialize state after completing step
             state.serialize_to_db(step_name)
+
+            state.complete_step(step_name, message=status_msg)
             return status_msg
 
         except Exception as e:
@@ -1565,7 +1568,7 @@ class ExtractSummariesTool:
 
     async def _extract_summaries(self, ctx, args: str) -> str:
         """Execute Step 4: Extract Summaries using AI-powered summarization"""
-        step_name = "step_04_extract_summaries"
+        step_name = "extract_summaries"
 
         # Access the persistent state
         state: NewsletterAgentState = ctx.context
@@ -1575,7 +1578,7 @@ class ExtractSummariesTool:
             return "Step 4 already completed! Generated summaries."
 
         # Check if step 3 is completed
-        if not state.is_step_complete("step_03_download_articles"):
+        if not state.is_step_complete("download_articles"):
             return "❌ Cannot execute Step 4: Step 3 (Download Articles) must be completed first."
 
         # Check if workflow is blocked by errors
@@ -1739,7 +1742,6 @@ class ExtractSummariesTool:
             state.headline_data = headline_df.to_dict('records')
 
             # Complete the step
-            state.complete_step(step_name)
 
             if self.verbose:
                 print(
@@ -1752,6 +1754,8 @@ class ExtractSummariesTool:
 
             # Serialize state after completing step
             state.serialize_to_db(step_name)
+
+            state.complete_step(step_name, message=status_msg)
             return status_msg
 
         except Exception as e:
@@ -1787,7 +1791,7 @@ class RateArticlesTool:
 
     async def _rate_articles(self, ctx, args: str) -> str:
         """Execute Step 5: Rate Articles using persistent state"""
-        step_name = "step_05_rate_articles"
+        step_name = "rate_articles"
 
         # Access the persistent state
         state: NewsletterAgentState = ctx.context
@@ -1801,7 +1805,7 @@ class RateArticlesTool:
             return f"Step 5 already completed! Rated {len(rated_articles)} articles with average rating {avg_rating:.1f}/10."
 
         # Check if step 4 is completed
-        if not state.is_step_complete("step_04_extract_summaries"):
+        if not state.is_step_complete("extract_summaries"):
             return "❌ Cannot execute Step 5: Step 4 (Extract Summaries) must be completed first."
 
         # Check if workflow is blocked by errors
@@ -1867,7 +1871,6 @@ class RateArticlesTool:
                 rated_df[rated_df['rating'] >= 7.0]) if not rated_df.empty else 0
 
             # Complete the step
-            state.complete_step(step_name)
 
             if self.verbose:
                 print(f"✅ Completed Step 5: Rated {articles_rated} articles")
@@ -1971,6 +1974,8 @@ class RateArticlesTool:
 
             # Serialize state after completing step
             state.serialize_to_db(step_name)
+
+            state.complete_step(step_name, message=status_msg)
             return status_msg
 
         except Exception as e:
@@ -2126,7 +2131,7 @@ class ClusterByTopicTool:
             verbose=self.verbose,
             logger=self.logger,
             trace_enable=False,
-            trace_tag_list=[self.state.current_step, "topic_agent"]
+            trace_tag_list=["cluster_topics", "topic_agent"]
         )
 
         # Extract topics using filter_dataframe
@@ -2175,7 +2180,7 @@ class ClusterByTopicTool:
             logger=self.logger,
             reasoning_effort=reasoning_effort,
             trace_enable=False,
-            trace_tag_list=[self.state.current_step, "canonical_agent"]
+            trace_tag_list=["cluster_topics", "canonical_agent"]
         )
 
         # Use filter_dataframe to classify against the canonical topic
@@ -2271,7 +2276,7 @@ class ClusterByTopicTool:
             logger=self.logger,
             reasoning_effort=reasoning_effort,
             trace_enable=False,
-            trace_tag_list=[self.state.current_step, "cleanup_agent"]
+            trace_tag_list=["cluster_topics", "cleanup_agent"]
         )
 
         # Use filter_dataframe to clean up topics
@@ -2286,7 +2291,7 @@ class ClusterByTopicTool:
 
     async def _cluster_by_topic(self, ctx, args: str) -> str:
         """Execute Step 6: Cluster By Topic using persistent state"""
-        step_name = "step_06_cluster_by_topic"
+        step_name = "cluster_topics"
         # todo: combine title and description and summary and tags for topic extraction
         # todo: show list of common topics
 
@@ -2302,7 +2307,7 @@ class ClusterByTopicTool:
             return f"Step 6 already completed! Created {cluster_count} topic clusters with {total_articles} articles."
 
         # Check if step 5 is completed
-        if not state.is_step_complete("step_05_rate_articles"):
+        if not state.is_step_complete("rate_articles"):
             return "❌ Cannot execute Step 6: Step 5 (Rate Articles) must be completed first."
 
         # Check if workflow is blocked by errors
@@ -2316,12 +2321,12 @@ class ClusterByTopicTool:
 
             # Get articles with summaries from persistent state
             headline_df = pd.DataFrame(state.headline_data)
-            articles_with_summaries = headline_df.loc[
+            cluster_df = headline_df.loc[
                 (headline_df['isAI']) &
                 headline_df['summary'].notna() &
                 (headline_df['summary'] != '')]
 
-            if articles_with_summaries.empty:
+            if cluster_df.empty:
                 return "❌ No summarized articles found to cluster. Please run step 4 first."
 
             # Clear existing clusters
@@ -2337,10 +2342,10 @@ class ClusterByTopicTool:
                     retval += "\n" + row['summary']
                 return retval
 
-            articles_with_summaries['input_text'] = articles_with_summaries.apply(
+            cluster_df['input_text'] = cluster_df.apply(
                 _get_input_text, axis=1)
 
-            articles_with_summaries = await self._free_form_extraction(articles_with_summaries)
+            cluster_df = await self._free_form_extraction(cluster_df)
 
             # here we could make a list of all topics and grab frequently mentioned ones and add to canonical topics
             # # Collect all topics from articles with summaries
@@ -2369,11 +2374,11 @@ class ClusterByTopicTool:
             #         if len(frequent_topics) > 10:
             #             self.logger.info(f"... and {len(frequent_topics) - 10} more")
 
-            articles_with_summaries = await self._canonical_topic_extraction(articles_with_summaries)
+            cluster_df = await self._canonical_topic_extraction(cluster_df)
 
-            articles_with_summaries = await self._cleanup_topics(articles_with_summaries)
+            cluster_df = await self._cleanup_topics(cluster_df)
 
-            headline_df['topics'] = articles_with_summaries['topics']
+            headline_df['topics'] = cluster_df['topics']
             if 'tags' in headline_df.columns:
                 headline_df = headline_df.drop(columns=['tags'])
 
@@ -2385,7 +2390,6 @@ class ClusterByTopicTool:
 
             # Complete the step
             state.headline_data = headline_df.to_dict('records')
-            state.complete_step(step_name)
 
             # if self.verbose:
             #     print(f"✅ Completed Step 5: Created {total_clusters} topic clusters")
@@ -2402,6 +2406,8 @@ class ClusterByTopicTool:
 
             # Serialize state after completing step
             state.serialize_to_db(step_name)
+
+            state.complete_step(step_name, message=status_msg)
             return status_msg
 
         except Exception as e:
@@ -2440,13 +2446,13 @@ class SelectSectionsTool:
         state: NewsletterAgentState = ctx.context
 
         # Check if step already completed via persistent state
-        step_name = "step_07_select_sections"
+        step_name = "select_sections"
         if state.is_step_complete(step_name):
             section_count = len(state.newsletter_section_data)
             return f"Step 7 already completed! Created {section_count} newsletter section stories."
 
         # Check if step 6 is completed
-        if not state.is_step_complete("step_06_cluster_by_topic"):
+        if not state.is_step_complete("cluster_topics"):
             return "❌ Cannot execute Step 7: Step 6 (Cluster By Topic) must be completed first."
 
         # Check if workflow is blocked by errors
@@ -2496,7 +2502,7 @@ class SelectSectionsTool:
             # Get rated articles from persistent state
             headline_df = state.headline_df.copy()
 
-            self.logger.info("Free form categorization of articles")
+            self.logger.info("Category proposal")
 
             system_prompt, user_prompt, model, reasoning_effort = get_langfuse_client(logger=self.logger).get_prompt(
                 "newsagent/cat_proposal")
@@ -2559,31 +2565,38 @@ class SelectSectionsTool:
                 trace_tag_list=[step_name, "cat_assignment_agent"]
             )
 
-            async def assign_topic(idx, input_text, topics_str=None):
-                topics = topics_str if topics_str is not None else final_cats_str
-                assigned_cat = await cat_assignment_agent.run_prompt(topics=topics,
+            async def assign_topic(idx, input_text, topics_str):
+                assigned_cat = await cat_assignment_agent.run_prompt(topics=topics_str,
                                                                      input_text=input_text)
                 return (idx, input_text, assigned_cat.topic_title)
 
-            tasks = [assign_topic(row.id, row.input_text)
+            tasks = [assign_topic(row.id, row.input_text, final_cats_str)
                      for row in headline_df.itertuples()]
             results = await asyncio.gather(*tasks, return_exceptions=True)
-            templist = [t for t in results if not isinstance(t, Exception)]
+
+            # Process results and handle any exceptions that slipped through
+            templist = [result for result in results if not isinstance(
+                result, Exception)]
+
+            errlist = [result for result in results if isinstance(
+                result, Exception)]
+            self.logger.info(f"{len(errlist)} exceptions in topic assignment")
 
             catdf = pd.DataFrame(templist, columns=["id", "input_text", "cat"])
-            catdf["cat"] = catdf["cat"].fillna("Other")
-            catdf.loc[catdf["cat"] == "None", "cat"] = "Other"
-
             headline_df = headline_df.merge(
                 catdf[["id", "cat"]], on="id", how="left")
+            headline_df["cat"] = headline_df["cat"].fillna("Other")
+            headline_df.loc[headline_df["cat"] == "None", "cat"] = "Other"
+            headline_df.loc[headline_df["cat"].str.strip(
+            ) == "", "cat"] = "Other"  # Handle empty strings
 
             # get unique cluster names and sort them
-            cluster_df = headline_df["cat"].value_counts().reset_index()
-            cluster_df.columns = ["cat", "count"]
+            cat_df = headline_df["cat"].value_counts().reset_index()
+            cat_df.columns = ["cat", "count"]
             self.logger.info(
-                f"Assigned articlles to {len(cluster_df)} categories")
+                f"Assigned articlles to {len(cat_df)} categories")
             self.logger.info(
-                f"Cluster counts: {cluster_df.to_dict(orient='records')}")
+                f"Cluster counts: {cat_df.to_dict(orient='records')}")
 
             # dedupe articles
             self.logger.info("Deduping articles")
@@ -2607,7 +2620,7 @@ class SelectSectionsTool:
                 return pd.DataFrame([(dr.id, dr.dupe_id) for dr in response.results_list], columns=["id", "dupe_id"])
 
             tasks = []
-            for cat in cluster_df["cat"]:
+            for cat in cat_df["cat"]:
                 tmpdf = headline_df.loc[headline_df["cat"] == cat].sort_values(
                     "rating", ascending=False).copy()
                 if len(tmpdf) > 1:  # at least 2 to dedupe
@@ -2623,6 +2636,9 @@ class SelectSectionsTool:
             deduped_df = pd.concat(deduped_dfs)
             headline_df = pd.merge(
                 headline_df, deduped_df[["id", "dupe_id"]], on="id", how="left")
+            headline_df["dupe_id"] = headline_df["dupe_id"].fillna(
+                -1).astype(int)
+
             # count number of rows in aidf where dupe_id is >0 and group by dupe_id
             dupe_counts = headline_df.loc[headline_df['dupe_id'] > 0].groupby(
                 'dupe_id').size()
@@ -2634,7 +2650,7 @@ class SelectSectionsTool:
             self.logger.info(f"Deduped articles: {len(headline_df)}")
             dupe_df = headline_df.loc[headline_df['dupe_id'] > 0]
             self.logger.info(
-                f"Duplicating {len(dupe_df)} articles: {dupe_df.to_dict(orient='records')}")
+                f"Found {len(dupe_df)} duplicate articles: {dupe_df.to_dict(orient='records')}")
             # drop rows where dupe_id is >= 0 (keep rows where dupe_id is -1, ie unique)
             headline_df = headline_df.loc[headline_df['dupe_id'] < 0]
 
@@ -2704,18 +2720,18 @@ class SelectSectionsTool:
             state.headline_data = headline_df.to_dict('records')
 
             # Complete the step
-            state.complete_step(step_name)
 
             cat_article_counts = headline_df.groupby("cat").count()[
                 "input_text"]
-            state.workflow_status_message = f"Categories and article counts:\n{cat_article_counts.to_string()}"
+            status_msg = f"Categories and article counts:\n{cat_article_counts.to_string()}"
 
             if self.verbose:
-                print(f"✅ Completed Step 7: {state.workflow_status_message}")
+                print(f"✅ Completed Step 7: {status_msg}")
 
             # Serialize state after completing step
             state.serialize_to_db(step_name)
-            return state.workflow_status_message
+            state.complete_step(step_name, message=status_msg)
+            return status_msg
 
         except Exception as e:
             state.error_step(step_name, str(e))
@@ -3064,7 +3080,7 @@ class DraftSectionsTool:
             verbose=self.verbose,
             logger=self.logger,
             trace_enable=False,
-            trace_tag_list=[self.state.current_step, "critique_agent"]
+            trace_tag_list=["draft_sections", "critique_agent"]
         )
 
         # Create write_section agent for re-drafting (one-time)
@@ -3079,7 +3095,7 @@ class DraftSectionsTool:
             verbose=self.verbose,
             logger=self.logger,
             trace_enable=False,
-            trace_tag_list=[self.state.current_step, "write_section_agent"]
+            trace_tag_list=["draft_sections", "write_section_agent"]
         )
 
         # Iteration loop
@@ -3189,7 +3205,7 @@ class DraftSectionsTool:
 
     async def _draft_sections(self, ctx, args: str) -> str:
         """Execute Step 8: Draft Sections using persistent state"""
-        step_name = "step_08_draft_sections"
+        step_name = "draft_sections"
 
         # Access the persistent state
         state: NewsletterAgentState = ctx.context
@@ -3204,7 +3220,7 @@ class DraftSectionsTool:
             return f"Step 8 already completed! Drafted {unique_sections} sections with {section_count} total stories."
 
         # Check if step 7 is completed
-        if not state.is_step_complete("step_07_select_sections"):
+        if not state.is_step_complete("select_sections"):
             return "❌ Cannot execute Step 8: Step 7 (Select Sections) must be completed first."
 
         # Check if workflow is blocked by errors
@@ -3335,20 +3351,20 @@ class DraftSectionsTool:
                     'records')
 
             # Complete the step
-            state.complete_step(step_name)
 
             total_stories = len(
                 newsletter_section_df) if not newsletter_section_df.empty else 0
             total_categories = newsletter_section_df['cat'].nunique(
             ) if not newsletter_section_df.empty else 0
-            state.workflow_status_message = f"Drafted {total_stories} stories across {total_categories} sections"
+            status_msg = f"✅ Step 8 {step_name} completed successfully! Drafted {total_stories} stories across {total_categories} sections"
 
             if self.verbose:
-                print(f"✅ Completed Step 8: {state.workflow_status_message}")
+                print(status_msg)
 
+            state.complete_step(step_name, message=status_msg)
             # Serialize state after completing step
             state.serialize_to_db(step_name)
-            return state.workflow_status_message
+            return status_msg
 
         except Exception as e:
             state.error_step(step_name, str(e))
@@ -3379,7 +3395,7 @@ class FinalizeNewsletterTool:
 
     async def _finalize_newsletter(self, ctx, args: str) -> str:
         """Execute Step 9: Finalize Newsletter using persistent state"""
-        step_name = "step_09_finalize_newsletter"
+        step_name = "finalize_newsletter"
 
         # Access the persistent state
         state: NewsletterAgentState = ctx.context
@@ -3393,7 +3409,7 @@ class FinalizeNewsletterTool:
             return f"Step 9 already completed! Newsletter finalized with {sections_count} sections and {newsletter_length} words."
 
         # Check if step 8 is completed
-        if not state.is_step_complete("step_08_draft_sections"):
+        if not state.is_step_complete("draft_sections"):
             return "❌ Cannot execute Step 9: Step 8 (Draft Sections) must be completed first."
 
         # Check if workflow is blocked by errors
@@ -3613,9 +3629,6 @@ class FinalizeNewsletterTool:
                 self.logger.error(
                     f"Failed to save newsletter to database: {e}")
 
-            # Complete the step and mark workflow as complete
-            state.complete_step(step_name)
-
             if self.verbose:
                 print(
                     f"✅ Completed Step 9: Finalized newsletter ({newsletter_length} words)")
@@ -3627,8 +3640,13 @@ class FinalizeNewsletterTool:
             status_msg += "\n📰 Newsletter stored in persistent state and emailed"
             status_msg += "\n✅ Workflow complete! All 9 steps finished successfully."
 
+            # Complete the step and mark workflow as complete with status message
+            state.complete_step(step_name, message=status_msg)
+
             # Serialize state after completing step
             state.serialize_to_db(step_name)
+
+            state.complete_step(step_name, message=status_msg)
             return status_msg
 
         except Exception as e:
@@ -3665,7 +3683,7 @@ class NewsletterAgent(Agent[NewsletterAgentState]):
 
         Args:
             session_id: Unique identifier for the session (for persistence)
-            state: Optional NewsletterAgentState to use. If None, creates new or loads from session
+            state: Optional NewsletterAgentState to use. If None, creates new
             verbose: Enable verbose logging
             logger: Optional logger instance (creates one if None)
             timeout: Timeout in seconds for OpenAI API calls (default: 300.0)
@@ -3743,9 +3761,9 @@ WORKFLOW OVERVIEW:
 WORKFLOW RESUME LOGIC:
 - You maintain persistent state between runs and can resume from any step
 - ALWAYS start by checking workflow status to understand current progress
-- If current_step >= 1, you can resume from any completed step forward
-- Steps are idempotent - if a step is already completed, tools will return cached results
-- When resuming, automatically continue from the next incomplete step
+- Based on steps completed, you can resume from any completed step forward
+- Steps are idempotent - if a step is already completed, tools will return results
+- When resuming, continue from the next incomplete step
 
 INSTRUCTIONS:
 - ALWAYS start by checking the current workflow status using check_workflow_status
@@ -3915,7 +3933,7 @@ async def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(
         description="Newsletter Agent - Complete Workflow")
-    parser.add_argument('-d', '--do_download', action='store_true', default=False,
+    parser.add_argument('-d', '--do-download', action='store_true', default=False,
                         help='Enable web fetch, by default use existing HTML files in htmldata directory')
     parser.add_argument('-r', '--reprocess-since', type=str, default='',
                         help='Force processing of articles before this date even if already processed (YYYY-MM-DD HH:MM:SS format)')
