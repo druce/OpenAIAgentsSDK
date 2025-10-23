@@ -557,7 +557,7 @@ class StateInspectionTool:
             f"Current Step: {state.get_current_step()}",
             f"Workflow Complete: {state.all_complete()}",
             f"Progress: {state.get_progress_percentage():.1f}%",
-            f"Workflow Status: {state.workflow_status.value}",
+            # f"Workflow Status: {state.workflow_status.value}",
         ]
 
         if state.workflow_status_message:
@@ -782,7 +782,7 @@ class GatherUrlsTool:
                 if failed_sources:
                     print(f"⚠️  Failed sources: {', '.join(failed_sources)}")
 
-            status_msg = f"✅ Step 1 {step_name} completed successfully! Gathered {len(all_articles)} articles from {len(successful_sources)} sources (RSS only)."
+            status_msg = f"✅ Step 1 {step_name} completed successfully! Gathered {len(all_articles)} articles from {len(successful_sources)} sources."
             if failed_sources:
                 status_msg += f" {len(failed_sources)} sources failed or not implemented."
 
@@ -3832,7 +3832,7 @@ Remember: Your state is persistent. You can safely resume from any point. Never 
             summary_lines = [
                 f"Session ID: {self.session.session_id}",
                 f"Current Step: {self.state.get_current_step()}",
-                f"Workflow Status: {self.state.workflow_status.value}",
+                # f"Workflow Status: {self.state.workflow_status.value}",
                 f"Progress: {self.state.get_progress_percentage():.1f}%",
                 f"Workflow Complete: {self.state.all_complete()}",
             ]

@@ -514,3 +514,240 @@ class Newsletter:
                 final_newsletter = excluded.final_newsletter
         """, (self.session_id, self.date.isoformat(), self.final_newsletter))
         conn.commit()
+
+
+@dataclass
+class AgentState:
+    session_id: str
+    step_name: str
+    state_data: str
+    updated_at: datetime
+    id: Optional[int] = None  # Auto-increment primary key
+
+    @classmethod
+    def create_table(cls, conn: sqlite3.Connection):
+        """Create the agent_state table with automatic migration from old schema"""
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS agent_state (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                step_name TEXT NOT NULL,
+                state_data TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(session_id, step_name)
+            )
+        """)
+
+        # Create indexes
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_agent_state_session_id
+            ON agent_state(session_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_agent_state_updated_at
+            ON agent_state(updated_at)
+        """)
+
+        conn.commit()
+
+    def insert(self, conn: sqlite3.Connection):
+        """Insert this AgentState record into the database"""
+        cursor = conn.execute("""
+            INSERT INTO agent_state (session_id, step_name, state_data, updated_at)
+            VALUES (?, ?, ?, ?)
+        """, (self.session_id, self.step_name, self.state_data,
+              self.updated_at.isoformat() if isinstance(self.updated_at, datetime) else self.updated_at))
+        self.id = cursor.lastrowid  # Capture auto-generated id
+        conn.commit()
+
+    def update(self, conn: sqlite3.Connection):
+        """Update this AgentState record in the database by id"""
+        conn.execute("""
+            UPDATE agent_state
+            SET session_id = ?, step_name = ?, state_data = ?, updated_at = ?
+            WHERE id = ?
+        """, (self.session_id, self.step_name, self.state_data,
+              self.updated_at.isoformat() if isinstance(
+                  self.updated_at, datetime) else self.updated_at,
+              self.id))
+        conn.commit()
+
+    def delete(self, conn: sqlite3.Connection):
+        """Delete this AgentState record from the database"""
+        conn.execute("DELETE FROM agent_state WHERE id = ?", (self.id,))
+        conn.commit()
+
+    def upsert(self, conn: sqlite3.Connection):
+        """Insert or update this AgentState record based on UNIQUE(session_id, step_name)"""
+        cursor = conn.execute("""
+            INSERT INTO agent_state (session_id, step_name, state_data, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(session_id, step_name) DO UPDATE SET
+                state_data = excluded.state_data,
+                updated_at = excluded.updated_at
+        """, (self.session_id, self.step_name, self.state_data,
+              self.updated_at.isoformat() if isinstance(self.updated_at, datetime) else self.updated_at))
+
+        # If this was an insert, capture the new id
+        if cursor.lastrowid:
+            self.id = cursor.lastrowid
+        else:
+            # Was an update, fetch the existing id
+            result = conn.execute("""
+                SELECT id FROM agent_state
+                WHERE session_id = ? AND step_name = ?
+            """, (self.session_id, self.step_name)).fetchone()
+            if result:
+                self.id = result[0]
+
+        conn.commit()
+
+    @classmethod
+    def get(cls, conn: sqlite3.Connection, record_id: int) -> Optional['AgentState']:
+        """Get an AgentState record by id"""
+        cursor = conn.execute("""
+            SELECT id, session_id, step_name, state_data, updated_at
+            FROM agent_state WHERE id = ?
+        """, (record_id,))
+        row = cursor.fetchone()
+        if row:
+            return cls(
+                id=row[0],
+                session_id=row[1],
+                step_name=row[2],
+                state_data=row[3],
+                updated_at=datetime.fromisoformat(row[4]) if row[4] else None
+            )
+        return None
+
+    @classmethod
+    def get_by_session_and_step(cls, conn: sqlite3.Connection, session_id: str, step_name: str) -> Optional['AgentState']:
+        """Get an AgentState record by session_id and step_name"""
+        cursor = conn.execute("""
+            SELECT id, session_id, step_name, state_data, updated_at
+            FROM agent_state
+            WHERE session_id = ? AND step_name = ?
+        """, (session_id, step_name))
+        row = cursor.fetchone()
+        if row:
+            return cls(
+                id=row[0],
+                session_id=row[1],
+                step_name=row[2],
+                state_data=row[3],
+                updated_at=datetime.fromisoformat(row[4]) if row[4] else None
+            )
+        return None
+
+    @classmethod
+    def get_all_by_session(cls, conn: sqlite3.Connection, session_id: str) -> list['AgentState']:
+        """Get all AgentState records for a session, ordered by updated_at ASC"""
+        cursor = conn.execute("""
+            SELECT id, session_id, step_name, state_data, updated_at
+            FROM agent_state
+            WHERE session_id = ?
+            ORDER BY updated_at ASC
+        """, (session_id,))
+        rows = cursor.fetchall()
+        return [cls(
+            id=row[0],
+            session_id=row[1],
+            step_name=row[2],
+            state_data=row[3],
+            updated_at=datetime.fromisoformat(row[4]) if row[4] else None
+        ) for row in rows]
+
+    @classmethod
+    def get_latest_by_session(cls, conn: sqlite3.Connection, session_id: str) -> Optional['AgentState']:
+        """Get the most recent AgentState record for a session"""
+        cursor = conn.execute("""
+            SELECT id, session_id, step_name, state_data, updated_at
+            FROM agent_state
+            WHERE session_id = ?
+            ORDER BY updated_at DESC
+            LIMIT 1
+        """, (session_id,))
+        row = cursor.fetchone()
+        if row:
+            return cls(
+                id=row[0],
+                session_id=row[1],
+                step_name=row[2],
+                state_data=row[3],
+                updated_at=datetime.fromisoformat(row[4]) if row[4] else None
+            )
+        return None
+
+    @classmethod
+    def get_all(cls, conn: sqlite3.Connection) -> list['AgentState']:
+        """Get all AgentState records across all sessions"""
+        cursor = conn.execute("""
+            SELECT id, session_id, step_name, state_data, updated_at
+            FROM agent_state
+            ORDER BY updated_at DESC
+        """)
+        rows = cursor.fetchall()
+        return [cls(
+            id=row[0],
+            session_id=row[1],
+            step_name=row[2],
+            state_data=row[3],
+            updated_at=datetime.fromisoformat(row[4]) if row[4] else None
+        ) for row in rows]
+
+    @classmethod
+    def list_sessions(cls, conn: sqlite3.Connection, updated_at: Optional[datetime] = None, n_records: Optional[int] = 10) -> list[str]:
+        """
+        Get list of unique session IDs ordered by descending id (newest first).
+
+        Args:
+            conn: Database connection
+            updated_at: If provided, only include sessions with states updated after this timestamp
+            n_records: If provided, limit results to first N sessions
+
+        Returns:
+            List of session_id strings ordered by newest first
+        """
+        # Build query dynamically based on parameters
+        query = """
+            SELECT DISTINCT session_id
+            FROM agent_state
+        """
+
+        params = []
+
+        if updated_at is not None:
+            query += " WHERE updated_at > ?"
+            params.append(updated_at.isoformat() if isinstance(
+                updated_at, datetime) else updated_at)
+
+        # Order by id descending to get newest sessions first
+        query += " ORDER BY updated_at DESC"
+
+        if n_records is not None:
+            query += " LIMIT ?"
+            params.append(n_records)
+
+        cursor = conn.execute(query, params)
+        rows = cursor.fetchall()
+        return [row[0] for row in rows]
+
+    @classmethod
+    def delete_session(cls, conn: sqlite3.Connection, session_id: str) -> int:
+        """
+        Delete all AgentState records for a session.
+
+        Args:
+            conn: Database connection
+            session_id: Session ID to delete
+
+        Returns:
+            Number of records deleted
+        """
+        cursor = conn.execute("""
+            DELETE FROM agent_state WHERE session_id = ?
+        """, (session_id,))
+        conn.commit()
+        return cursor.rowcount

@@ -584,7 +584,6 @@ async def scrape_urls_concurrent(
         try:
             html_path, last_updated, final_url, status = await scrape_url(url, title, browser, logger=logger)
             return (idx, status, final_url or url, title, html_path or "", last_updated)
-
         except asyncio.TimeoutError as exc:
             error_msg = f"Timeout: {exc}"
             logger.error(f"Timeout scraping {url}: {exc}")
@@ -664,7 +663,12 @@ async def scrape_urls_concurrent(
             workers.append(worker_task)
 
         # Wait for all workers to complete
-        await asyncio.gather(*workers)
+        results = await asyncio.gather(*workers, return_exceptions=True)
+        # Log any exceptions that occurred in workers
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(
+                    f"Worker {i} raised exception: {type(result).__name__}: {result}")
 
         logger.info("Closing browser")
         await browser.close()
@@ -754,6 +758,7 @@ async def scrape_url(url: str,
         logger.debug(f"Initial sleep: {initial_sleep}")
         sleep_time = initial_sleep + random.uniform(1, 3)
         await asyncio.sleep(sleep_time)
+        logger.debug("Performing human-like actions...")
         await perform_human_like_actions(page)
         logger.debug("performed human like actions")
         if click_xpath:
@@ -776,12 +781,14 @@ async def scrape_url(url: str,
                     """ % scroll_div)
             else:
                 await page.evaluate('window.scrollTo(0, document.body.scrollHeight);')
-
+        logger.debug("Getting page content...")
         html_source = await page.content()
+        logger.debug(f"Got page content, length: {len(html_source)} bytes")
         if page.url != url:
             logger.info(f"Page URL redirected from {url} to {page.url}")
         # Determine last updated time, first try meta tags
         last_updated = None
+        logger.debug("Parsing HTML with BeautifulSoup...")
         soup_meta = BeautifulSoup(html_source, "html.parser")
         meta_selectors = [
             ("property", "article:published_time"),
@@ -809,6 +816,7 @@ async def scrape_url(url: str,
 
         # for substack
         # Find all JSON-LD script blocks
+        logger.debug("Looking for valid datePublished etc...")
         for script in soup_meta.find_all('script', type='application/ld+json'):
             try:
                 data = json.loads(script.string)
