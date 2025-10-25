@@ -44,6 +44,10 @@ trafilatura
 markdown
 atproto
 
+# langchain
+# langchain-core
+# langchain-openai
+
 # MCP (Model Context Protocol) dependencies
 mcp
 
