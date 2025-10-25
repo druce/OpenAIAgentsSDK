@@ -985,7 +985,7 @@ class FilterUrlsTool:
                 reasoning_effort=reasoning_effort,
                 verbose=self.verbose,
                 logger=self.logger,
-                trace_enable=False,
+                trace_enable=True,
                 trace_tag_list=[step_name, "classifier"]
             )
 
@@ -1625,7 +1625,7 @@ class ExtractSummariesTool:
                 reasoning_effort=reasoning_effort,
                 verbose=self.verbose,
                 logger=self.logger,
-                trace_enable=False,
+                trace_enable=True,
                 trace_tag_list=[step_name, "summary_agent"]
             )
 
@@ -1723,7 +1723,7 @@ class ExtractSummariesTool:
                 reasoning_effort=reasoning_effort,
                 verbose=self.verbose,
                 logger=self.logger,
-                trace_enable=False,
+                trace_enable=True,
                 trace_tag_list=[step_name, "distill_agent"]
             )
             ai_articles_df['short_summary'] = await distill_agent.filter_dataframe(
@@ -2130,7 +2130,7 @@ class ClusterByTopicTool:
             reasoning_effort=reasoning_effort,
             verbose=self.verbose,
             logger=self.logger,
-            trace_enable=False,
+            trace_enable=True,
             trace_tag_list=["cluster_topics", "topic_agent"]
         )
 
@@ -2179,7 +2179,7 @@ class ClusterByTopicTool:
             verbose=False,  # too much output , always false
             logger=self.logger,
             reasoning_effort=reasoning_effort,
-            trace_enable=False,
+            trace_enable=True,
             trace_tag_list=["cluster_topics", "canonical_agent"]
         )
 
@@ -2275,7 +2275,7 @@ class ClusterByTopicTool:
             verbose=self.verbose,
             logger=self.logger,
             reasoning_effort=reasoning_effort,
-            trace_enable=False,
+            trace_enable=True,
             trace_tag_list=["cluster_topics", "cleanup_agent"]
         )
 
@@ -2515,7 +2515,7 @@ class SelectSectionsTool:
                 reasoning_effort=reasoning_effort,
                 verbose=self.verbose,
                 logger=self.logger,
-                trace_enable=False,
+                trace_enable=True,
                 trace_tag_list=[step_name, "cat_proposal_agent"]
             )
 
@@ -2561,7 +2561,7 @@ class SelectSectionsTool:
                 verbose=self.verbose,
                 logger=self.logger,
                 reasoning_effort=reasoning_effort,
-                trace_enable=False,
+                trace_enable=True,
                 trace_tag_list=[step_name, "cat_assignment_agent"]
             )
 
@@ -2611,7 +2611,7 @@ class SelectSectionsTool:
                 reasoning_effort=reasoning_effort,
                 verbose=self.verbose,
                 logger=self.logger,
-                trace_enable=False,
+                trace_enable=True,
                 trace_tag_list=[step_name, "dedupe_agent"]
             )
 
@@ -3079,7 +3079,7 @@ class DraftSectionsTool:
             reasoning_effort=section_critique_reasoning_effort,
             verbose=self.verbose,
             logger=self.logger,
-            trace_enable=False,
+            trace_enable=True,
             trace_tag_list=["draft_sections", "critique_agent"]
         )
 
@@ -3094,7 +3094,7 @@ class DraftSectionsTool:
             reasoning_effort=write_reasoning_effort,
             verbose=self.verbose,
             logger=self.logger,
-            trace_enable=False,
+            trace_enable=True,
             trace_tag_list=["draft_sections", "write_section_agent"]
         )
 
@@ -3456,7 +3456,7 @@ class FinalizeNewsletterTool:
                 reasoning_effort=reasoning_effort,
                 verbose=self.verbose,
                 logger=self.logger,
-                trace_enable=False,
+                trace_enable=True,
                 trace_tag_list=[step_name, "title_agent"]
             )
             response = await title_agent.run_prompt(input_text=draft_newsletter)
@@ -3484,7 +3484,7 @@ class FinalizeNewsletterTool:
                 reasoning_effort=reasoning_effort,
                 verbose=self.verbose,
                 logger=self.logger,
-                trace_enable=False,
+                trace_enable=True,
                 trace_tag_list=[step_name, "critique_newsletter_agent"]
             )
 
@@ -3499,7 +3499,7 @@ class FinalizeNewsletterTool:
                 reasoning_effort=reasoning_effort,
                 verbose=self.verbose,
                 logger=self.logger,
-                trace_enable=False,
+                trace_enable=True,
                 trace_tag_list=[step_name, "improve_newsletter_agent"]
             )
 

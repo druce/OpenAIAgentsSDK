@@ -42,6 +42,7 @@ aiohttp
 newsapi-python
 trafilatura
 markdown
+atproto
 
 # MCP (Model Context Protocol) dependencies
 mcp
