@@ -121,8 +121,8 @@ The newsletter generation follows a structured 9-step process with persistent st
 ### Step 5: Cluster by Topic 🏷️
 
 - **Categories**: Apply free-form topics and canonical topics like AI Safety & Ethics, OpenAI, etc. via prompts; ask LLM to identify a few top topics that match articles
-- **Thematic Grouping**: Organize articles into topic clusters using HDBSCAN over dimensionality-reduced embeddings
-- **Output**: Topic tags and clusters
+- **Thematic Grouping**: Organize articles into topic  using HDBSCAN over dimensionality-reduced embeddings
+- **Output**: Topic tags and 
 
 ### Step 6: Rate Articles ⭐
 
@@ -137,7 +137,7 @@ The newsletter generation follows a structured 9-step process with persistent st
 ### Step 7: Select Sections 📑
 
 - **Newsletter Structure**: Chooses top articles for each section
-- **Content Planning**: Organizes articles by topic clusters
+- **Content Planning**: Organizes articles by topic 
 - **Output**: Newsletter section outline with assigned articles
 
 ### Step 8: Draft Sections ✍️
@@ -373,15 +373,15 @@ python news_agent.py  # Automatically resumes from last step
 
 ## 📊 Typical Results
 
-**Input Processing**:
+**Input**:
 
 - 17 news sources → 650+ raw articles
 - AI classification → 330+ AI-related articles
 - Content download → 300+ full articles (after deduplication)
 
-**Output Quality**:
+**Output**:
 
-- 6 topic clusters (LLM Advances, AI Safety, Business Applications, etc.)
+- Topic clusters (LLM Advances, AI Safety, Business Applications, etc.)
 - 7-15 newsletter sections with 2-7 stories each
 - 30+ articles in final newsletter
 - 1200+ words of professional content
