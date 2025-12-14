@@ -1,58 +1,75 @@
 #!/usr/bin/env python3
 """
-Newsletter Agent for testing the complete workflow end-to-end.
+Newsletter Agent for running the complete workflow end-to-end.
 
 This agent implements all 9 workflow steps defined in the WorkflowStatus object.
 Each step updates the workflow status and serializes the state.
 
 """
+import argparse
 import asyncio
-import time
+import json
 import logging
 import os
-import json
-import dotenv
-import argparse
+import shutil
+
+# from collections import Counter
+import sqlite3
+import time
 
 # import random
 from datetime import datetime, timezone
 from pathlib import Path
-# from collections import Counter
-import sqlite3
+from typing import Any, Dict, List, Optional
 
-# from httpx import head
-import tldextract
+import dotenv
 
-import shutil
 # import pickle
 import numpy as np
 import pandas as pd
-from sklearn.metrics.pairwise import cosine_similarity
-# from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
-# import hdbscan
 
-from IPython.display import display  # HTML, Image, Markdown,
+# from httpx import head
+import tldextract
+from agents import (
+    Agent,
+    FunctionTool,
+    RunContextWrapper,
+    Runner,
+    SQLiteSession,
+    set_default_openai_client,
+)
 
-from typing import Dict, Any, Optional, List
-from pydantic import BaseModel, Field
 # from email.utils import parsedate_to_datetime
 # from urllib.parse import urlparse
 from bs4 import BeautifulSoup
-
+from IPython.display import display  # HTML, Image, Markdown,
 from openai import AsyncOpenAI
-from agents import (Agent, Runner, RunContextWrapper, FunctionTool,
-                    SQLiteSession, set_default_openai_client)
-from do_rating import fn_rate_articles, bradley_terry
-from do_cluster import do_clustering, _get_embeddings_df
+from pydantic import BaseModel, Field
+from sklearn.metrics.pairwise import cosine_similarity
+
+from config import (
+    CANONICAL_TOPICS,
+    DEFAULT_CONCURRENCY,
+    DOWNLOAD_DIR,
+    LOGDB,
+    MAX_CRITIQUE_ITERATIONS,
+    NEWSAGENTDB,
+    PAGES_DIR,
+    TEXT_DIR,
+)
+from db import Article, Newsletter, Site, Url
+from do_cluster import _get_embeddings_df, do_clustering
 from do_dedupe import process_dataframe_with_filtering
-from llm import LLMagent, get_langfuse_client
-from utilities import send_gmail
-from scrape import scrape_urls_concurrent, normalize_html
+from do_rating import bradley_terry, fn_rate_articles
 from fetch import Fetcher
-from db import Url, Site, Article, Newsletter
+from llm import LLMagent, get_langfuse_client
 from log_handler import SQLiteLogHandler
 from newsletter_state import NewsletterAgentState
-from config import CANONICAL_TOPICS, DOWNLOAD_DIR, PAGES_DIR, TEXT_DIR, NEWSAGENTDB, LOGDB, DEFAULT_CONCURRENCY, MAX_CRITIQUE_ITERATIONS
+from scrape import normalize_html, scrape_urls_concurrent
+from utilities import send_gmail
+
+# from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
+# import hdbscan
 
 
 # Pydantic models for structured output
@@ -901,13 +918,14 @@ class FilterUrlsTool:
                         url_to_check = row.url
                         # print("checking", url_to_check)
                         if not url_to_check:  # should never happen
-                            print("no url to check, should never happen!")
+                            self.logger.info(
+                                "no url to check, should never happen!")
                             continue
                         # look up in Urls table by url, or matching source+title (sometimes multiple variations)
                         existing_url = Url.get_by_url_or_source_and_title(
                             conn, url_to_check, row.source, row.title)
                         if existing_url is None:  # not found
-                            print(f"new - keeping {url_to_check}")
+                            self.logger.info(f"new - keeping {url_to_check}")
                             new_url = Url(
                                 initial_url=url_to_check,
                                 final_url='',
@@ -921,16 +939,16 @@ class FilterUrlsTool:
                         if state.reprocess_since:
                             if existing_url.created_at is not None and existing_url.created_at > state.reprocess_since:
                                 # URL exists but seen after reprocess_since - treat as new
-                                print(
+                                self.logger.info(
                                     f"found after cutoff - keeping {url_to_check}")
                                 continue
                             # found url and seen prior to cutoff - treat as duplicate
-                            print(
+                            self.logger.info(
                                 f"found before cutoff - ignoring as duplicate {url_to_check}")
                             dupe_df.at[row.Index, 'is_new'] = False
                         else:
                             # No reprocess_since set - treat any existing URLs as duplicates
-                            print(
+                            self.logger.info(
                                 f"found with no cutoff set - ignoring as duplicate {url_to_check}")
                             dupe_df.at[row.Index, 'is_new'] = False
 
@@ -940,10 +958,10 @@ class FilterUrlsTool:
 
                 if self.verbose:
                     if state.reprocess_since is not None:
-                        print(
+                        self.logger.info(
                             f"🔄 Filtered out {duplicate_count} URLs seen before {state.reprocess_since.isoformat()}, processing {len(headline_df)} new URLs")
                     else:
-                        print(
+                        self.logger.info(
                             f"🔄 Filtered out {duplicate_count} duplicate URLs, processing {len(headline_df)} new URLs")
                 if self.logger:
                     if state.reprocess_since is not None:
@@ -965,7 +983,7 @@ class FilterUrlsTool:
                     self.logger.warning(
                         f"URL deduplication failed: {e}. Proceeding without deduplication.")
                 if self.verbose:
-                    print(
+                    self.logger.info(
                         f"⚠️ URL deduplication failed: {e}. Proceeding with all URLs.")
 
             if self.logger:
@@ -1003,10 +1021,10 @@ class FilterUrlsTool:
 
             if self.verbose:
                 if duplicate_count > 0:
-                    print(
+                    self.logger.info(
                         f"✅ Completed Step 2: {duplicate_count} duplicates removed, {ai_related_count} AI-related from {total_count} processed ({total_articles} original)")
                 else:
-                    print(
+                    self.logger.info(
                         f"✅ Completed Step 2: Filtered to {ai_related_count} AI-related headlines from {total_articles} total")
 
             # Build status message with deduplication stats
@@ -1137,6 +1155,15 @@ class DownloadArticlesTool:
             # Convert scrape results to DataFrame and merge with ai_df
             scrape_df = pd.DataFrame(scrape_results, columns=[
                                      'id', 'status', 'final_url', 'title', 'html_path', 'last_updated'])
+
+            # Drop overlapping columns from ai_df before merge to avoid _x/_y suffixes
+            # fixes an edge case where state was previously saved with these columns
+            merge_cols = ['status', 'final_url', 'html_path', 'last_updated']
+            cols_to_drop = [col for col in merge_cols if col in ai_df.columns]
+            if cols_to_drop:
+                ai_df = ai_df.drop(columns=cols_to_drop)
+
+            # Now merge without conflicts
             ai_df = ai_df.merge(scrape_df[[
                                 'id', 'status', 'final_url', 'html_path', 'last_updated']], on='id', how='left')
 
@@ -2059,6 +2086,7 @@ class ClusterByTopicTool:
             DataFrame with embeddings for each extended summary
         """
         from openai import OpenAI
+
         from llm import paginate_df_async
 
         if self.logger:

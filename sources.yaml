@@ -39,7 +39,7 @@ Feedly AI:
   - ^https://feedly.com
   - ^https://s1.feedly.com
   - ^https://blog.feedly.com
-  scroll: 3   # page down times for infinite scroll
+  scroll: 4   # page down times for infinite scroll
   initial_sleep: 20
   scroll_div: "#feedlyFrame"
 
