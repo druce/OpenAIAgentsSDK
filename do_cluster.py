@@ -3,6 +3,7 @@ import logging
 import pandas as pd
 import numpy as np
 from typing import Optional
+import pickle
 
 from sklearn.decomposition import TruncatedSVD
 from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
@@ -13,7 +14,7 @@ import umap
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
-from llm import paginate_df_async, LangfuseClient, LLMagent, get_langfuse_client
+from llm import paginate_df_async, LLMagent, get_langfuse_client
 
 
 class TopicText(BaseModel):
@@ -67,6 +68,31 @@ def _create_extended_summary(row):
     return "\n\n".join(parts)
 
 
+def _create_short_summary(row):
+    """
+    Create a short summary by concatenating available article fields.
+
+    Combines short_summary, topics into a single text string
+    for use in embedding generation and clustering analysis.
+
+    Args:
+        row: pandas Series or dict-like object containing article data with
+             optional fields: 'topics', 'short_summary'
+
+    Returns:
+        str: Combined text summary
+    """
+    retval = ""
+    if pd.notna(row['short_summary']):
+        short_summary = str(row['short_summary']).strip()
+        retval += short_summary
+        topics_list = row['topics']
+        topics = str(topics_list).strip() if topics_list else ""
+        if topics:
+            retval += f" Topics: {topics}"
+    return retval
+
+
 async def _get_embeddings_df(headline_data: pd.DataFrame, embedding_model: str = "text-embedding-3-large") -> pd.DataFrame:
     """
     Generate embeddings for article summaries using OpenAI's embedding API.
@@ -92,7 +118,7 @@ async def _get_embeddings_df(headline_data: pd.DataFrame, embedding_model: str =
     headline_data_copy = headline_data.copy()
 
     headline_data_copy['extended_summary'] = headline_data_copy.apply(
-        _create_extended_summary, axis=1)
+        _create_short_summary, axis=1)
 
     # Filter to articles with non-empty extended summaries
     articles_with_summaries = headline_data_copy[
@@ -104,7 +130,7 @@ async def _get_embeddings_df(headline_data: pd.DataFrame, embedding_model: str =
     client = OpenAI()
 
     # Use paginate_df_async similar to do_dedupe.py
-    async for batch_df in paginate_df_async(articles_with_summaries, 25):
+    async for batch_df in paginate_df_async(articles_with_summaries, 100):
         text_batch = batch_df["extended_summary"].to_list()
         response = client.embeddings.create(
             input=text_batch, model=embedding_model)
@@ -278,6 +304,56 @@ def print_clustering_summary(metrics):
         print(
             f"Composite Score: {metrics['composite_score']:.3f} (higher is better)")
     print()
+
+
+def umap_objective(trial: optuna.Trial, reduced_embeddings: np.ndarray) -> float:
+    """
+    Optuna objective function to optimize HDBSCAN hyperparameters with UMAP.
+
+    Args:
+        trial: Optuna trial object
+        embeddings_array: Original normalized embeddings
+
+    Returns:
+        Negative composite score (Optuna minimizes, we want to maximize)
+    """
+    # HDBSCAN hyperparameters to optimize
+    min_cluster_size = trial.suggest_int('min_cluster_size', 2, 10)
+    # Fixed: ensure min_samples is always valid (was: min_cluster_size-1 could be < 1)
+    min_samples = trial.suggest_int('min_samples', 1, min_cluster_size)
+
+    print("=== HDBSCAN Parameters ===")
+    print(f"min_cluster_size:   {min_cluster_size}")
+    print(f"min_samples:        {min_samples}")
+
+    try:
+        # Fit HDBSCAN
+        clusterer = hdbscan.HDBSCAN(
+            min_cluster_size=min_cluster_size,
+            min_samples=min_samples,
+            metric="euclidean",
+            cluster_selection_method="eom",
+        )
+
+        labels = clusterer.fit_predict(reduced_embeddings)
+
+        # Calculate metrics
+        metrics = calculate_clustering_metrics(
+            reduced_embeddings, labels, clusterer)
+        print_clustering_summary(metrics)
+
+        # Return negative composite score (Optuna minimizes)
+        composite_score = metrics.get('composite_score', -1.0)
+
+        # Penalize if no valid clusters found or too much noise
+        if metrics.get('n_clusters', 0) < 2 or metrics.get('noise_ratio', 1.0) > 0.8:
+            composite_score = -1.0
+
+        return -composite_score
+
+    except Exception as e:
+        print(f"Error in trial: {e}")
+        return 1.0  # Bad score for failed trials
 
 
 def objective(trial, embeddings_array):
@@ -522,20 +598,23 @@ async def name_clusters(headline_df: pd.DataFrame, logger: Optional[logging.Logg
 
 
 async def do_clustering(headline_df: pd.DataFrame, logger: Optional[logging.Logger] = None,
-                        embedding_model: str = "text-embedding-3-large") -> pd.DataFrame:
+                        n_trials: int = 50, umap_reducer_path: str = 'umap_reducer.pkl') -> pd.DataFrame:
     """
     Perform complete clustering workflow on article headlines.
 
     Executes the full clustering pipeline: creates extended summaries from article data,
-    generates embeddings using OpenAI's API, optimizes HDBSCAN hyperparameters with
-    Optuna, assigns cluster labels, and generates descriptive cluster names using AI.
+    generates embeddings using OpenAI's API, loads a pretrained UMAP reducer, optimizes
+    HDBSCAN hyperparameters with Optuna, assigns cluster labels, and generates descriptive
+    cluster names using AI.
 
     Args:
         headline_df: pd.DataFrame containing article data with columns:
                     'title', 'description', 'topics', 'summary' (at minimum)
         logger: logging.Logger for tracking clustering progress and errors
-        embedding_model: str, default="text-embedding-3-large"
-                        OpenAI embedding model name for vector generation
+        n_trials: int, default=50
+                  Number of Optuna optimization trials for HDBSCAN hyperparameter tuning
+        umap_reducer_path: str, default='umap_reducer.pkl'
+                          Path to pretrained UMAP reducer pickle file
 
     Returns:
         pd.DataFrame: Input DataFrame with additional columns:
@@ -544,23 +623,127 @@ async def do_clustering(headline_df: pd.DataFrame, logger: Optional[logging.Logg
                      - 'cluster_name': Descriptive name for each cluster
 
     Raises:
+        FileNotFoundError: If umap_reducer.pkl doesn't exist
         Exception: If embedding generation, optimization, or cluster naming fails.
                   Individual failures in cluster naming are handled gracefully.
 
     Note:
-        Uses 200 optimization trials for hyperparameter tuning, which may take
-        several minutes depending on the dataset size and hardware.
+        Requires a pretrained UMAP reducer (typically trained with n_components=690).
+        Uses the provided n_trials (default 50) for HDBSCAN hyperparameter optimization.
+        Optimization may take several minutes depending on dataset size and hardware.
     """
+    if logger:
+        logger.info(
+            f"Starting clustering pipeline for {len(headline_df)} articles")
 
+    # Generate embeddings
     headline_df['extended_summary'] = headline_df.apply(
-        _create_extended_summary, axis=1)
-    embeddings_df = await _get_embeddings_df(pd.DataFrame(headline_df))
-    results = optimize_hdbscan(embeddings_df, n_trials=200)
+        _create_short_summary, axis=1)
 
-    best_labels = results['best_labels']
+    if logger:
+        logger.info("Generating embeddings for articles")
+    embeddings_df = await _get_embeddings_df(pd.DataFrame(headline_df))
+
+    if logger:
+        logger.info(f"Generated embeddings with shape {embeddings_df.shape}")
+
+    # Load pretrained UMAP reducer
+    try:
+        if logger:
+            logger.info(
+                f"Loading pretrained UMAP reducer from {umap_reducer_path}")
+        with open(umap_reducer_path, 'rb') as f:
+            umap_reducer = pickle.load(f)
+        if logger:
+            logger.info(
+                f"Loaded UMAP reducer (n_components={umap_reducer.n_components})")
+    except FileNotFoundError:
+        error_msg = f"UMAP reducer not found at {umap_reducer_path}. Please train a reducer first using 'Tune HDBSCAN.ipynb'"
+        if logger:
+            logger.error(error_msg)
+        raise FileNotFoundError(error_msg)
+    except Exception as e:
+        error_msg = f"Failed to load UMAP reducer from {umap_reducer_path}: {e}"
+        if logger:
+            logger.error(error_msg)
+        raise Exception(error_msg)
+
+    # Apply dimensionality reduction
+    if logger:
+        logger.info(
+            f"Applying UMAP dimensionality reduction: {embeddings_df.shape[1]} → {umap_reducer.n_components} dimensions")
+    reduced = umap_reducer.transform(embeddings_df).astype(np.float64)
+
+    if logger:
+        logger.info(f"Reduced embeddings shape: {reduced.shape}")
+
+    # Optimize HDBSCAN hyperparameters
+    if logger:
+        logger.info(
+            f"Starting HDBSCAN hyperparameter optimization with {n_trials} trials")
+    else:
+        print(f"Starting optimization with {n_trials} trials...")
+        print(f"Embedding shape: {reduced.shape}")
+
+    study = optuna.create_study(
+        direction='minimize',  # We return negative composite score
+        sampler=optuna.samplers.TPESampler(seed=RANDOM_STATE),
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=10)
+    )
+
+    # Optimize (suppress Optuna's verbose output)
+    study.optimize(
+        lambda trial: umap_objective(trial, reduced),
+        n_trials=n_trials,
+        show_progress_bar=False
+    )
+    best_params = study.best_params
+    best_score = -study.best_value  # Convert back to positive
+
+    if logger:
+        logger.info(
+            f"Optimization completed! Best composite score: {best_score:.4f}")
+        logger.info(
+            f"Best parameters: min_cluster_size={best_params['min_cluster_size']}, min_samples={best_params['min_samples']}")
+    else:
+        print(f"\nOptimization completed!")
+        print(f"Best composite score: {best_score:.4f}")
+        print(f"Best parameters: {best_params}")
+
+    # Cluster with best parameters
+    min_cluster_size = best_params['min_cluster_size']
+    min_samples = best_params['min_samples']
+
+    if logger:
+        logger.info(
+            f"Clustering with HDBSCAN (min_cluster_size={min_cluster_size}, min_samples={min_samples})")
+
+    clusterer = hdbscan.HDBSCAN(
+        min_cluster_size=min_cluster_size,
+        min_samples=min_samples,
+        metric="euclidean",
+        cluster_selection_method="eom"
+    )
+    labels = clusterer.fit_predict(reduced)
+
+    # Count clusters
+    n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
+    n_noise = np.sum(labels == -1)
+
+    if logger:
+        logger.info(
+            f"Clustering complete: {n_clusters} clusters, {n_noise} noise points ({n_noise/len(labels):.1%})")
+
     cluster_df = pd.DataFrame(
-        {'cluster': best_labels}, index=embeddings_df.index)
+        {'cluster': labels}, index=embeddings_df.index)
     headline_df['cluster'] = cluster_df['cluster'].astype(int)
 
+    # Generate cluster names
+    if logger:
+        logger.info("Generating cluster names")
     headline_df = await name_clusters(headline_df, logger)
+
+    if logger:
+        logger.info("Clustering pipeline complete")
+
     return headline_df

@@ -182,7 +182,7 @@ class LangfuseClient:
 
             if self.logger:
                 self.logger.info(
-                    f"Successfully retrieved prompt '{prompt_name}' from Langfuse")
+                    f"Retrieved prompt '{prompt_name}' from Langfuse")
 
             # Validate prompt structure
             if not hasattr(lf_prompt, 'prompt') or not isinstance(lf_prompt.prompt, list):
@@ -375,7 +375,8 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             openai.APIConnectionError,
             openai.APITimeoutError,
             openai.InternalServerError,
-            ValidationError,  # Retry on Pydantic validation errors (e.g., LLM returned wrong schema)
+            # Retry on Pydantic validation errors (e.g., LLM returned wrong schema)
+            ValidationError,
         )),
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=1, min=1, max=30),
@@ -420,7 +421,8 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             openai.APIConnectionError,
             openai.APITimeoutError,
             openai.InternalServerError,
-            ValidationError,  # Retry on Pydantic validation errors (e.g., LLM returned wrong schema)
+            # Retry on Pydantic validation errors (e.g., LLM returned wrong schema)
+            ValidationError,
         )),
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=1, min=1, max=30),
@@ -811,8 +813,9 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                    for i in range(0, len(variables_list), batch_size)]
 
         sem = asyncio.Semaphore(max_concurrency)
-        self.logger.info(
-            f"Processing {len(batches)} batches with concurrency {max_concurrency}")
+        if self.verbose:
+            self.logger.info(
+                f"Processing {len(batches)} batches with concurrency {max_concurrency}")
 
         async def _process_batch(batch_idx: int, batch_variables: List[Dict[str, Any]]) -> tuple[int, List[Any]]:
             """Process a single batch with retry logic"""
@@ -1190,8 +1193,9 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         if not chunks:
             return []
 
-        self.logger.info(
-            f"Processing {len(chunks)} chunks with concurrency {max_concurrency}")
+        if self.verbose:
+            self.logger.info(
+                f"Processing {len(chunks)} chunks with concurrency {max_concurrency}")
 
         # Process all chunks concurrently with index tracking and semaphore control
         tasks = [

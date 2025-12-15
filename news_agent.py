@@ -26,10 +26,14 @@ import dotenv
 
 # import pickle
 import numpy as np
+from numpy._core.numeric import False_
 import pandas as pd
 
 # from httpx import head
 import tldextract
+
+import markdown
+
 from agents import (
     Agent,
     FunctionTool,
@@ -44,6 +48,8 @@ from agents import (
 from bs4 import BeautifulSoup
 from IPython.display import display  # HTML, Image, Markdown,
 from openai import AsyncOpenAI
+from openai import OpenAI  # for embeddings
+
 from pydantic import BaseModel, Field
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -62,7 +68,8 @@ from do_cluster import _get_embeddings_df, do_clustering
 from do_dedupe import process_dataframe_with_filtering
 from do_rating import bradley_terry, fn_rate_articles
 from fetch import Fetcher
-from llm import LLMagent, get_langfuse_client
+from llm import LLMagent, get_langfuse_client, paginate_df_async
+
 from log_handler import SQLiteLogHandler
 from newsletter_state import NewsletterAgentState
 from scrape import normalize_html, scrape_urls_concurrent
@@ -1934,66 +1941,9 @@ class RateArticlesTool:
             except Exception as e:
                 self.logger.error(f"Failed to send email: {e}")
 
-            # Insert articles into database using Article schema
-            self.logger.info(
-                f"Inserting {len(rated_df)} articles into database")
-
-            # Ensure date column has values - use current datetime for missing dates
-            rated_df['date'] = datetime.now(timezone.utc)
-
-            try:
-                with sqlite3.connect(NEWSAGENTDB) as conn:
-                    Article.create_table(conn)  # Ensure articles table exists
-
-                    articles_inserted = 0
-                    for _, row in rated_df.iterrows():
-                        try:
-                            # Create Article instance with available data
-                            article = Article(
-                                final_url=row.get(
-                                    'final_url', row.get('url', '')),
-                                url=row.get('url', ''),
-                                source=row.get('source', row.get('src', '')),
-                                title=row.get('title', ''),
-                                published=pd.to_datetime(row.get('published')) if pd.notna(
-                                    row.get('published')) else None,
-                                rss_summary=row.get('rss_summary', ''),
-                                # Assume True since these went through AI filtering
-                                isAI=bool(row.get('isAI', True)),
-                                status=row.get('status', 'rated'),
-                                html_path=row.get('html_path', ''),
-                                last_updated=pd.to_datetime(row.get('last_updated')) if pd.notna(
-                                    row.get('last_updated')) else None,
-                                text_path=row.get('text_path', ''),
-                                content_length=int(
-                                    row.get('content_length', 0)),
-                                summary=row.get('summary', ''),
-                                short_summary=row.get('short_summary'),
-                                description=row.get('description', ''),
-                                rating=float(row.get('rating', 0.0)),
-                                cluster_label=row.get(
-                                    'cluster_label', row.get('cluster_name', '')),
-                                domain=row.get(
-                                    'domain', row.get('hostname', '')),
-                                site_name=row.get('site_name', ''),
-                                reputation=float(row.get('reputation', 0.0)) if pd.notna(
-                                    row.get('reputation')) else None,
-                                date=pd.to_datetime(row.get('date'))
-                            )
-
-                            # Use upsert to avoid conflicts on duplicate final_url
-                            article.upsert(conn)
-                            articles_inserted += 1
-
-                        except Exception as e:
-                            self.logger.warning(
-                                f"Failed to insert article {row.get('title', 'Unknown')}: {e}")
-
-                    self.logger.info(
-                        f"Successfully inserted {articles_inserted}/{len(rated_df)} articles")
-
-            except Exception as e:
-                self.logger.error(f"Database insertion failed: {e}")
+            # Note: Articles will be inserted to database in step 6 after clustering
+            # This allows articles to be inserted WITH topics and cluster_label populated
+            # State is updated here with rated articles, database insertion happens later
 
             status_msg = f"✅ Step 5 {step_name} completed successfully! Rated {articles_rated} articles with average rating {avg_rating:.1f}/10."
             status_msg += f"\n⭐ High quality articles (≥7.0): {high_quality_count}"
@@ -2085,9 +2035,6 @@ class ClusterByTopicTool:
         Returns:
             DataFrame with embeddings for each extended summary
         """
-        from openai import OpenAI
-
-        from llm import paginate_df_async
 
         if self.logger:
             self.logger.info(
@@ -2112,15 +2059,19 @@ class ClusterByTopicTool:
             return pd.DataFrame()
 
         all_embeddings = []
-        client = OpenAI()
 
-        # Use paginate_df_async similar to do_dedupe.py
-        async for batch_df in paginate_df_async(articles_with_summaries, 25):
-            text_batch = batch_df["extended_summary"].to_list()
-            response = client.embeddings.create(
-                input=text_batch, model=embedding_model)
-            batch_embeddings = [item.embedding for item in response.data]
-            all_embeddings.extend(batch_embeddings)
+        # Use AsyncOpenAI client similar to do_dedupe.py
+        tasks = []
+        async with AsyncOpenAI(openai_api_key=os.environ["OPENAI_API_KEY"]) as openai_client:
+            for batch_df in paginate_df_async(articles_with_summaries, 25):
+                text_batch = batch_df["extended_summary"].to_list()
+                task = asyncio.create_task(openai_client.embeddings.create(
+                    input=text_batch, model=embedding_model))
+                tasks.append(task)
+
+            batch_embeddings = await asyncio.gather(*tasks)
+            all_embeddings.extend(
+                [item.embedding for result in batch_embeddings for item in result.data])
 
         # Create DataFrame with embeddings, preserving original index
         embedding_df = pd.DataFrame(
@@ -2158,7 +2109,7 @@ class ClusterByTopicTool:
             reasoning_effort=reasoning_effort,
             verbose=self.verbose,
             logger=self.logger,
-            trace_enable=True,
+            trace_enable=False_,
             trace_tag_list=["cluster_topics", "topic_agent"]
         )
 
@@ -2207,7 +2158,7 @@ class ClusterByTopicTool:
             verbose=False,  # too much output , always false
             logger=self.logger,
             reasoning_effort=reasoning_effort,
-            trace_enable=True,
+            trace_enable=False,
             trace_tag_list=["cluster_topics", "canonical_agent"]
         )
 
@@ -2412,12 +2363,88 @@ class ClusterByTopicTool:
 
             headline_df = await do_clustering(headline_df, logger=self.logger)
 
-            # re-index
+            # Re-index
             headline_df.reset_index(drop=True, inplace=True)
             headline_df['id'] = headline_df.index
 
-            # Complete the step
+            # Update state with clustered articles
             state.headline_data = headline_df.to_dict('records')
+
+            # Ensure date column has values - use current datetime for missing dates
+            if 'date' not in headline_df.columns or headline_df['date'].isna().any():
+                headline_df['date'] = headline_df.get(
+                    'date', datetime.now(timezone.utc))
+                headline_df['date'] = headline_df['date'].fillna(
+                    datetime.now(timezone.utc))
+
+            # Insert articles into database with topics and cluster_label
+            if self.logger:
+                self.logger.info(
+                    f"Inserting {len(headline_df)} articles with topics into database...")
+
+            try:
+                with sqlite3.connect(NEWSAGENTDB) as conn:
+                    # Ensure articles table exists with topics column
+                    Article.create_table(conn)
+
+                    articles_inserted = 0
+                    articles_failed = 0
+
+                    for idx, row in headline_df.iterrows():
+                        try:
+                            # Create Article instance with all fields including topics
+                            article = Article(
+                                final_url=row.get(
+                                    'final_url', row.get('url', '')),
+                                url=row.get('url', ''),
+                                source=row.get('source', row.get('src', '')),
+                                title=row.get('title', ''),
+                                published=pd.to_datetime(row.get('published')) if pd.notna(
+                                    row.get('published')) else None,
+                                rss_summary=row.get('rss_summary', ''),
+                                isAI=bool(row.get('isAI', True)),
+                                status=row.get('status', 'clustered'),
+                                html_path=row.get('html_path', ''),
+                                last_updated=pd.to_datetime(row.get('last_updated')) if pd.notna(
+                                    row.get('last_updated')) else None,
+                                text_path=row.get('text_path', ''),
+                                content_length=int(
+                                    row.get('content_length', 0)),
+                                summary=row.get('summary', ''),
+                                short_summary=row.get('short_summary'),
+                                description=row.get('description', ''),
+                                rating=float(row.get('rating', 0.0)),
+                                # Cluster name from clustering
+                                cluster_label=row.get('cluster_name', ''),
+                                topics=Article.topics_list_to_string(
+                                    row.get('topics')),  # Convert topics list to string
+                                domain=row.get(
+                                    'domain', row.get('hostname', '')),
+                                site_name=row.get('site_name', ''),
+                                reputation=float(row.get('reputation', 0.0)) if pd.notna(
+                                    row.get('reputation')) else None,
+                                date=pd.to_datetime(row.get('date')) if pd.notna(
+                                    row.get('date')) else datetime.now(timezone.utc)
+                            )
+
+                            # Use upsert to avoid conflicts on duplicate final_url
+                            article.upsert(conn)
+                            articles_inserted += 1
+
+                        except Exception as e:
+                            articles_failed += 1
+                            if self.logger:
+                                self.logger.warning(
+                                    f"Failed to insert article {row.get('title', 'Unknown')}: {e}")
+
+                    if self.logger:
+                        self.logger.info(
+                            f"Successfully inserted {articles_inserted}/{len(headline_df)} articles with topics")
+
+            except Exception as e:
+                if self.logger:
+                    self.logger.error(f"Database insertion failed: {e}")
+                # Don't fail the step if database insertion fails - articles are still in state
 
             # if self.verbose:
             #     print(f"✅ Completed Step 5: Created {total_clusters} topic clusters")
@@ -2543,7 +2570,7 @@ class SelectSectionsTool:
                 reasoning_effort=reasoning_effort,
                 verbose=self.verbose,
                 logger=self.logger,
-                trace_enable=True,
+                trace_enable=False,
                 trace_tag_list=[step_name, "cat_proposal_agent"]
             )
 
@@ -2589,7 +2616,7 @@ class SelectSectionsTool:
                 verbose=self.verbose,
                 logger=self.logger,
                 reasoning_effort=reasoning_effort,
-                trace_enable=True,
+                trace_enable=False,
                 trace_tag_list=[step_name, "cat_assignment_agent"]
             )
 
@@ -2639,7 +2666,7 @@ class SelectSectionsTool:
                 reasoning_effort=reasoning_effort,
                 verbose=self.verbose,
                 logger=self.logger,
-                trace_enable=True,
+                trace_enable=False,
                 trace_tag_list=[step_name, "dedupe_agent"]
             )
 
@@ -3608,7 +3635,6 @@ class FinalizeNewsletterTool:
 
             # Send email with styled newsletter
             try:
-                import markdown
 
                 today = datetime.now().strftime("%B %d, %Y")
                 subject = f"AI News for {today} - {state.newsletter_title}"

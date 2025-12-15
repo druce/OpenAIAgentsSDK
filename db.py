@@ -159,6 +159,7 @@ class Article:
     description: Optional[str]
     rating: float
     cluster_label: Optional[str]
+    topics: Optional[str]
     domain: str
     site_name: str
     reputation: Optional[float]
@@ -188,26 +189,26 @@ class Article:
                 description TEXT,
                 rating REAL NOT NULL,
                 cluster_label TEXT,
+                topics TEXT,
                 domain TEXT NOT NULL,
                 site_name TEXT NOT NULL,
                 reputation REAL,
                 date TEXT
             )
         """)
-        conn.commit()
 
     def insert(self, conn: sqlite3.Connection):
         """Insert this Article record into the database"""
         cursor = conn.execute("""
-            INSERT INTO articles (final_url, url, source, title, published, rss_summary, isAI, status, html_path, last_updated, text_path, content_length, summary, short_summary, description, rating, cluster_label, domain, site_name, reputation, date)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO articles (final_url, url, source, title, published, rss_summary, isAI, status, html_path, last_updated, text_path, content_length, summary, short_summary, description, rating, cluster_label, topics, domain, site_name, reputation, date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             self.final_url, self.url, self.source, self.title,
             self.published.isoformat() if self.published else None,
             self.rss_summary, self.isAI, self.status, self.html_path,
             self.last_updated.isoformat() if self.last_updated else None,
             self.text_path, self.content_length, self.summary, self.short_summary, self.description,
-            self.rating, self.cluster_label, self.domain, self.site_name,
+            self.rating, self.cluster_label, self.topics, self.domain, self.site_name,
             self.reputation,
             self.date.isoformat() if self.date else None
         ))
@@ -217,7 +218,7 @@ class Article:
     def update(self, conn: sqlite3.Connection):
         """Update this Article record in the database"""
         conn.execute("""
-            UPDATE articles SET url = ?, source = ?, title = ?, published = ?, rss_summary = ?, isAI = ?, status = ?, html_path = ?, last_updated = ?, text_path = ?, content_length = ?, summary = ?, short_summary = ?, description = ?, rating = ?, cluster_label = ?, domain = ?, site_name = ?, reputation = ?, date = ?
+            UPDATE articles SET url = ?, source = ?, title = ?, published = ?, rss_summary = ?, isAI = ?, status = ?, html_path = ?, last_updated = ?, text_path = ?, content_length = ?, summary = ?, short_summary = ?, description = ?, rating = ?, cluster_label = ?, topics = ?, domain = ?, site_name = ?, reputation = ?, date = ?
             WHERE final_url = ?
         """, (
             self.url, self.source, self.title,
@@ -225,7 +226,7 @@ class Article:
             self.rss_summary, self.isAI, self.status, self.html_path,
             self.last_updated.isoformat() if self.last_updated else None,
             self.text_path, self.content_length, self.summary, self.short_summary, self.description,
-            self.rating, self.cluster_label, self.domain, self.site_name,
+            self.rating, self.cluster_label, self.topics, self.domain, self.site_name,
             self.reputation,
             self.date.isoformat() if self.date else None, self.final_url
         ))
@@ -241,7 +242,7 @@ class Article:
     def get(cls, conn: sqlite3.Connection, final_url: str) -> Optional['Article']:
         """Get an Article record by final_url"""
         cursor = conn.execute("""
-            SELECT id, final_url, url, source, title, published, rss_summary, isAI, status, html_path, last_updated, text_path, content_length, summary, short_summary, description, rating, cluster_label, domain, site_name, reputation, date
+            SELECT id, final_url, url, source, title, published, rss_summary, isAI, status, html_path, last_updated, text_path, content_length, summary, short_summary, description, rating, cluster_label, topics, domain, site_name, reputation, date
             FROM articles WHERE final_url = ?
         """, (final_url,))
         row = cursor.fetchone()
@@ -265,10 +266,11 @@ class Article:
                 description=row[15],
                 rating=row[16],
                 cluster_label=row[17],
-                domain=row[18],
-                site_name=row[19],
-                reputation=row[20],
-                date=datetime.fromisoformat(row[21]) if row[21] else None,
+                topics=row[18],
+                domain=row[19],
+                site_name=row[20],
+                reputation=row[21],
+                date=datetime.fromisoformat(row[22]) if row[22] else None,
                 id=row[0]
             )
         return None
@@ -277,7 +279,7 @@ class Article:
     def get_all(cls, conn: sqlite3.Connection) -> list['Article']:
         """Get all Article records"""
         cursor = conn.execute("""
-            SELECT id, final_url, url, source, title, published, rss_summary, isAI, status, html_path, last_updated, text_path, content_length, summary, short_summary, description, rating, cluster_label, domain, site_name, reputation, date FROM articles
+            SELECT id, final_url, url, source, title, published, rss_summary, isAI, status, html_path, last_updated, text_path, content_length, summary, short_summary, description, rating, cluster_label, topics, domain, site_name, reputation, date FROM articles
         """)
         rows = cursor.fetchall()
         return [cls(
@@ -298,18 +300,19 @@ class Article:
             description=row[15],
             rating=row[16],
             cluster_label=row[17],
-            domain=row[18],
-            site_name=row[19],
-            reputation=row[20],
-            date=datetime.fromisoformat(row[21]) if row[21] else None,
+            topics=row[18],
+            domain=row[19],
+            site_name=row[20],
+            reputation=row[21],
+            date=datetime.fromisoformat(row[22]) if row[22] else None,
             id=row[0]
         ) for row in rows]
 
     def upsert(self, conn: sqlite3.Connection):
         """Insert or update this Article record"""
         conn.execute("""
-            INSERT INTO articles (final_url, url, source, title, published, rss_summary, isAI, status, html_path, last_updated, text_path, content_length, summary, short_summary, description, rating, cluster_label, domain, site_name, reputation, date)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO articles (final_url, url, source, title, published, rss_summary, isAI, status, html_path, last_updated, text_path, content_length, summary, short_summary, description, rating, cluster_label, topics, domain, site_name, reputation, date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(final_url) DO UPDATE SET
                 url = excluded.url,
                 source = excluded.source,
@@ -327,6 +330,7 @@ class Article:
                 description = excluded.description,
                 rating = excluded.rating,
                 cluster_label = excluded.cluster_label,
+                topics = excluded.topics,
                 domain = excluded.domain,
                 site_name = excluded.site_name,
                 reputation = excluded.reputation,
@@ -337,11 +341,66 @@ class Article:
             self.rss_summary, self.isAI, self.status, self.html_path,
             self.last_updated.isoformat() if self.last_updated else None,
             self.text_path, self.content_length, self.summary, self.short_summary, self.description,
-            self.rating, self.cluster_label, self.domain, self.site_name,
+            self.rating, self.cluster_label, self.topics, self.domain, self.site_name,
             self.reputation,
             self.date.isoformat() if self.date else None
         ))
         conn.commit()
+
+    @staticmethod
+    def topics_list_to_string(topics_list: Optional[list]) -> Optional[str]:
+        """
+        Convert a list of topic strings to comma-separated string for storage.
+
+        Args:
+            topics_list: List of topic strings, e.g., ["AI/ML", "NLP", "Deep Learning"]
+
+        Returns:
+            Comma-separated string, e.g., "AI/ML,NLP,Deep Learning", or None if empty/None
+
+        Edge cases:
+            - None or empty list returns None
+            - Strips whitespace from each topic
+            - Filters out empty strings
+            - Topics containing commas are preserved (commas in topic names are kept)
+        """
+        if not topics_list or not isinstance(topics_list, list):
+            return None
+
+        # Strip whitespace and filter empty strings
+        cleaned_topics = [str(topic).strip()
+                          for topic in topics_list if topic and str(topic).strip()]
+
+        if not cleaned_topics:
+            return None
+
+        return ','.join(cleaned_topics)
+
+    @staticmethod
+    def topics_string_to_list(topics_string: Optional[str]) -> list:
+        """
+        Convert comma-separated topic string back to list of strings.
+
+        Args:
+            topics_string: Comma-separated string, e.g., "AI/ML,NLP,Deep Learning"
+
+        Returns:
+            List of topic strings, e.g., ["AI/ML", "NLP", "Deep Learning"]
+            Always returns a list (empty list if None/empty string)
+
+        Edge cases:
+            - None or empty string returns empty list []
+            - Strips whitespace from each topic
+            - Filters out empty strings after split
+        """
+        if not topics_string or not isinstance(topics_string, str):
+            return []
+
+        # Split by comma, strip whitespace, filter empty strings
+        topics = [topic.strip()
+                  for topic in topics_string.split(',') if topic.strip()]
+
+        return topics
 
 
 @dataclass
