@@ -1,8 +1,8 @@
 Ars Technica:
-  type: rss
+  type: html
   url: https://arstechnica.com/ai/
   filename: Ars_Technica
-  rss: https://arstechnica.com/ai/feed/
+  # rss: https://arstechnica.com/ai/feed/
   # filter_24h: true   # Filter RSS articles to last 24 hours (default: true)
   include:
   - ^https://arstechnica.com/(\w+)/(\d+)/(\d+)/

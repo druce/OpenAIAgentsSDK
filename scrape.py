@@ -12,35 +12,45 @@ https://github.com/fhamborg/news-please
 # pylint: disable=W1401  # backslash in RE
 
 import asyncio
-import re
-import os
-import logging
-from urllib.parse import urljoin, urlparse
+import datetime
+
 # import pdb
 import json
-from typing import Dict, List, Tuple, Optional, Union, Any
+import logging
+import os
+import random
+import re
+import time
 from collections import defaultdict
 from dataclasses import dataclass
-from time import monotonic
-
-import random
-import time
-import datetime
 from pathlib import Path
-from dateutil import parser as date_parser
+from time import monotonic
+from typing import Any, Dict, List, Optional, Tuple, Union
+from urllib.parse import urljoin, urlparse
 
 import requests
-from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Error as PlaywrightError
-from playwright_stealth import Stealth
 import tiktoken
-
 import trafilatura
+from bs4 import BeautifulSoup
+from dateutil import parser as date_parser
+from playwright.async_api import Browser, BrowserContext
+from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import Page, async_playwright
+from playwright_stealth import Stealth
 
 # from log_handler import log  # Replaced with standard logging
-from config import (DOWNLOAD_DIR, IGNORE_LIST, PAGES_DIR, FIREFOX_PROFILE_PATH,  # SCREENSHOT_DIR,
-                    MIN_TITLE_LEN, SLEEP_TIME, MAX_TOKENS, DOMAIN_RATE_LIMIT,
-                    SHORT_REQUEST_TIMEOUT, DEFAULT_CONCURRENCY)
+from config import (  # SCREENSHOT_DIR,
+    DEFAULT_CONCURRENCY,
+    DOMAIN_RATE_LIMIT,
+    DOWNLOAD_DIR,
+    FIREFOX_PROFILE_PATH,
+    IGNORE_LIST,
+    MAX_TOKENS,
+    MIN_TITLE_LEN,
+    PAGES_DIR,
+    SHORT_REQUEST_TIMEOUT,
+    SLEEP_TIME,
+)
 
 # Module-level logger for default logging
 # when calling from high level function, pass logger=logger but this is here as a default
@@ -474,6 +484,24 @@ async def _create_browser_context(p: Any) -> BrowserContext:
     return b
 
 
+async def enable_fast_mode(page, logger=None, block_types=None) -> None:
+    """Abort heavy resources to speed up page loads."""
+    logger = logger or _logger
+    # blocked_types = block_types or {"image", "media", "font", "stylesheet"}
+    blocked_types = block_types or {"image", "media", "font"}
+
+    async def _route_handler(route):
+        try:
+            if route.request.resource_type in blocked_types:
+                await route.abort()
+            else:
+                await route.continue_()
+        except Exception as exc:
+            logger.debug(f"route handler error: {exc}")
+
+    await page.route("**/*", _route_handler)
+
+
 async def apply_stealth_script(context: BrowserContext) -> None:
     """Apply stealth settings to a new page using playwright_stealth."""
     stealth = Stealth()
@@ -696,14 +724,14 @@ async def scrape_urls_concurrent(
 
 
 async def scrape_url(url: str,
-                     title: str,
-                     browser_context: Optional[BrowserContext] = None,
-                     click_xpath: Optional[str] = None,
-                     scrolls: int = 0,
-                     scroll_div: str = "",
-                     initial_sleep: float = SLEEP_TIME,
-                     destination: str = PAGES_DIR,
-                     logger: Optional[logging.Logger] = None) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[int]]:
+                    title: str,
+                    browser_context: Optional[BrowserContext],
+                    click_xpath: Optional[str] = None,
+                    scrolls: int = 0,
+                    scroll_div: str = "",
+                    initial_sleep: float = SLEEP_TIME,
+                    destination: str = PAGES_DIR,
+                    logger: Optional[logging.Logger] = None) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[int]]:
     """
     scrapes a URL using a Playwright browser context.
 
@@ -744,6 +772,8 @@ async def scrape_url(url: str,
         # if file does not exist, download
         logger.info(f"Downloading {url}")
         page = await browser_context.new_page()
+        # don't get images, fonts, stylesheets, etc to speed up page load
+        await enable_fast_mode(page, logger=logger)
         response = await page.goto(url, timeout=SHORT_REQUEST_TIMEOUT*1000, wait_until='domcontentloaded')
         status = response.status if response else None
         logger.info(f"Response: {status}")

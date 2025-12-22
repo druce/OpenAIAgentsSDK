@@ -23,17 +23,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import dotenv
+import markdown
 
 # import pickle
 import numpy as np
-from numpy._core.numeric import False_
 import pandas as pd
 
 # from httpx import head
 import tldextract
-
-import markdown
-
 from agents import (
     Agent,
     FunctionTool,
@@ -47,9 +44,8 @@ from agents import (
 # from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from IPython.display import display  # HTML, Image, Markdown,
-from openai import AsyncOpenAI
-from openai import OpenAI  # for embeddings
-
+from numpy._core.numeric import False_
+from openai import AsyncOpenAI, OpenAI
 from pydantic import BaseModel, Field
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -69,7 +65,6 @@ from do_dedupe import process_dataframe_with_filtering
 from do_rating import bradley_terry, fn_rate_articles
 from fetch import Fetcher
 from llm import LLMagent, get_langfuse_client, paginate_df_async
-
 from log_handler import SQLiteLogHandler
 from newsletter_state import NewsletterAgentState
 from scrape import normalize_html, scrape_urls_concurrent
@@ -995,7 +990,7 @@ class FilterUrlsTool:
 
             if self.logger:
                 self.logger.info(
-                    f"🔍 Filtering {total_articles} headlines for AI relevance using LLM...")
+                    f"🔍 Filtering {len(headline_df)} headlines for AI relevance using LLM...")
 
             filter_system_prompt, filter_user_prompt, model, reasoning_effort = \
                 get_langfuse_client(logger=self.logger).get_prompt(
@@ -1108,9 +1103,22 @@ class DownloadArticlesTool:
             ai_related_count = sum(
                 1 for article in state.headline_data if article.get('isAI') is True)
             total_count = len(state.headline_data)
-            # todo: count downloaded articles with path configured
-            # check if they exist in download directory
-            return f"Step 3 already completed! Filtered {total_count} articles, {ai_related_count} identified as AI-related."
+
+            # Count downloaded articles with files
+            downloaded_count = sum(
+                1 for article in state.headline_data
+                if article.get('isAI') is True
+                and article.get('html_path')
+            )
+
+            # Count articles with text files (successfully processed)
+            text_files_count = sum(
+                1 for article in state.headline_data
+                if article.get('isAI') is True
+                and article.get('text_path')
+            )
+
+            return f"✅ Step 3 already completed! Total articles: {total_count}; AI-related articles: {ai_related_count}; HTML files: {downloaded_count}; Text files: {text_files_count}"
 
         # Check if step 2 is completed and no errors
         if not state.is_step_complete("filter_urls"):
@@ -1203,11 +1211,11 @@ class DownloadArticlesTool:
 
                         if self.logger:
                             self.logger.debug(
-                                f"Successfully extracted content to {text_path}: {len(content)} characters")
+                                f"[id={row.id}] Successfully extracted content to {text_path}: {len(content)} characters")
                     except Exception as e:
                         if self.logger:
                             self.logger.warning(
-                                f"Failed to extract content from {row.html_path}: {e}")
+                                f"[id={row.id}] Failed to extract content from {row.html_path}: {e}")
                         ai_df.loc[row.Index, 'text_path'] = ''
                         ai_df.loc[row.Index, 'content_length'] = 0
                 else:
@@ -1387,7 +1395,7 @@ class DownloadArticlesTool:
                         except Exception as e:
                             if self.logger:
                                 self.logger.warning(
-                                    f"Failed to update URL record for {original_url}: {e}")
+                                    f"[id={row.id}] Failed to update URL record for {original_url}: {e}")
 
                 if self.logger and urls_updated > 0:
                     self.logger.info(
@@ -1407,6 +1415,12 @@ class DownloadArticlesTool:
             avg_article_length = total_length / \
                 successful_downloads if successful_downloads > 0 else 0
 
+            # Calculate counts for status message (matching format from line 1121)
+            total_count = len(state.headline_data)  # Get total before updating
+            ai_related_count = len(ai_df)
+            downloaded_count = len(ai_df[ai_df['html_path'].fillna('').astype(bool)])
+            text_files_count = len(ai_df[ai_df['text_path'].fillna('').astype(bool)])
+
             # Store updated headline data in state
             state.headline_data = ai_df.to_dict('records')
 
@@ -1421,9 +1435,7 @@ class DownloadArticlesTool:
                 print(
                     f"✅ Completed Step 3: Downloaded {successful_downloads} AI-related articles")
 
-            status_msg = f"✅ Step 3 {step_name} completed successfully! Downloaded {successful_downloads} AI-related articles with {download_success_rate:.0%} success rate."
-            status_msg += f"\n📊 Average article length: {avg_article_length:.0f} characters"
-            status_msg += "\n🔗 Content stored in persistent state."
+            status_msg = f"✅ Step 3 {step_name} completed successfully! Total articles: {total_count}; AI-related articles: {ai_related_count}; HTML files: {downloaded_count}; Text files: {text_files_count}"
             if self.logger:
                 self.logger.info(
                     f"Completed Step 3: Downloaded {successful_downloads} articles")
