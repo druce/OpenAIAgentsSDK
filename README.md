@@ -16,9 +16,9 @@ This system gathers news articles from RSS feeds, HTML scraping targets, and RES
 
       Step3 --> Step4[4: LLM Summarization<br/>Bullet-point summaries]
 
-      Step4 --> Step5[5: Cluster by Topic<br/>HDBSCAN + Embeddings]
+      Step4 --> Step5[5: Rate Articles<br/>Identify<br/>on-topic, high quality<br/>using Elo-type Comparisons]
 
-      Step5 --> Step6[6: Rate Articles<br/>Identify<br/>on-topic, high quality<br/>using Elo-type Comparisons]
+      Step5 --> Step6[6: Cluster by Topic<br/>HDBSCAN + Embeddings]
 
       Step6 --> Step7[7: Select Sections<br/>Top Articles by Topic<br/>Newsletter Outline]
 
@@ -99,52 +99,52 @@ The newsletter generation follows a structured 9-step process with persistent st
 ### Step 2: Filter URLs 🔍
 
 - **AI Classification**: Uses LLM to identify AI-related content
-- **Dedupe**: Filters out articles seen before by matching URL or title/source (with date override to rerun)
-- **Batch Processing**: Efficiently processes articles in batches
+- **Dedupe**: Filters out articles seen before in SQLite by matching URL or title+source 
+- **Batch Processing**: Filterly URL in asynchronous batches with retry
 - **Output**: ~200 AI-related articles (typical 50% filter rate on 400+ new articles per day)
 
 ### Step 3: Download Articles ⬇️
 
 - **Concurrent Scraping**: Parallel asynchronous Playwright workers with per-domain rate limiting
 - **Output**:
-  - Redirect URLs
-  - Clean article content (trafilatura extraction)
+  - Canonical URLs
+  - Normalized article content (Trafilatura extraction)
   - Article metadata (publication date, open graph metadata)
-  - Dedupe using embeddings + cosine similarity for e.g. syndicated articles on different URLs
+  - Dedupe full text using embeddings + cosine similarity for e.g. syndicated articles on different URLs
 
 ### Step 4: Extract Summaries 📝
 
 - **AI Summarization**: Generates bullet-point summaries for each article
-- **Key Insights**: Identifies main technological developments and business implications
-- **Output**: 3-point summaries stored in persistent state
+- **Key Insights**: Identifies main developments and business implications
+- **Output**: 3-point summaries
 
-### Step 5: Cluster by Topic 🏷️
+### Step 5: Rate Articles ⭐
 
-- **Categories**: Apply free-form topics and canonical topics like AI Safety & Ethics, OpenAI, etc. via prompts; ask LLM to identify a few top topics that match articles
-- **Thematic Grouping**: Organize articles into topic  using HDBSCAN over dimensionality-reduced embeddings
-- **Output**: Topic tags and 
-
-### Step 6: Rate Articles ⭐
-
-- **Quality Scoring**: Assigns quality ratings (1-10) to each article using a prompt and ELO type importance comparisons
-- **Relevance**: Initial pass: it it spammy, on-topic, important? use LLM and output logrobs
-- **Quality**: Run battles asking LLM to compare articles according to a rubric: quality, impact, novelty, etc.
-- **Reputation**: articles from reputable sources get boost points
-- **Recency**: downrate old articles
-- **Frequency**: If same story is covered by several articles, pick highest rated and boost points based on how many articles cover same set of facts
+- **Quality Scoring**: Assigns quality ratings (~0-10) to each article using a prompt and ELO type importance comparisons
+- **Relevance**: First pass: it it spammy, on-topic, important? use LLM as binary classifier and output logrobs
+- **Quality**: Run battles asking LLM to compare/rank small batches of articles according to an LLM rubric: quality, impact, novelty, etc.
+- **Reputation**: articles from reputable sources get bonus points
+- **Recency**: older articles get docked points
+- **Frequency**: If same story is covered by several articles, pick only highest rated and boost points based on how many articles cover same set of facts
 - **Output**: Deduped articles with ratings
+
+### Step 6: Cluster by Topic 🏷️
+
+- **Categories**: Extract free-form topics and canonical topics like AI Safety & Ethics, OpenAI, etc. via prompts; ask LLM to identify a few top topics that match articles
+- **Thematic Grouping**: Organize articles into topic  using HDBSCAN over dimensionality-reduced embeddings
+- **Output**: ~7 Topic tags per article and major clusters 
 
 ### Step 7: Select Sections 📑
 
-- **Newsletter Structure**: Chooses top articles for each section
+- **Newsletter Structure**: Chooses sections, articles for each section
 - **Content Planning**: Organizes articles by topic 
 - **Output**: Newsletter section outline with assigned articles
 
 ### Step 8: Draft Sections ✍️
 
-- **Content Creation**: Writes engaging headlines and content for each section
+- **Content Creation**: Write engaging headlines and content for each section
 - **Section Critique**: LLM evaluates section quality and provides improvement feedback
-- **Iterative Refinement**: Applies critique to improve section quality (up to 3 iterations)
+- **Iterative Refinement**: Applies critique to improve section quality, rewriting, moving or deleting articles (up to 3 iterations)
 - **Output**: Polished newsletter sections with quality scores
 
 ### Step 9: Finalize Newsletter 🎉
@@ -173,14 +173,16 @@ The newsletter generation follows a structured 9-step process with persistent st
 - `sources.yaml`: Configuration for 17+ news sources
 - `fetch.py`: Async fetching system with concurrency control
 - `scrape.py`: Advanced web scraping with Playwright and stealth features
+- `llm.py`: Functions to apply prompts to pandas dataframes, sending batches of rows async with retry.
 
-#### State Persistence
+#### Agent State Logic
 
-- SQLite-based workflow state storage
-- Resumable execution from any step
-- Comprehensive error handling and recovery
-
-### Key Features
+- Top-level agent has a state and a set of tools
+- Each node is a tool with 1 or more agent objects which are initialized with prompts from Langfuse
+- Each node serializes the state to SQLite when it is complete and returns a string reprsentation of its status.
+- The global state has a string representation, e.g. results from all nodes, and tools can inspect the state
+- We can prompt the top level agent with, "run all steps in sequence", and it will iteratively inspect the current state and run the next logical step until flow is compete
+- If there are errors we can fix them or reload previous states and resume from any step.
 
 #### RSS Source Processing
 
@@ -202,48 +204,13 @@ The newsletter generation follows a structured 9-step process with persistent st
 
 #### AI Integration
 
-- GPT-5-nano for headline classification
-- GPT-4o for content summarization and newsletter writing
+- Prompts are stored in Langfuse with model and effort level, enabling evals to select most efficient model.
 - Structured output with Pydantic validation
+- Typically GPT-5-nano for headline classification
+- Typically GPT-5-mini for tasks requiring more intelligence
+- Could use GPT-5.2 for final section writing and polish, but takes longer and more expensive.
+- GPT-4o where we want logprobs
 - Critic-optimizer loops with quality scoring and iterative refinement
-
-## 📓 Interactive Development: test_agent.ipynb
-
-The `test_agent.ipynb` notebook provides an interactive development environment for testing and refining the newsletter generation workflow. This notebook is essential for:
-
-### Development Features
-
-#### Step-by-Step Execution
-
-- Run individual workflow steps in isolation
-- Inspect intermediate results and data transformations
-- Debug issues with detailed logging and output
-
-#### Data Exploration
-
-- Visualize article classification results
-- Analyze topic clustering effectiveness
-- Review content quality and summary generation
-
-#### Configuration Testing
-
-- Test different LLM models and prompts
-- Experiment with source configurations
-- Validate filtering and rating parameters
-
-#### State Management
-
-- Load and inspect persistent workflow state
-- Reset workflow to specific steps for testing
-- Export results for analysis
-
-### Notebook Structure
-
-1. **Environment Setup**: API keys, imports, and configuration
-2. **Agent Initialization**: Create newsletter agent with persistent state
-3. **Step Execution**: Run individual workflow steps with detailed output
-4. **Data Analysis**: Explore results, visualize metrics, and validate quality
-5. **Testing & Debugging**: Troubleshoot issues and optimize parameters
 
 ### Usage Examples
 
