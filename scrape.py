@@ -724,14 +724,14 @@ async def scrape_urls_concurrent(
 
 
 async def scrape_url(url: str,
-                    title: str,
-                    browser_context: Optional[BrowserContext],
-                    click_xpath: Optional[str] = None,
-                    scrolls: int = 0,
-                    scroll_div: str = "",
-                    initial_sleep: float = SLEEP_TIME,
-                    destination: str = PAGES_DIR,
-                    logger: Optional[logging.Logger] = None) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[int]]:
+                     title: str,
+                     browser_context: Optional[BrowserContext],
+                     click_xpath: Optional[str] = None,
+                     scrolls: int = 0,
+                     scroll_div: str = "",
+                     initial_sleep: float = SLEEP_TIME,
+                     destination: str = PAGES_DIR,
+                     logger: Optional[logging.Logger] = None) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[int]]:
     """
     scrapes a URL using a Playwright browser context.
 
