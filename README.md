@@ -18,7 +18,7 @@ This system gathers news articles from RSS feeds, HTML scraping targets, and RES
 
       Step4 --> Step5[5: Rate Articles<br/>Identify<br/>on-topic, high quality<br/>using Elo-type Comparisons]
 
-      Step5 --> Step6[6: Cluster by Topic<br/>HDBSCAN + Embeddings]
+      Step5 --> Step6[6: Cluster by Topic<br/>HDBSCAN Clustering on<br/>UMAP dimensionality reduced<br/>Embeddings]
 
       Step6 --> Step7[7: Select Sections<br/>Top Articles by Topic<br/>Newsletter Outline]
 
