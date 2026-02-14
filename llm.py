@@ -24,33 +24,32 @@ import asyncio
 import json
 import logging
 import math
-from typing import Any, Dict, List, Type, Optional, Tuple
-from pydantic import BaseModel, ValidationError
-import pandas as pd
 import os
+from typing import Any, Dict, List, Optional, Tuple, Type, get_args, get_origin
 
 import openai
+import pandas as pd
+from agents import Agent, Runner
 from openai import AsyncOpenAI, BadRequestError
+from pydantic import BaseModel, ValidationError
 from tenacity import (
+    before_sleep_log,
     retry,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
-    before_sleep_log
 )
 
-from config import DEFAULT_CONCURRENCY
-from agents import Agent, Runner
-
 import langfuse
+from config import DEFAULT_CONCURRENCY
 
 _logger = logging.getLogger(__name__)
 
 # Global singleton LangfuseClient for reuse across calls
-_global_langfuse_client: Optional['LangfuseClient'] = None
+_global_langfuse_client: Optional["LangfuseClient"] = None
 
 
-def get_langfuse_client(logger: Optional[logging.Logger] = None) -> 'LangfuseClient':
+def get_langfuse_client(logger: Optional[logging.Logger] = None) -> "LangfuseClient":
     """
     Get or create singleton LangfuseClient.
 
@@ -69,18 +68,20 @@ def get_langfuse_client(logger: Optional[logging.Logger] = None) -> 'LangfuseCli
 async def paginate_df_async(df: pd.DataFrame, chunk_size: int = 25):
     """Async generator for DataFrame pagination."""
     for i in range(0, len(df), chunk_size):
-        yield df.iloc[i:i + chunk_size]
+        yield df.iloc[i : i + chunk_size]
         await asyncio.sleep(0)  # Allow other tasks to run
 
 
 async def paginate_list_async(lst, chunk_size: int = 25):
     """Async generator for list pagination."""
     for i in range(0, len(lst), chunk_size):
-        yield lst[i:i + chunk_size]
+        yield lst[i : i + chunk_size]
         await asyncio.sleep(0)  # Allow other tasks to run
 
 
-def _introspect_output_type(output_type: Type[BaseModel]) -> tuple[Optional[str], Optional[str]]:
+def _introspect_output_type(
+    output_type: Type[BaseModel],
+) -> tuple[Optional[str], Optional[str]]:
     """
     Introspect a Pydantic model to find list field and value field.
 
@@ -92,7 +93,6 @@ def _introspect_output_type(output_type: Type[BaseModel]) -> tuple[Optional[str]
         - item_list_field: Name of the field containing List[X]
         - value_field: Name of the non-id field in the inner model X
     """
-    import typing
 
     item_list_field = None
     value_field = None
@@ -103,20 +103,23 @@ def _introspect_output_type(output_type: Type[BaseModel]) -> tuple[Optional[str]
         field_type = field_info.annotation
 
         # Check if it's a List type
-        origin = typing.get_origin(field_type)
+        origin = get_origin(field_type)
         if origin is list or origin is List:
             item_list_field = field_name
 
             # Get the inner type of the list
-            args = typing.get_args(field_type)
+            args = get_args(field_type)
             if args and len(args) > 0:
                 inner_type = args[0]
 
                 # If inner type is a BaseModel, find the non-id field
                 if isinstance(inner_type, type) and issubclass(inner_type, BaseModel):
                     inner_fields = inner_type.model_fields
-                    non_id_fields = [name for name in inner_fields.keys()
-                                     if name.lower() not in ('id', 'index')]
+                    non_id_fields = [
+                        name
+                        for name in inner_fields.keys()
+                        if name.lower() not in ("id", "index")
+                    ]
 
                     # If exactly one non-id field, use it as value_field
                     if len(non_id_fields) == 1:
@@ -151,9 +154,9 @@ class LangfuseClient:
             self.logger.info("Initialized LangfuseClient")
 
     @retry(
-        retry=retry_if_exception_type((
-            Exception,  # Catch all exceptions for Langfuse API calls
-        )),
+        retry=retry_if_exception_type(
+            (Exception,)  # Catch all exceptions for Langfuse API calls
+        ),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
         before_sleep=before_sleep_log(_logger, logging.WARNING),
@@ -175,40 +178,44 @@ class LangfuseClient:
         try:
             if self.logger:
                 self.logger.debug(
-                    f"Attempting to retrieve prompt '{prompt_name}' from Langfuse")
+                    f"Attempting to retrieve prompt '{prompt_name}' from Langfuse"
+                )
 
             # Get prompt from Langfuse
             lf_prompt = self.client.get_prompt(prompt_name)
 
             if self.logger:
-                self.logger.info(
-                    f"Retrieved prompt '{prompt_name}' from Langfuse")
+                self.logger.info(f"Retrieved prompt '{prompt_name}' from Langfuse")
 
             # Validate prompt structure
-            if not hasattr(lf_prompt, 'prompt') or not isinstance(lf_prompt.prompt, list):
+            if not hasattr(lf_prompt, "prompt") or not isinstance(
+                lf_prompt.prompt, list
+            ):
                 raise ValueError(
-                    f"Invalid prompt format for '{prompt_name}': missing or invalid 'prompt' field")
+                    f"Invalid prompt format for '{prompt_name}': missing or invalid 'prompt' field"
+                )
 
             if len(lf_prompt.prompt) < 2:
                 raise ValueError(
-                    f"Invalid prompt format for '{prompt_name}': expected at least 2 prompt parts (system, user)")
+                    f"Invalid prompt format for '{prompt_name}': expected at least 2 prompt parts (system, user)"
+                )
 
             # Extract system and user prompts
             try:
-                system_prompt = lf_prompt.prompt[0]['content']
-                user_prompt = lf_prompt.prompt[1]['content']
+                system_prompt = lf_prompt.prompt[0]["content"]
+                user_prompt = lf_prompt.prompt[1]["content"]
             except (KeyError, IndexError) as e:
-                raise ValueError(
-                    f"Invalid prompt structure for '{prompt_name}': {e}")
+                raise ValueError(f"Invalid prompt structure for '{prompt_name}': {e}")
 
             # Extract configuration
-            config = lf_prompt.config if hasattr(lf_prompt, 'config') else {}
+            config = lf_prompt.config if hasattr(lf_prompt, "config") else {}
             model = config.get("model", "gpt-5")
             reasoning_effort = config.get("reasoning_effort", "medium")
 
             if self.logger:
                 self.logger.info(
-                    f"Parsed prompt '{prompt_name}': model={model}, reasoning_effort={reasoning_effort}, system_len={len(system_prompt)}, user_len={len(user_prompt)}")
+                    f"Parsed prompt '{prompt_name}': model={model}, reasoning_effort={reasoning_effort}, system_len={len(system_prompt)}, user_len={len(user_prompt)}"
+                )
 
             return (system_prompt, user_prompt, model, reasoning_effort)
 
@@ -218,8 +225,13 @@ class LangfuseClient:
                 self.logger.error(error_msg)
             raise Exception(error_msg) from e
 
-    def create_llm_agent(self, prompt_name: str, output_type: Type[BaseModel],
-                         verbose: bool = False, logger: Optional[logging.Logger] = None) -> 'LLMagent':
+    def create_llm_agent(
+        self,
+        prompt_name: str,
+        output_type: Type[BaseModel],
+        verbose: bool = False,
+        logger: Optional[logging.Logger] = None,
+    ) -> "LLMagent":
         """
         Convenience method to create an LLMagent from a Langfuse prompt.
 
@@ -241,7 +253,7 @@ class LangfuseClient:
             model=prompt_data[2],
             reasoning_effort=prompt_data[3],
             verbose=verbose,
-            logger=logger or self.logger
+            logger=logger or self.logger,
         )
 
 
@@ -257,16 +269,18 @@ class LLMagent(Agent):
     - Pydantic output validation
     """
 
-    def __init__(self,
-                 system_prompt: str,
-                 user_prompt: str,
-                 output_type: Type[BaseModel],
-                 model: str,
-                 verbose: bool = False,
-                 logger: Optional[logging.Logger] = None,
-                 reasoning_effort: Optional[str] = None,
-                 trace_enable: Optional[bool] = None,
-                 trace_tag_list: Optional[List[str]] = None):
+    def __init__(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        output_type: Type[BaseModel],
+        model: str,
+        verbose: bool = False,
+        logger: Optional[logging.Logger] = None,
+        reasoning_effort: Optional[str] = None,
+        trace_enable: Optional[bool] = None,
+        trace_tag_list: Optional[List[str]] = None,
+    ):
         """
         Initialize the LLMagent
 
@@ -285,7 +299,7 @@ class LLMagent(Agent):
             name="LLMagent",
             model=model,
             instructions=system_prompt,
-            output_type=output_type
+            output_type=output_type,
         )
         self.system_prompt = system_prompt
         self.user_prompt = user_prompt
@@ -304,28 +318,35 @@ class LLMagent(Agent):
         self.reasoning_effort = reasoning_effort
 
         # Configure Langfuse tracing
-        env_trace_enable = os.getenv(
-            'LANGFUSE_TRACING_ENABLED', 'false').lower() == 'true'
-        self.trace_enable = trace_enable if trace_enable is not None else env_trace_enable
+        env_trace_enable = (
+            os.getenv("LANGFUSE_TRACING_ENABLED", "false").lower() == "true"
+        )
+        self.trace_enable = (
+            trace_enable if trace_enable is not None else env_trace_enable
+        )
 
         # Initialize appropriate OpenAI client
         if self.trace_enable:
             try:
                 from langfuse.openai import AsyncOpenAI as LangfuseAsyncOpenAI
+
                 self.openai_client = LangfuseAsyncOpenAI()
                 if self.verbose:
                     self.logger.info(
-                        f"Initialized with Langfuse tracing enabled (tags: {self.trace_tag})")
+                        f"Initialized with Langfuse tracing enabled (tags: {self.trace_tag})"
+                    )
             except ImportError:
                 self.logger.warning(
-                    "Langfuse tracing requested but langfuse.openai not available, using standard client")
+                    "Langfuse tracing requested but langfuse.openai not available, using standard client"
+                )
                 self.openai_client = AsyncOpenAI()
                 self.trace_enable = False
         else:
             self.openai_client = AsyncOpenAI()
 
         if self.verbose:
-            self.logger.info(f"""Initialized LLMagent:
+            self.logger.info(
+                f"""Initialized LLMagent:
 system_prompt: {self.system_prompt}
 user_prompt: {self.user_prompt}
 output_type: {output_type.__name__}
@@ -333,7 +354,8 @@ model: {self.model}
 trace_enable: {self.trace_enable}
 trace_tag: {self.trace_tag}
 schema: {json.dumps(output_type.model_json_schema(), indent=2)}
-""")
+"""
+            )
 
     def _build_langfuse_metadata(self) -> Dict[str, Any]:
         """
@@ -365,19 +387,20 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             formatted_user = self.user_prompt.format(**variables)
             return formatted_user
         except KeyError as e:
-            raise ValueError(
-                f"Missing required variable in prompt template: {e}")
+            raise ValueError(f"Missing required variable in prompt template: {e}")
         except Exception as e:
             raise ValueError(f"Error formatting prompts: {e}")
 
     @retry(
-        retry=retry_if_exception_type((
-            openai.APIConnectionError,
-            openai.APITimeoutError,
-            openai.InternalServerError,
-            # Retry on Pydantic validation errors (e.g., LLM returned wrong schema)
-            ValidationError,
-        )),
+        retry=retry_if_exception_type(
+            (
+                openai.APIConnectionError,
+                openai.APITimeoutError,
+                openai.InternalServerError,
+                # Retry on Pydantic validation errors (e.g., LLM returned wrong schema)
+                ValidationError,
+            )
+        ),
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=1, min=1, max=30),
         before_sleep=before_sleep_log(_logger, logging.WARNING),
@@ -414,21 +437,25 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         if self.verbose:
             self.logger.info(f"Result: {results}")
 
-        return results.final_output if hasattr(results, 'final_output') else results
+        return results.final_output if hasattr(results, "final_output") else results
 
     @retry(
-        retry=retry_if_exception_type((
-            openai.APIConnectionError,
-            openai.APITimeoutError,
-            openai.InternalServerError,
-            # Retry on Pydantic validation errors (e.g., LLM returned wrong schema)
-            ValidationError,
-        )),
+        retry=retry_if_exception_type(
+            (
+                openai.APIConnectionError,
+                openai.APITimeoutError,
+                openai.InternalServerError,
+                # Retry on Pydantic validation errors (e.g., LLM returned wrong schema)
+                ValidationError,
+            )
+        ),
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=1, min=1, max=30),
         before_sleep=before_sleep_log(_logger, logging.WARNING),
     )
-    async def prompt_dict_chat(self, variables: Dict[str, Any], reasoning_effort: Optional[str] = None) -> Any:
+    async def prompt_dict_chat(
+        self, variables: Dict[str, Any], reasoning_effort: Optional[str] = None
+    ) -> Any:
         """
         Make a single LLM call using OpenAI chat completions API directly
 
@@ -448,10 +475,15 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             self.logger.info(f"User message: {user_message}")
 
         # Determine reasoning_effort to use (parameter overrides instance attribute)
-        effective_reasoning_effort = reasoning_effort if reasoning_effort is not None else self.reasoning_effort
+        effective_reasoning_effort = (
+            reasoning_effort if reasoning_effort is not None else self.reasoning_effort
+        )
 
         # Check if reasoning_effort is requested but not supported
-        if effective_reasoning_effort is not None and not self._supports_reasoning_effort():
+        if (
+            effective_reasoning_effort is not None
+            and not self._supports_reasoning_effort()
+        ):
             self.logger.warning(
                 f"reasoning_effort='{effective_reasoning_effort}' specified but model '{self.model}' "
                 f"does not support this parameter. It will be ignored."
@@ -464,7 +496,7 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         # Prepare messages for chat completion
         messages = [
             {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": user_message}
+            {"role": "user", "content": user_message},
         ]
 
         # Note: Langfuse tracing is handled automatically by langfuse.openai.AsyncOpenAI wrapper
@@ -479,10 +511,10 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                     "type": "json_schema",
                     "json_schema": {
                         "name": "structured_response",
-                        "schema": self.output_type.model_json_schema()
-                    }
+                        "schema": self.output_type.model_json_schema(),
+                    },
                 },
-                "safety_identifier": "news_agent"
+                "safety_identifier": "news_agent",
             }
 
             # Only add metadata when Langfuse tracing is enabled
@@ -495,16 +527,16 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                 api_params["reasoning_effort"] = effective_reasoning_effort
                 if self.verbose:
                     self.logger.info(
-                        f"Using reasoning_effort: {effective_reasoning_effort}")
+                        f"Using reasoning_effort: {effective_reasoning_effort}"
+                    )
 
             # Make the chat completion call with structured output
             response = await client.chat.completions.create(**api_params)
 
             # Check for refusal
             message = response.choices[0].message
-            if hasattr(message, 'refusal') and message.refusal:
-                self.logger.error(
-                    f"LLM refused request. User message: {user_message}")
+            if hasattr(message, "refusal") and message.refusal:
+                self.logger.error(f"LLM refused request. User message: {user_message}")
                 self.logger.error(f"Refusal reason: {message.refusal}")
                 raise ValueError(f"LLM refused the request: {message.refusal}")
 
@@ -528,8 +560,7 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
 
         except BadRequestError as e:
             self.logger.error(f"BadRequestError: {e}")
-            self.logger.error(
-                f"User message that caused error: {user_message}")
+            self.logger.error(f"User message that caused error: {user_message}")
             raise
 
         if self.verbose:
@@ -546,8 +577,14 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         """
         # Models that support logprobs
         logprobs_supported_models = {
-            "gpt-4.1-mini", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-nano",
-            "gpt-4o", "gpt-4-turbo", "gpt-4", "gpt-3.5-turbo"
+            "gpt-4.1-mini",
+            "gpt-4o-mini",
+            "gpt-4.1",
+            "gpt-4.1-nano",
+            "gpt-4o",
+            "gpt-4-turbo",
+            "gpt-4",
+            "gpt-3.5-turbo",
         }
 
         # Check exact match or partial match for versioned models
@@ -570,9 +607,7 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             bool: True if model supports reasoning_effort, False otherwise
         """
         # Models that support reasoning_effort (reasoning models only)
-        reasoning_models = {
-            "o1", "o1-preview", "o3-mini", "gpt-5"
-        }
+        reasoning_models = {"o1", "o1-preview", "o3-mini", "gpt-5"}
 
         # Check exact match or partial match for versioned models
         model_name = self.model.lower()
@@ -586,7 +621,9 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
 
         return False
 
-    def _extract_token_probabilities(self, logprobs_data: Dict, target_tokens: List[str]) -> Dict[str, float]:
+    def _extract_token_probabilities(
+        self, logprobs_data: Dict, target_tokens: List[str]
+    ) -> Dict[str, float]:
         """
         Extract probabilities for specific target tokens from OpenAI logprobs response.
 
@@ -597,14 +634,15 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         Returns:
             Dict mapping token to probability (e.g., {"1": 0.85, "0": 0.15})
         """
-        if not logprobs_data or getattr(logprobs_data, 'content', None) is None:
+        if not logprobs_data or getattr(logprobs_data, "content", None) is None:
             raise ValueError(
-                "Invalid logprobs_data. Must contain 'content' key with non-None value.")
+                "Invalid logprobs_data. Must contain 'content' key with non-None value."
+            )
 
         # Look at the first token's logprobs (for binary classification, answer should be first token)
         first_token_logprobs = logprobs_data.content[0]
 
-        if not hasattr(first_token_logprobs, 'top_logprobs'):
+        if not hasattr(first_token_logprobs, "top_logprobs"):
             raise ValueError(
                 "Invalid first_token_logprobs. Could not find 'top_logprobs' key or 'top_logprobs' is empty."
             )
@@ -626,16 +664,20 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         return result
 
     @retry(
-        retry=retry_if_exception_type((
-            openai.APIConnectionError,
-            openai.APITimeoutError,
-            openai.InternalServerError
-        )),
+        retry=retry_if_exception_type(
+            (
+                openai.APIConnectionError,
+                openai.APITimeoutError,
+                openai.InternalServerError,
+            )
+        ),
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=1, min=1, max=30),
         before_sleep=before_sleep_log(_logger, logging.WARNING),
     )
-    async def prompt_dict_chat_probs(self, variables: Dict[str, Any], top_logprobs: int = 5) -> Tuple[str, Dict]:
+    async def prompt_dict_chat_probs(
+        self, variables: Dict[str, Any], top_logprobs: int = 5
+    ) -> Tuple[str, Dict]:
         """
         Make a single LLM call with logprobs enabled (no structured output).
 
@@ -653,8 +695,13 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             ValueError: If model doesn't support logprobs
         """
         if not self._supports_logprobs():
-            supported_models = ["gpt-4.1-mini", "gpt-4o-mini",
-                                "gpt-4.1", "gpt-4o", "gpt-4-turbo"]
+            supported_models = [
+                "gpt-4.1-mini",
+                "gpt-4o-mini",
+                "gpt-4.1",
+                "gpt-4o",
+                "gpt-4-turbo",
+            ]
             raise ValueError(
                 f"Model '{self.model}' does not support logprobs. "
                 f"Supported models: {supported_models}"
@@ -672,7 +719,7 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         # Prepare messages for chat completion
         messages = [
             {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": user_message}
+            {"role": "user", "content": user_message},
         ]
 
         # Note: Langfuse tracing is handled automatically by langfuse.openai.AsyncOpenAI wrapper
@@ -685,7 +732,7 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                 "messages": messages,
                 "logprobs": True,
                 "top_logprobs": top_logprobs,
-                "safety_identifier": "news_agent"
+                "safety_identifier": "news_agent",
             }
 
             # Only add metadata when Langfuse tracing is enabled
@@ -698,9 +745,8 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
 
             # Check for refusal
             message = response.choices[0].message
-            if hasattr(message, 'refusal') and message.refusal:
-                self.logger.error(
-                    f"LLM refused request. User message: {user_message}")
+            if hasattr(message, "refusal") and message.refusal:
+                self.logger.error(f"LLM refused request. User message: {user_message}")
                 self.logger.error(f"Refusal reason: {message.refusal}")
                 raise ValueError(f"LLM refused the request: {message.refusal}")
 
@@ -710,14 +756,12 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
 
         except BadRequestError as e:
             self.logger.error(f"BadRequestError: {e}")
-            self.logger.error(
-                f"User message that caused error: {user_message}")
+            self.logger.error(f"User message that caused error: {user_message}")
             raise
 
         if self.verbose:
             self.logger.info(f"Response text: {response_text}")
-            self.logger.info(
-                f"Logprobs available: {logprobs_data is not None}")
+            self.logger.info(f"Logprobs available: {logprobs_data is not None}")
 
         return response_text, logprobs_data
 
@@ -738,7 +782,9 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         # Repackage kwargs into a dictionary and call prompt_dict_chat
         return await self.prompt_dict_chat(kwargs, reasoning_effort=reasoning_effort)
 
-    async def run_prompt_with_probs(self, target_tokens: List[str] = ["1"], **kwargs) -> Dict[str, float]:
+    async def run_prompt_with_probs(
+        self, target_tokens: List[str] = ["1"], **kwargs
+    ) -> Dict[str, float]:
         """
         Make a single LLM call and return probabilities for specific target tokens.
 
@@ -771,22 +817,23 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         response_text, logprobs_data = await self.prompt_dict_chat_probs(kwargs)
 
         # Extract probabilities for target tokens
-        probabilities = self._extract_token_probabilities(
-            logprobs_data, target_tokens)
+        probabilities = self._extract_token_probabilities(logprobs_data, target_tokens)
 
         if self.verbose:
             self.logger.info(f"Token probabilities: {probabilities}")
 
         return probabilities
 
-    async def prompt_batch(self,
-                           variables_list: List[Dict[str, Any]],
-                           batch_size: int = 25,
-                           max_concurrency: int = DEFAULT_CONCURRENCY,
-                           retries: int = 3,
-                           item_list_field: str = 'results_list',
-                           item_id_field: str = '',
-                           chat: bool = True) -> List[Any]:
+    async def prompt_batch(
+        self,
+        variables_list: List[Dict[str, Any]],
+        batch_size: int = 25,
+        max_concurrency: int = DEFAULT_CONCURRENCY,
+        retries: int = 3,
+        item_list_field: str = "results_list",
+        item_id_field: str = "",
+        chat: bool = True,
+    ) -> List[Any]:
         """
         Process a list of variable dictionaries using true batch calls.
 
@@ -809,15 +856,20 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             return []
 
         # Split into batches
-        batches = [variables_list[i:i+batch_size]
-                   for i in range(0, len(variables_list), batch_size)]
+        batches = [
+            variables_list[i : i + batch_size]
+            for i in range(0, len(variables_list), batch_size)
+        ]
 
         sem = asyncio.Semaphore(max_concurrency)
         if self.verbose:
             self.logger.info(
-                f"Processing {len(batches)} batches with concurrency {max_concurrency}")
+                f"Processing {len(batches)} batches with concurrency {max_concurrency}"
+            )
 
-        async def _process_batch(batch_idx: int, batch_variables: List[Dict[str, Any]]) -> tuple[int, List[Any]]:
+        async def _process_batch(
+            batch_idx: int, batch_variables: List[Dict[str, Any]]
+        ) -> tuple[int, List[Any]]:
             """Process a single batch with retry logic"""
             last_exc = None
 
@@ -826,26 +878,33 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                     async with sem:
                         # Process the entire batch in a single API call
                         if chat:
-                            result = await self.prompt_dict_chat({'input_str': str(batch_variables)})
+                            result = await self.prompt_dict_chat(
+                                {"input_str": str(batch_variables)}
+                            )
                         else:
-                            result = await self.prompt_dict({'input_str': str(batch_variables)})
+                            result = await self.prompt_dict(
+                                {"input_str": str(batch_variables)}
+                            )
                         batch_results = result
 
                         # Validate IDs if item_id_field is specified
                         if item_id_field:
-                            sent_ids = [var.get(item_id_field)
-                                        for var in batch_variables]
+                            sent_ids = [
+                                var.get(item_id_field) for var in batch_variables
+                            ]
                             received_ids = []
 
                             for result in batch_results:
                                 if hasattr(result, item_id_field):
-                                    received_ids.append(
-                                        getattr(result, item_id_field))
-                                elif isinstance(result, dict) and item_id_field in result:
+                                    received_ids.append(getattr(result, item_id_field))
+                                elif (
+                                    isinstance(result, dict) and item_id_field in result
+                                ):
                                     received_ids.append(result[item_id_field])
                                 else:
                                     raise ValueError(
-                                        f"Result missing required ID field '{item_id_field}': {result}")
+                                        f"Result missing required ID field '{item_id_field}': {result}"
+                                    )
 
                             # Check if all sent IDs have corresponding received IDs
                             sent_set = set(sent_ids)
@@ -866,14 +925,16 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                 except Exception as e:
                     last_exc = e
                     self.logger.warning(
-                        f"Batch {batch_idx} attempt {attempt + 1}/{retries} failed: {e}")
+                        f"Batch {batch_idx} attempt {attempt + 1}/{retries} failed: {e}"
+                    )
                     if attempt < retries - 1:
                         # Exponential backoff
-                        await asyncio.sleep(2 ** attempt)
+                        await asyncio.sleep(2**attempt)
 
             # If all retries failed, raise the last exception
             raise last_exc or RuntimeError(
-                f"Unknown error processing batch {batch_idx}")
+                f"Unknown error processing batch {batch_idx}"
+            )
 
         # Create tasks for all batches
         tasks = [
@@ -908,15 +969,15 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         else:  # return unflattened results
             return batch_results
 
-    async def filter_dataframe_chunk(self,
-                                     input_df: pd.DataFrame,
-                                     input_vars: Optional[Dict[str,
-                                                               Any]] = None,
-                                     item_list_field: str = 'results_list',
-                                     item_id_field: str = 'id',
-                                     retries: int = 3,
-                                     chat: bool = True
-                                     ) -> Any:
+    async def filter_dataframe_chunk(
+        self,
+        input_df: pd.DataFrame,
+        input_vars: Optional[Dict[str, Any]] = None,
+        item_list_field: str = "results_list",
+        item_id_field: str = "id",
+        retries: int = 3,
+        chat: bool = True,
+    ) -> Any:
         """
         Process a single DataFrame asynchronously using Agent SDK.
 
@@ -943,7 +1004,7 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         for attempt in range(retries):
             try:
                 # Convert DataFrame to JSON
-                input_text = input_df.to_json(orient='records', indent=2)
+                input_text = input_df.to_json(orient="records", indent=2)
 
                 # Prepare the input dictionary
                 input_dict = {"input_text": input_text}
@@ -964,10 +1025,11 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                             if received_count != expected_count:
                                 error_msg = f"Item count mismatch: expected {expected_count}, got {received_count}"
                                 self.logger.warning(
-                                    f"Attempt {attempt + 1}/{retries}: {error_msg}")
+                                    f"Attempt {attempt + 1}/{retries}: {error_msg}"
+                                )
                                 if attempt < retries - 1:
                                     # Exponential backoff
-                                    await asyncio.sleep(2 ** attempt)
+                                    await asyncio.sleep(2**attempt)
                                     continue
                                 else:
                                     raise ValueError(error_msg)
@@ -980,16 +1042,19 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                                 for item in result_list:
                                     if hasattr(item, item_id_field):
                                         received_ids.append(
-                                            getattr(item, item_id_field))
-                                    elif isinstance(item, dict) and item_id_field in item:
-                                        received_ids.append(
-                                            item[item_id_field])
+                                            getattr(item, item_id_field)
+                                        )
+                                    elif (
+                                        isinstance(item, dict) and item_id_field in item
+                                    ):
+                                        received_ids.append(item[item_id_field])
                                     else:
                                         error_msg = f"Result item missing required ID field '{item_id_field}': {item}"
                                         self.logger.warning(
-                                            f"Attempt {attempt + 1}/{retries}: {error_msg}")
+                                            f"Attempt {attempt + 1}/{retries}: {error_msg}"
+                                        )
                                         if attempt < retries - 1:
-                                            await asyncio.sleep(2 ** attempt)
+                                            await asyncio.sleep(2**attempt)
                                             continue
                                         else:
                                             raise ValueError(error_msg)
@@ -1012,70 +1077,73 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                                         error_msg = f"ID order mismatch: sent {sent_ids} != received {received_ids}"
 
                                     self.logger.warning(
-                                        f"Attempt {attempt + 1}/{retries}: {error_msg}")
+                                        f"Attempt {attempt + 1}/{retries}: {error_msg}"
+                                    )
                                     if attempt < retries - 1:
                                         # Exponential backoff
-                                        await asyncio.sleep(2 ** attempt)
+                                        await asyncio.sleep(2**attempt)
                                         continue
                                     else:
                                         raise ValueError(error_msg)
 
                         else:
                             raise ValueError(
-                                f"Field '{item_list_field}' is not a list: {type(result_list)}")
+                                f"Field '{item_list_field}' is not a list: {type(result_list)}"
+                            )
                     else:
                         raise ValueError(
-                            f"Result missing required field '{item_list_field}': {result}")
+                            f"Result missing required field '{item_list_field}': {result}"
+                        )
 
                 return result
 
             except asyncio.TimeoutError as e:
                 last_exc = e
-                self.logger.error(
-                    f"Timeout error in filter_dataframe_chunk: {str(e)}")
+                self.logger.error(f"Timeout error in filter_dataframe_chunk: {str(e)}")
                 if attempt < retries - 1:
-                    await asyncio.sleep(2 ** attempt)
+                    await asyncio.sleep(2**attempt)
                     continue
                 raise
             except (ConnectionError, TimeoutError) as e:
                 last_exc = e
                 self.logger.error(
-                    f"Network/timeout error in filter_dataframe_chunk: {str(e)}")
+                    f"Network/timeout error in filter_dataframe_chunk: {str(e)}"
+                )
                 if attempt < retries - 1:
-                    await asyncio.sleep(2 ** attempt)
+                    await asyncio.sleep(2**attempt)
                     continue
                 raise
             except ValueError as e:
                 last_exc = e
-                self.logger.error(
-                    f"Invalid data in filter_dataframe_chunk: {str(e)}")
+                self.logger.error(f"Invalid data in filter_dataframe_chunk: {str(e)}")
                 if attempt < retries - 1:
-                    await asyncio.sleep(2 ** attempt)
+                    await asyncio.sleep(2**attempt)
                     continue
                 raise
             except Exception as e:
                 last_exc = e
                 self.logger.error(
-                    f"Unexpected error in filter_dataframe_chunk: {str(e)}")
+                    f"Unexpected error in filter_dataframe_chunk: {str(e)}"
+                )
                 if attempt < retries - 1:
-                    await asyncio.sleep(2 ** attempt)
+                    await asyncio.sleep(2**attempt)
                     continue
                 raise
 
         # If we get here, all retries failed
-        raise last_exc or RuntimeError(
-            f"Unknown error after {retries} attempts")
+        raise last_exc or RuntimeError(f"Unknown error after {retries} attempts")
 
-    async def _process_indexed_chunk(self,
-                                     chunk_idx: int,
-                                     chunk_df: pd.DataFrame,
-                                     sem: asyncio.Semaphore,
-                                     input_vars: Optional[Dict[str,
-                                                               Any]] = None,
-                                     item_list_field: str = 'results_list',
-                                     item_id_field: str = 'id',
-                                     retries: int = 3,
-                                     chat: bool = True) -> tuple[int, Any]:
+    async def _process_indexed_chunk(
+        self,
+        chunk_idx: int,
+        chunk_df: pd.DataFrame,
+        sem: asyncio.Semaphore,
+        input_vars: Optional[Dict[str, Any]] = None,
+        item_list_field: str = "results_list",
+        item_id_field: str = "id",
+        retries: int = 3,
+        chat: bool = True,
+    ) -> tuple[int, Any]:
         """
         Process a single chunk and return with its index for order preservation.
 
@@ -1099,26 +1167,26 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                 item_list_field=item_list_field,
                 item_id_field=item_id_field,
                 retries=retries,
-                chat=chat
+                chat=chat,
             )
             return chunk_idx, result
 
-    async def filter_dataframe_batch(self,
-                                     input_df: pd.DataFrame,
-                                     input_vars: Optional[Dict[str,
-                                                               Any]] = None,
-                                     item_list_field: str = 'results_list',
-                                     item_id_field: str = 'id',
-                                     retries: int = 3,
-                                     chunk_size: int = 25,
-                                     return_series: bool = False,
-                                     value_field: str = 'output',
-                                     chat: bool = True,
-                                     return_probabilities: bool = False,
-                                     target_tokens: List[str] = None,
-                                     max_concurrency: int = DEFAULT_CONCURRENCY,
-                                     **kwargs
-                                     ) -> Any:
+    async def filter_dataframe_batch(
+        self,
+        input_df: pd.DataFrame,
+        input_vars: Optional[Dict[str, Any]] = None,
+        item_list_field: str = "results_list",
+        item_id_field: str = "id",
+        retries: int = 3,
+        chunk_size: int = 25,
+        return_series: bool = False,
+        value_field: str = "output",
+        chat: bool = True,
+        return_probabilities: bool = False,
+        target_tokens: List[str] = None,
+        max_concurrency: int = DEFAULT_CONCURRENCY,
+        **kwargs,
+    ) -> Any:
         """
         Process a DataFrame in chunks asynchronously using concurrent calls to filter_dataframe_chunk.
 
@@ -1171,16 +1239,18 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                     if input_vars:
                         row_vars.update(input_vars)
                     # Get probabilities for this row
-                    return await self.run_prompt_with_probs(target_tokens=target_tokens, **row_vars)
+                    return await self.run_prompt_with_probs(
+                        target_tokens=target_tokens, **row_vars
+                    )
 
             # Process all rows asynchronously with concurrency control
-            tasks = [_process_row_with_sem(row)
-                     for _, row in input_df.iterrows()]
+            tasks = [_process_row_with_sem(row) for _, row in input_df.iterrows()]
             prob_dicts = await asyncio.gather(*tasks)
 
             # Extract probability for first target token from each dict
-            probabilities = [prob_dict.get(
-                target_tokens[0], 0.0) for prob_dict in prob_dicts]
+            probabilities = [
+                prob_dict.get(target_tokens[0], 0.0) for prob_dict in prob_dicts
+            ]
 
             # Return as Series indexed to match input DataFrame
             return pd.Series(probabilities, index=input_df.index)
@@ -1195,18 +1265,21 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
 
         if self.verbose:
             self.logger.info(
-                f"Processing {len(chunks)} chunks with concurrency {max_concurrency}")
+                f"Processing {len(chunks)} chunks with concurrency {max_concurrency}"
+            )
 
         # Process all chunks concurrently with index tracking and semaphore control
         tasks = [
             self._process_indexed_chunk(
-                i, chunk, sem,
+                i,
+                chunk,
+                sem,
                 input_vars=input_vars,
                 item_list_field=item_list_field,
                 item_id_field=item_id_field,
                 retries=retries,
                 chat=chat,
-                **kwargs
+                **kwargs,
             )
             for i, chunk in enumerate(chunks)
         ]
@@ -1231,12 +1304,14 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                             all_items.extend(result_list)
                         else:
                             self.logger.error(
-                                f"Field '{item_list_field}' is not a list: {type(result_list)}")
+                                f"Field '{item_list_field}' is not a list: {type(result_list)}"
+                            )
                             # Fall back to returning raw results
                             return [result for _, result in sorted_results]
                     else:
                         self.logger.error(
-                            f"Result missing field '{item_list_field}': {chunk_result}")
+                            f"Result missing field '{item_list_field}': {chunk_result}"
+                        )
                         # Fall back to returning raw results
                         return [result for _, result in sorted_results]
 
@@ -1250,10 +1325,16 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                 if sorted_results and hasattr(sorted_results[0][1], item_list_field):
                     first_result = sorted_results[0][1]
                     # Create a copy of the first result and replace the list field
-                    concatenated_result = first_result.__class__(**{
-                        **{k: v for k, v in first_result.__dict__.items() if k != item_list_field},
-                        item_list_field: all_items
-                    })
+                    concatenated_result = first_result.__class__(
+                        **{
+                            **{
+                                k: v
+                                for k, v in first_result.__dict__.items()
+                                if k != item_list_field
+                            },
+                            item_list_field: all_items,
+                        }
+                    )
                     return concatenated_result
                 else:
                     # If we can't create proper structure, return the items directly
@@ -1267,12 +1348,13 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             # No item_list_field specified, return list of results
             if return_series:
                 self.logger.warning(
-                    "return_series=True but no item_list_field specified, returning raw results")
+                    "return_series=True but no item_list_field specified, returning raw results"
+                )
             return [result for _, result in sorted_results]
 
-    async def filter_dataframe(self, input_df: pd.DataFrame,
-                               value_field: str = 'output',
-                               **kwargs) -> pd.Series:
+    async def filter_dataframe(
+        self, input_df: pd.DataFrame, value_field: str = "output", **kwargs
+    ) -> pd.Series:
         """
         Process DataFrame and return values as Series for direct column assignment.
 
@@ -1321,22 +1403,23 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             return result
 
         # Extract values from the structured result
-        if hasattr(result, 'results_list'):
+        if hasattr(result, "results_list"):
             # Standard case: structured object with results_list
-            values = [getattr(item, value_field)
-                      for item in result.results_list]
+            values = [getattr(item, value_field) for item in result.results_list]
         elif isinstance(result, list):
             # Fallback case: result is already a list of items
             values = [getattr(item, value_field) for item in result]
         else:
             # Unexpected result format
             raise ValueError(
-                f"Unexpected result format from filter_dataframe_batch: {type(result)}")
+                f"Unexpected result format from filter_dataframe_batch: {type(result)}"
+            )
 
         # Validate that we have the right number of values
         if len(values) != len(input_df):
             raise ValueError(
-                f"Value count mismatch: expected {len(input_df)}, got {len(values)}")
+                f"Value count mismatch: expected {len(input_df)}, got {len(values)}"
+            )
 
         return pd.Series(values, index=input_df.index)
 
@@ -1347,14 +1430,14 @@ async def run_prompt_on_dataframe(
     output_type: Type[BaseModel],
     value_field: Optional[str] = None,
     item_list_field: Optional[str] = None,
-    item_id_field: str = 'id',
+    item_id_field: str = "id",
     chunk_size: int = 25,
     max_concurrency: int = DEFAULT_CONCURRENCY,
     return_probabilities: bool = False,
     target_tokens: Optional[List[str]] = None,
     verbose: bool = False,
     logger: Optional[logging.Logger] = None,
-    **kwargs
+    **kwargs,
 ) -> pd.Series:
     """
     Convenience function to run a Langfuse prompt on a DataFrame.
@@ -1400,15 +1483,15 @@ async def run_prompt_on_dataframe(
 
     # Fetch prompt from Langfuse
     system_prompt, user_prompt, model, reasoning_effort = lf_client.get_prompt(
-        prompt_name)
+        prompt_name
+    )
 
     # Auto-detect fields if not provided
     if item_list_field is None or value_field is None:
-        detected_list_field, detected_value_field = _introspect_output_type(
-            output_type)
+        detected_list_field, detected_value_field = _introspect_output_type(output_type)
 
         if item_list_field is None:
-            item_list_field = detected_list_field or 'results_list'
+            item_list_field = detected_list_field or "results_list"
         if value_field is None:
             value_field = detected_value_field
 
@@ -1427,7 +1510,7 @@ async def run_prompt_on_dataframe(
         model=model,
         reasoning_effort=reasoning_effort,
         verbose=verbose,
-        logger=logger
+        logger=logger,
     )
 
     # Run inference
@@ -1440,7 +1523,7 @@ async def run_prompt_on_dataframe(
         max_concurrency=max_concurrency,
         return_probabilities=return_probabilities,
         target_tokens=target_tokens,
-        **kwargs
+        **kwargs,
     )
 
     return result_series

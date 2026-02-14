@@ -30,6 +30,7 @@ FT:
   include:
   - https://www.ft.com/content/
   rss: https://www.ft.com/artificial-intelligence?format=rss
+# https://www.ft.com/technology?format=rss
 
 Feedly AI:
   type: html
@@ -167,6 +168,7 @@ WSJ:
   url: https://www.wsj.com/tech/ai
   filename: WSJ
   rss: https://feeds.a.dj.com/rss/RSSWSJD.xml
+# or https://feeds.content.dowjones.io/public/rss/RSSWSJD
 
 Washington Post:
   type: html

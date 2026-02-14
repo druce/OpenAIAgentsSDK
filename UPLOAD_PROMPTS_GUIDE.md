@@ -12,7 +12,7 @@ This guide walks you through uploading all prompts from `prompts.md` to a new La
 
 1. **Go to Langfuse:**
    - Cloud: https://cloud.langfuse.com
-   - Or your self-hosted instance
+   - Or your self-hosted instance http://localhost:3000/
 
 2. **Create Organization/Project:**
    - Create a new organization (if needed)
