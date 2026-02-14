@@ -100,7 +100,7 @@ The newsletter generation follows a structured 9-step process with persistent st
 
 - **AI Classification**: Uses LLM to identify AI-related content
 - **Dedupe**: Filters out articles seen before in SQLite by matching URL or title+source 
-- **Batch Processing**: Filterly URL in asynchronous batches with retry
+- **Batch Processing**: Filter on title for AI relevance in asynchronous batches with retry
 - **Output**: ~200 AI-related articles (typical 50% filter rate on 400+ new articles per day)
 
 ### Step 3: Download Articles ⬇️
@@ -172,7 +172,7 @@ The newsletter generation follows a structured 9-step process with persistent st
 
 - `sources.yaml`: Configuration for 17+ news sources
 - `fetch.py`: Async fetching system with concurrency control
-- `scrape.py`: Advanced web scraping with Playwright and stealth features
+- `scrape.py`: Web scraping with Playwright using stealth features
 - `llm.py`: Functions to apply prompts to pandas dataframes, sending batches of rows async with retry.
 
 #### Agent State Logic
@@ -199,17 +199,16 @@ The newsletter generation follows a structured 9-step process with persistent st
 #### Concurrent Architecture
 
 - Worker pool-based URL processing
-- Per-domain rate limiting with atomic slot acquisition
-- Random URL selection to prevent domain clustering
+- Per-domain rate limiting 
 
 #### AI Integration
 
-- Prompts are stored in Langfuse with model and effort level, enabling evals to select most efficient model.
+- Prompts are stored in Langfuse with model and reasoning effort level, enabling evals to select most efficient model.
 - Structured output with Pydantic validation
-- Typically GPT-5-nano for headline classification
-- Typically GPT-5-mini for tasks requiring more intelligence
+- GPT-5-nano for simplest tasks like headline classification
+- Typically GPT-5-mini for most tasks requiring more intelligence
 - Could use GPT-5.2 for final section writing and polish, but takes longer and more expensive.
-- GPT-4o where we want logprobs
+- GPT-4o where we want legacy logprobs
 - Critic-optimizer loops with quality scoring and iterative refinement
 
 ### Usage Examples
@@ -358,6 +357,6 @@ python news_agent.py  # Automatically resumes from last step
 
 This project is licensed under the MIT License - see the LICENSE file for details.
 
-### Built with ❤️ using OpenAI Agents SDK, Claude Code, Windsurf, Python, Pandas, Jupyter, Langfuse, Playwright and other great tools
+### Built with ❤️ using OpenAI Agents SDK, Claude Code, Windsurf, Python, Pandas, Jupyter, Langfuse, Playwright and other great tools!
 
 ---
