@@ -124,18 +124,18 @@ GEMINI_FLASH_MODEL = LLMModel(
     supports_logprobs=False,
     supports_reasoning=True,
     supports_temperature=True,
-    default_max_tokens=8192,
+    default_max_tokens=16384,
     display_name="Gemini 3.0 Flash",
 )
 
 GEMINI_PRO_MODEL = LLMModel(
-    model_id="gemini-2.5-pro",
+    model_id="gemini-3-pro-preview",
     vendor=Vendor.GEMINI,
     supports_logprobs=False,
     supports_reasoning=True,
     supports_temperature=True,
-    default_max_tokens=8192,
-    display_name="Gemini 2.5 Pro",
+    default_max_tokens=16384,
+    display_name="Gemini 3 Pro",
 )
 
 MODEL_DICT: Dict[str, LLMModel] = {
@@ -265,8 +265,8 @@ class AsyncTokenBucketRateLimiter:
     def __init__(self, rpm: int) -> None:
         self.rpm = rpm
         self.max_tokens = float(rpm)
-        self._tokens = float(rpm)           # start full
-        self._rate = rpm / 60.0             # tokens per second
+        self._tokens = float(rpm)  # start full
+        self._rate = rpm / 60.0  # tokens per second
         self._last_refill = time.monotonic()
         self._lock = asyncio.Lock()
 
@@ -301,9 +301,7 @@ def _get_vendor_rate_limiter(vendor: Vendor) -> AsyncTokenBucketRateLimiter:
     if vendor not in _vendor_rate_limiters:
         rpm = VENDOR_RPM_LIMITS.get(vendor.value, 1000)
         _vendor_rate_limiters[vendor] = AsyncTokenBucketRateLimiter(rpm=rpm)
-        _logger.info(
-            "Created rate limiter for %s (%d RPM)", vendor.value, rpm
-        )
+        _logger.info("Created rate limiter for %s (%d RPM)", vendor.value, rpm)
     return _vendor_rate_limiters[vendor]
 
 
@@ -664,7 +662,10 @@ class _GeminiAgent(_VendorAgent):
         self._client = genai.Client()
 
     async def _call_llm(self, system, user, output_schema):
-        config_kwargs = {"system_instruction": system}
+        config_kwargs = {
+            "system_instruction": system,
+            "max_output_tokens": self.model.default_max_tokens,
+        }
         if self.model.supports_temperature:
             config_kwargs["temperature"] = self.temperature
         thinking_tokens = _gemini_thinking_tokens(self.reasoning_effort)
@@ -683,6 +684,13 @@ class _GeminiAgent(_VendorAgent):
         )
 
     async def _parse_structured(self, raw, output_type):
+        # Check for truncation before attempting validation
+        if raw.candidates and raw.candidates[0].finish_reason == "MAX_TOKENS":
+            raise RuntimeError(
+                f"Gemini response truncated (finish_reason='MAX_TOKENS', "
+                f"max_output_tokens={self.model.default_max_tokens}). "
+                f"Increase default_max_tokens or reduce input size."
+            )
         return output_type.model_validate_json(raw.text)
 
     async def _parse_logprobs(self, raw, target_tokens):
@@ -925,8 +933,10 @@ class LLMagent:
         try:
             result = await self._delegate.prompt_dict(variables)
         except ValidationError as e:
+            input_preview = {k: str(v)[:80] for k, v in variables.items()}
             self.logger.error(
-                f"Pydantic validation failed (model={self.model}): {e}"
+                f"Pydantic validation failed (model={self.model}): {e}\n"
+                f"  Input variables (first 80 chars): {input_preview}"
             )
             raise
 
@@ -984,8 +994,10 @@ class LLMagent:
         try:
             result = await self._delegate.prompt_dict(variables)
         except ValidationError as e:
+            input_preview = {k: str(v)[:80] for k, v in variables.items()}
             self.logger.error(
-                f"Pydantic validation failed (model={self.model}): {e}"
+                f"Pydantic validation failed (model={self.model}): {e}\n"
+                f"  Input variables (first 80 chars): {input_preview}"
             )
             raise
         finally:
@@ -1445,9 +1457,7 @@ class LLMagent:
             probabilities = [
                 prob_dict.get(target_tokens[0], 0.0) for prob_dict in prob_dicts
             ]
-            self.logger.info(
-                f"Completed {len(probabilities)} probability requests"
-            )
+            self.logger.info(f"Completed {len(probabilities)} probability requests")
             return pd.Series(probabilities, index=input_df.index)
 
         # Create chunks

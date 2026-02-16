@@ -815,10 +815,9 @@ class GatherUrlsTool:
                 self.logger.info(
                     f"Completed Step 1: Gathered {len(all_articles)} articles")
 
-            # Serialize state after completing step
-            state.serialize_to_db(step_name)
-
+            # Complete step then serialize to persist COMPLETE status
             state.complete_step(step_name, message=status_msg)
+            state.serialize_to_db(step_name)
             return status_msg
 
         except Exception as e:
@@ -1035,18 +1034,15 @@ class FilterUrlsTool:
             else:
                 status_msg = f"✅ Step 2 {step_name} completed successfully! Filtered {total_articles} headlines to {ai_related_count} AI-related articles."
 
-            # Complete step using unified status system with status message
-            state.complete_step(step_name, message=status_msg)
-
             if self.logger:
                 log_msg = f"Completed Step 2: {ai_related_count} AI-related articles"
                 if duplicate_count > 0:
                     log_msg += f", {duplicate_count} duplicates removed"
                 self.logger.info(log_msg)
 
-            # Serialize state after completing step
-            state.serialize_to_db(step_name)
+            # Complete step then serialize to persist COMPLETE status
             state.complete_step(step_name, message=status_msg)
+            state.serialize_to_db(step_name)
             return status_msg
 
         except Exception as e:
@@ -1440,10 +1436,9 @@ class DownloadArticlesTool:
                 self.logger.info(
                     f"Completed Step 3: Downloaded {successful_downloads} articles")
 
-            # Serialize state after completing step
-            state.serialize_to_db(step_name)
-
+            # Complete step then serialize to persist COMPLETE status
             state.complete_step(step_name, message=status_msg)
+            state.serialize_to_db(step_name)
             return status_msg
 
         except Exception as e:
@@ -1798,10 +1793,9 @@ class ExtractSummariesTool:
                 status_msg += f"\n⚠️  Summarization errors: {summarization_errors}"
             status_msg += "\n💾 Summaries stored in headline DataFrame."
 
-            # Serialize state after completing step
-            state.serialize_to_db(step_name)
-
+            # Complete step then serialize to persist COMPLETE status
             state.complete_step(step_name, message=status_msg)
+            state.serialize_to_db(step_name)
             return status_msg
 
         except Exception as e:
@@ -1961,10 +1955,9 @@ class RateArticlesTool:
             status_msg += f"\n⭐ High quality articles (≥7.0): {high_quality_count}"
             status_msg += "\n💾 Ratings stored in persistent state."
 
-            # Serialize state after completing step
-            state.serialize_to_db(step_name)
-
+            # Complete step then serialize to persist COMPLETE status
             state.complete_step(step_name, message=status_msg)
+            state.serialize_to_db(step_name)
             return status_msg
 
         except Exception as e:
@@ -2471,10 +2464,9 @@ class ClusterByTopicTool:
             # status_msg += f"\n🏷️ Topics: {', '.join(state.clusters.keys())}"
             # status_msg += f"\n💾 Clusters, common topics, and canonical classifications stored in persistent state."
 
-            # Serialize state after completing step
-            state.serialize_to_db(step_name)
-
+            # Complete step then serialize to persist COMPLETE status
             state.complete_step(step_name, message=status_msg)
+            state.serialize_to_db(step_name)
             return status_msg
 
         except Exception as e:
@@ -2795,9 +2787,9 @@ class SelectSectionsTool:
             if self.verbose:
                 print(f"✅ Completed Step 7: {status_msg}")
 
-            # Serialize state after completing step
-            state.serialize_to_db(step_name)
+            # Complete step then serialize to persist COMPLETE status
             state.complete_step(step_name, message=status_msg)
+            state.serialize_to_db(step_name)
             return status_msg
 
         except Exception as e:
@@ -3701,13 +3693,9 @@ class FinalizeNewsletterTool:
             status_msg += "\n📰 Newsletter stored in persistent state and emailed"
             status_msg += "\n✅ Workflow complete! All 9 steps finished successfully."
 
-            # Complete the step and mark workflow as complete with status message
+            # Complete step then serialize to persist COMPLETE status
             state.complete_step(step_name, message=status_msg)
-
-            # Serialize state after completing step
             state.serialize_to_db(step_name)
-
-            state.complete_step(step_name, message=status_msg)
             return status_msg
 
         except Exception as e:
