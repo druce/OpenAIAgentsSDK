@@ -6,7 +6,11 @@ from typing import Optional
 import pickle
 
 from sklearn.decomposition import TruncatedSVD
-from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
+from sklearn.metrics import (
+    silhouette_score,
+    calinski_harabasz_score,
+    davies_bouldin_score,
+)
 import hdbscan
 import optuna
 import umap
@@ -19,6 +23,7 @@ from llm import paginate_df_async, LLMagent, get_langfuse_client
 
 class TopicText(BaseModel):
     """Single article classification result for a canonical topic"""
+
     topic_text: str = Field(description="The desctiption of the topic")
 
 
@@ -44,26 +49,27 @@ def _create_extended_summary(row):
     parts = []
 
     # Add title if present
-    if 'title' in row and row['title']:
-        parts.append(str(row['title']).strip())
+    if "title" in row and row["title"]:
+        parts.append(str(row["title"]).strip())
 
     # Add description if present
-    if 'description' in row and row['description']:
-        parts.append(str(row['description']).strip())
+    if "description" in row and row["description"]:
+        parts.append(str(row["description"]).strip())
 
     # Add topics if present (join with commas)
-    if 'topics' in row and row['topics']:
-        if isinstance(row['topics'], list):
-            topics_str = ", ".join(str(topic).strip()
-                                   for topic in row['topics'] if topic)
+    if "topics" in row and row["topics"]:
+        if isinstance(row["topics"], list):
+            topics_str = ", ".join(
+                str(topic).strip() for topic in row["topics"] if topic
+            )
         else:
-            topics_str = str(row['topics']).strip()
+            topics_str = str(row["topics"]).strip()
         if topics_str:
             parts.append(topics_str)
 
     # Add summary if present
-    if pd.notna(row.get('summary')) and row.get('summary'):
-        parts.append(str(row['summary']).strip())
+    if pd.notna(row.get("summary")) and row.get("summary"):
+        parts.append(str(row["summary"]).strip())
 
     return "\n\n".join(parts)
 
@@ -83,17 +89,27 @@ def _create_short_summary(row):
         str: Combined text summary
     """
     retval = ""
-    if pd.notna(row['short_summary']):
-        short_summary = str(row['short_summary']).strip()
+    if pd.notna(row["short_summary"]) and len(str(row["short_summary"])):
+        short_summary = str(row["short_summary"]).strip()
         retval += short_summary
-        topics_list = row['topics']
+        topics_list = row["topics"]
+        if isinstance(topics_list, list):
+            topics = (
+                ",".join(str(t).strip() for t in topics_list if t)
+                if topics_list
+                else ""
+            )
+        else:
+            topics = str(topics_list).strip() if topics_list else ""
         topics = str(topics_list).strip() if topics_list else ""
         if topics:
             retval += f" Topics: {topics}"
     return retval
 
 
-async def _get_embeddings_df(headline_data: pd.DataFrame, embedding_model: str = "text-embedding-3-large") -> pd.DataFrame:
+async def _get_embeddings_df(
+    headline_data: pd.DataFrame, embedding_model: str = "text-embedding-3-large"
+) -> pd.DataFrame:
     """
     Generate embeddings for article summaries using OpenAI's embedding API.
 
@@ -117,13 +133,14 @@ async def _get_embeddings_df(headline_data: pd.DataFrame, embedding_model: str =
     # Create extended_summary column by concatenating available fields
     headline_data_copy = headline_data.copy()
 
-    headline_data_copy['extended_summary'] = headline_data_copy.apply(
-        _create_short_summary, axis=1)
+    headline_data_copy["extended_summary"] = headline_data_copy.apply(
+        _create_short_summary, axis=1
+    )
 
     # Filter to articles with non-empty extended summaries
     articles_with_summaries = headline_data_copy[
-        (headline_data_copy['extended_summary'].notna()) &
-        (headline_data_copy['extended_summary'] != '')
+        (headline_data_copy["extended_summary"].notna())
+        & (headline_data_copy["extended_summary"] != "")
     ].copy()
 
     all_embeddings = []
@@ -132,16 +149,12 @@ async def _get_embeddings_df(headline_data: pd.DataFrame, embedding_model: str =
     # Use paginate_df_async similar to do_dedupe.py
     async for batch_df in paginate_df_async(articles_with_summaries, 100):
         text_batch = batch_df["extended_summary"].to_list()
-        response = client.embeddings.create(
-            input=text_batch, model=embedding_model)
+        response = client.embeddings.create(input=text_batch, model=embedding_model)
         batch_embeddings = [item.embedding for item in response.data]
         all_embeddings.extend(batch_embeddings)
 
     # Create DataFrame with embeddings, preserving original index
-    embedding_df = pd.DataFrame(
-        all_embeddings,
-        index=articles_with_summaries.index
-    )
+    embedding_df = pd.DataFrame(all_embeddings, index=articles_with_summaries.index)
 
     return embedding_df
 
@@ -190,17 +203,17 @@ def calculate_clustering_metrics(embeddings_array, labels, clusterer=None):
     n_clusters = len(unique_labels) - (1 if -1 in unique_labels else 0)
     n_noise = np.sum(labels == -1)
 
-    metrics['n_clusters'] = n_clusters
-    metrics['n_noise_points'] = n_noise
-    metrics['noise_ratio'] = n_noise / len(labels)
+    metrics["n_clusters"] = n_clusters
+    metrics["n_noise_points"] = n_noise
+    metrics["noise_ratio"] = n_noise / len(labels)
 
     # Cluster size distribution
     cluster_sizes = Counter(labels[labels != -1])
     if cluster_sizes:
-        metrics['avg_cluster_size'] = np.mean(list(cluster_sizes.values()))
-        metrics['std_cluster_size'] = np.std(list(cluster_sizes.values()))
-        metrics['min_cluster_size'] = min(cluster_sizes.values())
-        metrics['max_cluster_size'] = max(cluster_sizes.values())
+        metrics["avg_cluster_size"] = np.mean(list(cluster_sizes.values()))
+        metrics["std_cluster_size"] = np.std(list(cluster_sizes.values()))
+        metrics["min_cluster_size"] = min(cluster_sizes.values())
+        metrics["max_cluster_size"] = max(cluster_sizes.values())
 
     # Skip other metrics if we have too few clusters or too much noise
     if n_clusters < 2 or len(non_noise_labels) < 2:
@@ -213,37 +226,37 @@ def calculate_clustering_metrics(embeddings_array, labels, clusterer=None):
         try:
             # Validity index (HDBSCAN's internal metric)
             validity_idx = hdbscan.validity.validity_index(
-                embeddings_array, labels, metric='euclidean'
+                embeddings_array, labels, metric="euclidean"
             )
-            metrics['hdbscan_validity_index'] = validity_idx
+            metrics["hdbscan_validity_index"] = validity_idx
         except Exception as e:
             print(f"Could not compute HDBSCAN validity index: {e}")
 
         # Cluster persistence (stability)
-        if hasattr(clusterer, 'cluster_persistence_'):
-            metrics['cluster_persistence'] = clusterer.cluster_persistence_
+        if hasattr(clusterer, "cluster_persistence_"):
+            metrics["cluster_persistence"] = clusterer.cluster_persistence_
 
     # Scikit-learn clustering metrics (excluding noise points)
     try:
         # Silhouette Score (higher is better, range [-1, 1])
         sil_score = silhouette_score(
-            non_noise_embeddings, non_noise_labels, metric='euclidean')
-        metrics['silhouette_score'] = sil_score
+            non_noise_embeddings, non_noise_labels, metric="euclidean"
+        )
+        metrics["silhouette_score"] = sil_score
 
         # Calinski-Harabasz Index (higher is better)
-        ch_score = calinski_harabasz_score(
-            non_noise_embeddings, non_noise_labels)
-        metrics['calinski_harabasz_score'] = ch_score
+        ch_score = calinski_harabasz_score(non_noise_embeddings, non_noise_labels)
+        metrics["calinski_harabasz_score"] = ch_score
 
         # Davies-Bouldin Index (lower is better)
         db_score = davies_bouldin_score(non_noise_embeddings, non_noise_labels)
-        metrics['davies_bouldin_score'] = db_score
+        metrics["davies_bouldin_score"] = db_score
 
     except Exception as e:
         print(f"Could not compute sklearn metrics: {e}")
 
     # Custom composite score balancing cluster quality and quantity
-    if 'silhouette_score' in metrics and n_clusters > 0:
+    if "silhouette_score" in metrics and n_clusters > 0:
         # Penalize too many small clusters or too few large clusters
         # Optimal around 10 clusters
         # cluster_balance = 1 / (1 + abs(np.log(n_clusters / 10)))
@@ -254,13 +267,13 @@ def calculate_clustering_metrics(embeddings_array, labels, clusterer=None):
         # noise_penalty = 1 - min(metrics['noise_ratio'], 0.5)
 
         composite_score = (
-            0.5 * max(metrics['silhouette_score'], 0) +  # Quality component
-            0.5 * max(metrics['hdbscan_validity_index'], 0)
+            0.5 * max(metrics["silhouette_score"], 0)  # Quality component
+            + 0.5 * max(metrics["hdbscan_validity_index"], 0)
             #             0.1 * cluster_balance +                       # Quantity component
             #             0.1 * size_consistency +                      # Size consistency
             #             0.3 * noise_penalty                           # Noise penalty
         )
-        metrics['composite_score'] = composite_score
+        metrics["composite_score"] = composite_score
 
     return metrics
 
@@ -279,30 +292,32 @@ def print_clustering_summary(metrics):
     print("=== Clustering Quality Metrics ===")
     print(f"Number of clusters: {metrics.get('n_clusters', 'N/A')}")
     print(
-        f"Noise points: {metrics.get('n_noise_points', 'N/A')} ({metrics.get('noise_ratio', 0):.1%})")
+        f"Noise points: {metrics.get('n_noise_points', 'N/A')} ({metrics.get('noise_ratio', 0):.1%})"
+    )
 
-    if 'avg_cluster_size' in metrics:
+    if "avg_cluster_size" in metrics:
         print(
-            f"Average cluster size: {metrics['avg_cluster_size']:.1f} ± {metrics.get('std_cluster_size', 0):.1f}")
+            f"Average cluster size: {metrics['avg_cluster_size']:.1f} ± {metrics.get('std_cluster_size', 0):.1f}"
+        )
         print(
-            f"Cluster size range: {metrics.get('min_cluster_size', 'N/A')} - {metrics.get('max_cluster_size', 'N/A')}")
+            f"Cluster size range: {metrics.get('min_cluster_size', 'N/A')} - {metrics.get('max_cluster_size', 'N/A')}"
+        )
 
     print("=== Quality Scores ===")
-    if 'silhouette_score' in metrics:
+    if "silhouette_score" in metrics:
+        print(f"Silhouette Score: {metrics['silhouette_score']:.3f} (higher is better)")
+    if "calinski_harabasz_score" in metrics:
         print(
-            f"Silhouette Score: {metrics['silhouette_score']:.3f} (higher is better)")
-    if 'calinski_harabasz_score' in metrics:
+            f"Calinski-Harabasz Score: {metrics['calinski_harabasz_score']:.1f} (higher is better)"
+        )
+    if "davies_bouldin_score" in metrics:
         print(
-            f"Calinski-Harabasz Score: {metrics['calinski_harabasz_score']:.1f} (higher is better)")
-    if 'davies_bouldin_score' in metrics:
-        print(
-            f"Davies-Bouldin Score: {metrics['davies_bouldin_score']:.3f} (lower is better)")
-    if 'hdbscan_validity_index' in metrics:
-        print(
-            f"HDBSCAN Validity Index: {metrics['hdbscan_validity_index']:.3f}")
-    if 'composite_score' in metrics:
-        print(
-            f"Composite Score: {metrics['composite_score']:.3f} (higher is better)")
+            f"Davies-Bouldin Score: {metrics['davies_bouldin_score']:.3f} (lower is better)"
+        )
+    if "hdbscan_validity_index" in metrics:
+        print(f"HDBSCAN Validity Index: {metrics['hdbscan_validity_index']:.3f}")
+    if "composite_score" in metrics:
+        print(f"Composite Score: {metrics['composite_score']:.3f} (higher is better)")
     print()
 
 
@@ -318,9 +333,9 @@ def umap_objective(trial: optuna.Trial, reduced_embeddings: np.ndarray) -> float
         Negative composite score (Optuna minimizes, we want to maximize)
     """
     # HDBSCAN hyperparameters to optimize
-    min_cluster_size = trial.suggest_int('min_cluster_size', 2, 10)
+    min_cluster_size = trial.suggest_int("min_cluster_size", 2, 10)
     # Fixed: ensure min_samples is always valid (was: min_cluster_size-1 could be < 1)
-    min_samples = trial.suggest_int('min_samples', 1, min_cluster_size)
+    min_samples = trial.suggest_int("min_samples", 1, min_cluster_size)
 
     print("=== HDBSCAN Parameters ===")
     print(f"min_cluster_size:   {min_cluster_size}")
@@ -338,15 +353,14 @@ def umap_objective(trial: optuna.Trial, reduced_embeddings: np.ndarray) -> float
         labels = clusterer.fit_predict(reduced_embeddings)
 
         # Calculate metrics
-        metrics = calculate_clustering_metrics(
-            reduced_embeddings, labels, clusterer)
+        metrics = calculate_clustering_metrics(reduced_embeddings, labels, clusterer)
         print_clustering_summary(metrics)
 
         # Return negative composite score (Optuna minimizes)
-        composite_score = metrics.get('composite_score', -1.0)
+        composite_score = metrics.get("composite_score", -1.0)
 
         # Penalize if no valid clusters found or too much noise
-        if metrics.get('n_clusters', 0) < 2 or metrics.get('noise_ratio', 1.0) > 0.8:
+        if metrics.get("n_clusters", 0) < 2 or metrics.get("noise_ratio", 1.0) > 0.8:
             composite_score = -1.0
 
         return -composite_score
@@ -375,19 +389,18 @@ def objective(trial, embeddings_array):
                Returns -1.0 for invalid clustering results.
     """
 
-    n_components = trial.suggest_int('n_components',
-                                     MIN_COMPONENTS,
-                                     embeddings_array.shape[1] // 4)
+    n_components = trial.suggest_int(
+        "n_components", MIN_COMPONENTS, embeddings_array.shape[1] // 4
+    )
 
     svd = TruncatedSVD(n_components=n_components, random_state=RANDOM_STATE)
     reduced_embeddings = svd.fit_transform(embeddings_array)
     # Re-normalize after SVD
-    reduced_embeddings /= np.linalg.norm(reduced_embeddings,
-                                         axis=1, keepdims=True)
+    reduced_embeddings /= np.linalg.norm(reduced_embeddings, axis=1, keepdims=True)
 
     # HDBSCAN hyperparameters to optimize
-    min_cluster_size = trial.suggest_int('min_cluster_size', 2, 10)
-    min_samples = trial.suggest_int('min_samples', 2, min_cluster_size)
+    min_cluster_size = trial.suggest_int("min_cluster_size", 2, 10)
+    min_samples = trial.suggest_int("min_samples", 2, min_cluster_size)
 
     # Fit HDBSCAN
     print("=== HDBSCAN Parameters ===")
@@ -404,15 +417,14 @@ def objective(trial, embeddings_array):
     labels = clusterer.fit_predict(reduced_embeddings)
 
     # Calculate metrics
-    metrics = calculate_clustering_metrics(
-        reduced_embeddings, labels, clusterer)
+    metrics = calculate_clustering_metrics(reduced_embeddings, labels, clusterer)
     print_clustering_summary(metrics)
 
     # Return negative composite score (Optuna minimizes)
-    composite_score = metrics.get('composite_score', -1.0)
+    composite_score = metrics.get("composite_score", -1.0)
 
     # Penalize if no valid clusters found or too much noise
-    if metrics.get('n_clusters', 0) < 2 or metrics.get('noise_ratio', 1.0) > 0.8:
+    if metrics.get("n_clusters", 0) < 2 or metrics.get("noise_ratio", 1.0) > 0.8:
         composite_score = -1.0
 
     return -composite_score
@@ -451,9 +463,9 @@ def optimize_hdbscan(embeddings_array, n_trials=100, timeout=None):
 
     # Create study
     study = optuna.create_study(
-        direction='minimize',  # We return negative composite score
+        direction="minimize",  # We return negative composite score
         sampler=optuna.samplers.TPESampler(seed=RANDOM_STATE),
-        pruner=optuna.pruners.MedianPruner(n_startup_trials=10)
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=10),
     )
 
     # Optimize
@@ -461,7 +473,7 @@ def optimize_hdbscan(embeddings_array, n_trials=100, timeout=None):
         lambda trial: objective(trial, embeddings_array),
         n_trials=n_trials,
         timeout=timeout,
-        show_progress_bar=True
+        show_progress_bar=True,
     )
 
     # Get best parameters
@@ -476,13 +488,13 @@ def optimize_hdbscan(embeddings_array, n_trials=100, timeout=None):
     print("\n=== Results with Best Parameters ===")
 
     # Apply best dimensionality reduction
-    if best_params['n_components'] < embeddings_array.shape[1]:
+    if best_params["n_components"] < embeddings_array.shape[1]:
         reducer = TruncatedSVD(
-            n_components=best_params['n_components'], random_state=RANDOM_STATE)
+            n_components=best_params["n_components"], random_state=RANDOM_STATE
+        )
         best_embeddings = reducer.fit_transform(embeddings_array)
         # Re-normalize after SVD
-        best_embeddings /= np.linalg.norm(embeddings_array,
-                                          axis=1, keepdims=True)
+        best_embeddings /= np.linalg.norm(embeddings_array, axis=1, keepdims=True)
         # reducer = umap.UMAP(n_components=best_params['n_components'])
         # # Fit the reducer to the data without transforming
         # reducer.fit(embeddings_array)
@@ -494,7 +506,8 @@ def optimize_hdbscan(embeddings_array, n_trials=100, timeout=None):
         #                                   axis=1, keepdims=True)
 
         print(
-            f"Reduced dimensions from {embeddings_array.shape[1]} to {best_params['n_components']}")
+            f"Reduced dimensions from {embeddings_array.shape[1]} to {best_params['n_components']}"
+        )
     else:
         best_embeddings = embeddings_array
         # reducer = None
@@ -502,33 +515,38 @@ def optimize_hdbscan(embeddings_array, n_trials=100, timeout=None):
 
     # Fit with best parameters
     best_clusterer = hdbscan.HDBSCAN(
-        min_cluster_size=best_params['min_cluster_size'],
-        min_samples=best_params['min_samples'],
+        min_cluster_size=best_params["min_cluster_size"],
+        min_samples=best_params["min_samples"],
         metric="euclidean",
         cluster_selection_method="eom",
     )
 
     best_labels = best_clusterer.fit_predict(best_embeddings)
     best_metrics = calculate_clustering_metrics(
-        best_embeddings, best_labels, best_clusterer)
+        best_embeddings, best_labels, best_clusterer
+    )
 
     print_clustering_summary(best_metrics)
     print()
 
     # Return results
     return {
-        'study': study,
-        'best_params': best_params,
-        'best_score': best_score,
-        'best_clusterer': best_clusterer,
-        'best_labels': best_labels,
-        'best_embeddings': best_embeddings,
-        'best_metrics': best_metrics,
-        'svd_transformer': reducer if best_params['n_components'] < embeddings_array.shape[1] else None
+        "study": study,
+        "best_params": best_params,
+        "best_score": best_score,
+        "best_clusterer": best_clusterer,
+        "best_labels": best_labels,
+        "best_embeddings": best_embeddings,
+        "best_metrics": best_metrics,
+        "svd_transformer": (
+            reducer if best_params["n_components"] < embeddings_array.shape[1] else None
+        ),
     }
 
 
-async def name_clusters(headline_df: pd.DataFrame, logger: Optional[logging.Logger] = None) -> pd.DataFrame:
+async def name_clusters(
+    headline_df: pd.DataFrame, logger: Optional[logging.Logger] = None
+) -> pd.DataFrame:
     """
     Generate descriptive names for discovered clusters using AI.
 
@@ -553,7 +571,8 @@ async def name_clusters(headline_df: pd.DataFrame, logger: Optional[logging.Logg
     """
 
     system_prompt, user_prompt, model, reasoning_effort = get_langfuse_client(
-        logger=logger).get_prompt("newsagent/topic_writer")
+        logger=logger
+    ).get_prompt("newsagent/topic_writer")
 
     topic_writer = LLMagent(
         system_prompt=system_prompt,
@@ -562,31 +581,36 @@ async def name_clusters(headline_df: pd.DataFrame, logger: Optional[logging.Logg
         model=model,
         reasoning_effort=reasoning_effort,
         verbose=False,
-        logger=logger
+        logger=logger,
     )
 
-    cluster_list = [(len(headline_df.loc[headline_df["cluster"] == i]), int(i))
-                    for i in headline_df['cluster'].unique()]
+    cluster_list = [
+        (len(headline_df.loc[headline_df["cluster"] == i]), int(i))
+        for i in headline_df["cluster"].unique()
+    ]
     cluster_list.sort(reverse=True)
 
     # default to "Other"
-    headline_df["cluster_name"] = 'Other'
+    headline_df["cluster_name"] = "Other"
 
     # for each cluster, prompt for a name and update cluster_name in headline_df
-    cluster_topics = [list() for _ in range(len(cluster_list)-1)]
+    cluster_topics = [list() for _ in range(len(cluster_list) - 1)]
     for n, i in cluster_list:
         try:
             if i < 0 or n < 2:
                 continue
-            tmpdf = headline_df.loc[headline_df['cluster'] == i].copy()
+            tmpdf = headline_df.loc[headline_df["cluster"] == i].copy()
             titles = tmpdf["title"].to_list()
             topics = tmpdf["topics"].to_list()
             title_topics = [
-                f'{title} ({", ".join(topic_list)})' for title, topic_list in zip(titles, topics)]
+                f'{title} ({", ".join(topic_list)})'
+                for title, topic_list in zip(titles, topics)
+            ]
             topic_text = await topic_writer.run_prompt(input_text=str(title_topics))
             cluster_topics[i] = topic_text.topic_text
-            headline_df.loc[headline_df['cluster'] == i,
-                            "cluster_name"] = topic_text.topic_text
+            headline_df.loc[headline_df["cluster"] == i, "cluster_name"] = (
+                topic_text.topic_text
+            )
             if logger:
                 logger.info(f"{i}: {topic_text.topic_text}")
                 logger.info("\n".join(title_topics))
@@ -597,8 +621,12 @@ async def name_clusters(headline_df: pd.DataFrame, logger: Optional[logging.Logg
     return headline_df
 
 
-async def do_clustering(headline_df: pd.DataFrame, logger: Optional[logging.Logger] = None,
-                        n_trials: int = 50, umap_reducer_path: str = 'umap_reducer.pkl') -> pd.DataFrame:
+async def do_clustering(
+    headline_df: pd.DataFrame,
+    logger: Optional[logging.Logger] = None,
+    n_trials: int = 50,
+    umap_reducer_path: str = "umap_reducer.pkl",
+) -> pd.DataFrame:
     """
     Perform complete clustering workflow on article headlines.
 
@@ -633,12 +661,10 @@ async def do_clustering(headline_df: pd.DataFrame, logger: Optional[logging.Logg
         Optimization may take several minutes depending on dataset size and hardware.
     """
     if logger:
-        logger.info(
-            f"Starting clustering pipeline for {len(headline_df)} articles")
+        logger.info(f"Starting clustering pipeline for {len(headline_df)} articles")
 
     # Generate embeddings
-    headline_df['extended_summary'] = headline_df.apply(
-        _create_short_summary, axis=1)
+    headline_df["extended_summary"] = headline_df.apply(_create_short_summary, axis=1)
 
     if logger:
         logger.info("Generating embeddings for articles")
@@ -650,13 +676,13 @@ async def do_clustering(headline_df: pd.DataFrame, logger: Optional[logging.Logg
     # Load pretrained UMAP reducer
     try:
         if logger:
-            logger.info(
-                f"Loading pretrained UMAP reducer from {umap_reducer_path}")
-        with open(umap_reducer_path, 'rb') as f:
+            logger.info(f"Loading pretrained UMAP reducer from {umap_reducer_path}")
+        with open(umap_reducer_path, "rb") as f:
             umap_reducer = pickle.load(f)
         if logger:
             logger.info(
-                f"Loaded UMAP reducer (n_components={umap_reducer.n_components})")
+                f"Loaded UMAP reducer (n_components={umap_reducer.n_components})"
+            )
     except FileNotFoundError:
         error_msg = f"UMAP reducer not found at {umap_reducer_path}. Please train a reducer first using 'Tune HDBSCAN.ipynb'"
         if logger:
@@ -671,7 +697,8 @@ async def do_clustering(headline_df: pd.DataFrame, logger: Optional[logging.Logg
     # Apply dimensionality reduction
     if logger:
         logger.info(
-            f"Applying UMAP dimensionality reduction: {embeddings_df.shape[1]} → {umap_reducer.n_components} dimensions")
+            f"Applying UMAP dimensionality reduction: {embeddings_df.shape[1]} → {umap_reducer.n_components} dimensions"
+        )
     reduced = umap_reducer.transform(embeddings_df).astype(np.float64)
 
     if logger:
@@ -680,49 +707,51 @@ async def do_clustering(headline_df: pd.DataFrame, logger: Optional[logging.Logg
     # Optimize HDBSCAN hyperparameters
     if logger:
         logger.info(
-            f"Starting HDBSCAN hyperparameter optimization with {n_trials} trials")
+            f"Starting HDBSCAN hyperparameter optimization with {n_trials} trials"
+        )
     else:
         print(f"Starting optimization with {n_trials} trials...")
         print(f"Embedding shape: {reduced.shape}")
 
     study = optuna.create_study(
-        direction='minimize',  # We return negative composite score
+        direction="minimize",  # We return negative composite score
         sampler=optuna.samplers.TPESampler(seed=RANDOM_STATE),
-        pruner=optuna.pruners.MedianPruner(n_startup_trials=10)
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=10),
     )
 
     # Optimize (suppress Optuna's verbose output)
     study.optimize(
         lambda trial: umap_objective(trial, reduced),
         n_trials=n_trials,
-        show_progress_bar=False
+        show_progress_bar=False,
     )
     best_params = study.best_params
     best_score = -study.best_value  # Convert back to positive
 
     if logger:
+        logger.info(f"Optimization completed! Best composite score: {best_score:.4f}")
         logger.info(
-            f"Optimization completed! Best composite score: {best_score:.4f}")
-        logger.info(
-            f"Best parameters: min_cluster_size={best_params['min_cluster_size']}, min_samples={best_params['min_samples']}")
+            f"Best parameters: min_cluster_size={best_params['min_cluster_size']}, min_samples={best_params['min_samples']}"
+        )
     else:
         print(f"\nOptimization completed!")
         print(f"Best composite score: {best_score:.4f}")
         print(f"Best parameters: {best_params}")
 
     # Cluster with best parameters
-    min_cluster_size = best_params['min_cluster_size']
-    min_samples = best_params['min_samples']
+    min_cluster_size = best_params["min_cluster_size"]
+    min_samples = best_params["min_samples"]
 
     if logger:
         logger.info(
-            f"Clustering with HDBSCAN (min_cluster_size={min_cluster_size}, min_samples={min_samples})")
+            f"Clustering with HDBSCAN (min_cluster_size={min_cluster_size}, min_samples={min_samples})"
+        )
 
     clusterer = hdbscan.HDBSCAN(
         min_cluster_size=min_cluster_size,
         min_samples=min_samples,
         metric="euclidean",
-        cluster_selection_method="eom"
+        cluster_selection_method="eom",
     )
     labels = clusterer.fit_predict(reduced)
 
@@ -732,11 +761,11 @@ async def do_clustering(headline_df: pd.DataFrame, logger: Optional[logging.Logg
 
     if logger:
         logger.info(
-            f"Clustering complete: {n_clusters} clusters, {n_noise} noise points ({n_noise/len(labels):.1%})")
+            f"Clustering complete: {n_clusters} clusters, {n_noise} noise points ({n_noise/len(labels):.1%})"
+        )
 
-    cluster_df = pd.DataFrame(
-        {'cluster': labels}, index=embeddings_df.index)
-    headline_df['cluster'] = cluster_df['cluster'].astype(int)
+    cluster_df = pd.DataFrame({"cluster": labels}, index=embeddings_df.index)
+    headline_df["cluster"] = cluster_df["cluster"].astype(int)
 
     # Generate cluster names
     if logger:
