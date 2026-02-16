@@ -64,7 +64,8 @@ from do_cluster import _get_embeddings_df, do_clustering
 from do_dedupe import process_dataframe_with_filtering
 from do_rating import bradley_terry, fn_rate_articles
 from fetch import Fetcher
-from llm import LLMagent, get_langfuse_client, paginate_df_async
+from llm import LLMagent, paginate_df_async
+from prompts import load_prompt
 from log_handler import SQLiteLogHandler
 from newsletter_state import NewsletterAgentState
 from scrape import normalize_html, scrape_urls_concurrent
@@ -993,8 +994,7 @@ class FilterUrlsTool:
                     f"🔍 Filtering {len(headline_df)} headlines for AI relevance using LLM...")
 
             filter_system_prompt, filter_user_prompt, model, reasoning_effort = \
-                get_langfuse_client(logger=self.logger).get_prompt(
-                    "newsagent/filter_urls")
+                load_prompt("newsagent/filter_urls")
 
             # Create LLM agent for AI classification
             classifier = LLMagent(
@@ -1297,8 +1297,8 @@ class DownloadArticlesTool:
                         f"Generating site names for {len(domains_to_process)} domains using LLM")
 
                 # Get prompt from Langfuse
-                system_prompt, user_prompt, model, reasoning_effort = get_langfuse_client(
-                    logger=self.logger).get_prompt("newsagent/sitename")
+                system_prompt, user_prompt, model, reasoning_effort = load_prompt(
+                    "newsagent/sitename")
 
                 # Create LLM agent for site name generation
                 sitename_agent = LLMagent(
@@ -1656,8 +1656,8 @@ class ExtractSummariesTool:
                 self._read_text_file)
 
             # Get prompt and model from Langfuse
-            system_prompt, user_prompt, model, reasoning_effort = get_langfuse_client(
-                logger=self.logger).get_prompt("newsagent/extract_summaries")
+            system_prompt, user_prompt, model, reasoning_effort = load_prompt(
+                "newsagent/extract_summaries")
 
             if self.logger:
                 self.logger.info(f"Using model '{model}' for summarization")
@@ -1759,8 +1759,8 @@ class ExtractSummariesTool:
             ai_articles_df['input_text'] = ai_articles_df.apply(
                 _get_input_text, axis=1)
 
-            system_prompt, user_prompt, model, reasoning_effort = get_langfuse_client(
-                logger=self.logger).get_prompt("newsagent/item_distiller")
+            system_prompt, user_prompt, model, reasoning_effort = load_prompt(
+                "newsagent/item_distiller")
             distill_agent = LLMagent(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
@@ -2104,8 +2104,8 @@ class ClusterByTopicTool:
             self.logger.info("Starting topic extraction for clustering")
 
         # Get prompt and model from Langfuse
-        system_prompt, user_prompt, model, reasoning_effort = get_langfuse_client(
-            logger=self.logger).get_prompt("newsagent/extract_topics")
+        system_prompt, user_prompt, model, reasoning_effort = load_prompt(
+            "newsagent/extract_topics")
 
         if self.logger:
             self.logger.info(f"Using model '{model}' for topic extraction")
@@ -2158,7 +2158,7 @@ class ClusterByTopicTool:
             List of boolean values indicating relevance to the topic
         """
         # Get prompt and model from Langfuse
-        system_prompt, user_prompt, model, reasoning_effort = get_langfuse_client(logger=self.logger).get_prompt(
+        system_prompt, user_prompt, model, reasoning_effort = load_prompt(
             "newsagent/canonical_topic")
 
         # Create LLMagent for canonical topic classification
@@ -2180,7 +2180,7 @@ class ClusterByTopicTool:
             value_field='relevant',
             item_list_field='results_list',
             item_id_field='id',
-            input_vars={'topic': topic},
+            input_vars={'topics': topic},
             chunk_size=10
         )
 
@@ -2240,8 +2240,8 @@ class ClusterByTopicTool:
         Returns:
             DataFrame with cleaned topics_list column
         """
-        system_prompt, user_prompt, model, reasoning_effort = get_langfuse_client(
-            logger=self.logger).get_prompt("newsagent/topic_cleanup")
+        system_prompt, user_prompt, model, reasoning_effort = load_prompt(
+            "newsagent/topic_cleanup")
 
         if self.logger:
             self.logger.info(
@@ -2571,7 +2571,7 @@ class SelectSectionsTool:
 
             self.logger.info("Category proposal")
 
-            system_prompt, user_prompt, model, reasoning_effort = get_langfuse_client(logger=self.logger).get_prompt(
+            system_prompt, user_prompt, model, reasoning_effort = load_prompt(
                 "newsagent/cat_proposal")
 
             cat_proposal_agent = LLMagent(
@@ -2599,8 +2599,8 @@ class SelectSectionsTool:
 
             self.logger.info(f"Cleaning up initial categories: {initial_cats}")
 
-            system_prompt, user_prompt, model, reasoning_effort = get_langfuse_client(
-                logger=self.logger).get_prompt("newsagent/cat_cleanup")
+            system_prompt, user_prompt, model, reasoning_effort = load_prompt(
+                "newsagent/cat_cleanup")
 
             cat_cleanup_agent = LLMagent(
                 system_prompt=system_prompt,
@@ -2617,8 +2617,8 @@ class SelectSectionsTool:
             self.logger.info(f"Final categories: {final_cats_str}")
 
             # loop over items and assign to cats
-            system_prompt, user_prompt, model, reasoning_effort = get_langfuse_client(
-                logger=self.logger).get_prompt("newsagent/cat_assignment")
+            system_prompt, user_prompt, model, reasoning_effort = load_prompt(
+                "newsagent/cat_assignment")
 
             cat_assignment_agent = LLMagent(
                 system_prompt=system_prompt,
@@ -2667,7 +2667,7 @@ class SelectSectionsTool:
 
             # dedupe articles
             self.logger.info("Deduping articles")
-            system_prompt, user_prompt, model, reasoning_effort = get_langfuse_client(logger=self.logger).get_prompt(
+            system_prompt, user_prompt, model, reasoning_effort = load_prompt(
                 "newsagent/dedupe_articles")
 
             dedupe_agent = LLMagent(
@@ -3134,8 +3134,7 @@ class DraftSectionsTool:
 
         # Get langfuse prompts for section critique
         section_critique_system, section_critique_user, section_critique_model, section_critique_reasoning_effort = \
-            get_langfuse_client(logger=self.logger).get_prompt(
-                "newsagent/critique_section")
+            load_prompt("newsagent/critique_section")
 
         # Create critique agent (one-time)
         critique_agent = LLMagent(
@@ -3151,8 +3150,8 @@ class DraftSectionsTool:
         )
 
         # Create write_section agent for re-drafting (one-time)
-        write_system, write_user, write_model, write_reasoning_effort = get_langfuse_client(
-            logger=self.logger).get_prompt("newsagent/write_section")
+        write_system, write_user, write_model, write_reasoning_effort = load_prompt(
+            "newsagent/write_section")
         write_section_agent = LLMagent(
             system_prompt=write_system,
             user_prompt=write_user,
@@ -3373,8 +3372,7 @@ class DraftSectionsTool:
 
             # Create write_section agent
             write_section_system_prompt, write_section_user_prompt, model, reasoning_effort = \
-                get_langfuse_client(logger=self.logger).get_prompt(
-                    "newsagent/write_section")
+                load_prompt("newsagent/write_section")
 
             write_section_agent = LLMagent(
                 system_prompt=write_section_system_prompt,
@@ -3513,8 +3511,7 @@ class FinalizeNewsletterTool:
 
             # run generate_newsletter_title prompt from Langfuse
             title_system_prompt, title_user_prompt, model, reasoning_effort = \
-                get_langfuse_client(logger=self.logger).get_prompt(
-                    "newsagent/generate_newsletter_title")
+                load_prompt("newsagent/generate_newsletter_title")
             title_agent = LLMagent(
                 system_prompt=title_system_prompt,
                 user_prompt=title_user_prompt,
@@ -3541,8 +3538,7 @@ class FinalizeNewsletterTool:
 
             # Initialize agents
             critique_newsletter_system_prompt, critique_newsletter_user_prompt, model, reasoning_effort = \
-                get_langfuse_client(logger=self.logger).get_prompt(
-                    "newsagent/critique_newsletter")
+                load_prompt("newsagent/critique_newsletter")
             critique_newsletter_agent = LLMagent(
                 system_prompt=critique_newsletter_system_prompt,
                 user_prompt=critique_newsletter_user_prompt,
@@ -3556,8 +3552,7 @@ class FinalizeNewsletterTool:
             )
 
             improve_newsletter_system_prompt, improve_newsletter_user_prompt, model, reasoning_effort = \
-                get_langfuse_client(logger=self.logger).get_prompt(
-                    "newsagent/improve_newsletter")
+                load_prompt("newsagent/improve_newsletter")
             improve_newsletter_agent = LLMagent(
                 system_prompt=improve_newsletter_system_prompt,
                 user_prompt=improve_newsletter_user_prompt,

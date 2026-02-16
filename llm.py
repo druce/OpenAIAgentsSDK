@@ -1,37 +1,31 @@
 #!/usr/bin/env python3
 """
-LLM calling module with flexible prompt templating and batch processing.
+LLM calling module with multi-vendor support, structured output, and batch processing.
 
-Suppose we have 1000 headlines in a dataframe and we want to apply a prompt to each one.
-Some stuff we might want
-- structured output, like ideally apply prompts to this column and put results in a new column
-- output validation, so llm doesn't e.g. transpose rows
-- batching , don't send 1000 at once but don't send a single headline with a large prompt 1000 times
-- concurrency / async processing, send many batches at once (but maybe specify some max concurrency)
-- retry logic with exponential backoff
-
-This module provides the LLMagent class for making structured LLM calls with:
-- Flexible prompt templates with variable substitution
-- Single and batch processing modes
-- Retry logic with exponential backoff
-- Pydantic output validation
-- Async batch processing with concurrency control
-
-todo: function that takes a dataframe , list of input columns, name of output column, and
+Supports Anthropic, OpenAI, and Gemini models via a unified facade (LLMagent) that
+preserves backward compatibility while delegating to vendor-specific agents internally.
 """
+from __future__ import annotations
 
 import asyncio
 import json
 import logging
 import math
 import os
+import time
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Type, get_args, get_origin
 
+import anthropic
 import openai
 import pandas as pd
-from agents import Agent, Runner
+from google import genai
+from google.genai import errors as genai_errors
+from google.genai import types as genai_types
 from openai import AsyncOpenAI, BadRequestError
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, create_model
 from tenacity import (
     before_sleep_log,
     retry,
@@ -40,79 +34,726 @@ from tenacity import (
     wait_exponential,
 )
 
-import langfuse
-from config import DEFAULT_CONCURRENCY
+from config import DEFAULT_CONCURRENCY, VENDOR_RPM_LIMITS
 
 _logger = logging.getLogger(__name__)
-
-# Global singleton LangfuseClient for reuse across calls
-_global_langfuse_client: Optional["LangfuseClient"] = None
+logging.getLogger("google_genai.models").setLevel(logging.WARNING)
 
 
-def get_langfuse_client(logger: Optional[logging.Logger] = None) -> "LangfuseClient":
+# ---------------------------------------------------------------------------
+# Vendor enum and model registry (public, imported by prompts.py)
+# ---------------------------------------------------------------------------
+
+
+class Vendor(str, Enum):
+    """Supported LLM vendors."""
+
+    ANTHROPIC = "anthropic"
+    OPENAI = "openai"
+    GEMINI = "gemini"
+
+
+@dataclass(frozen=True)
+class LLMModel:
+    """Model identity and capabilities."""
+
+    model_id: str
+    vendor: Vendor
+    supports_logprobs: bool
+    supports_reasoning: bool
+    supports_temperature: bool
+    default_max_tokens: int
+    display_name: str
+
+
+# --- Pre-defined model constants ---
+
+CLAUDE_OPUS_MODEL = LLMModel(
+    model_id="claude-opus-4-6",
+    vendor=Vendor.ANTHROPIC,
+    supports_logprobs=False,
+    supports_reasoning=True,
+    supports_temperature=True,
+    default_max_tokens=16384,
+    display_name="Claude Opus 4.6",
+)
+
+CLAUDE_SONNET_MODEL = LLMModel(
+    model_id="claude-sonnet-4-5-20250929",
+    vendor=Vendor.ANTHROPIC,
+    supports_logprobs=False,
+    supports_reasoning=True,
+    supports_temperature=True,
+    default_max_tokens=16384,
+    display_name="Claude Sonnet 4.5",
+)
+
+CLAUDE_HAIKU_MODEL = LLMModel(
+    model_id="claude-haiku-4-5-20251001",
+    vendor=Vendor.ANTHROPIC,
+    supports_logprobs=False,
+    supports_reasoning=True,
+    supports_temperature=True,
+    default_max_tokens=16384,
+    display_name="Claude Haiku 4.5",
+)
+
+GPT5_MINI_MODEL = LLMModel(
+    model_id="gpt-5-mini",
+    vendor=Vendor.OPENAI,
+    supports_logprobs=False,
+    supports_reasoning=True,
+    supports_temperature=False,
+    default_max_tokens=4096,
+    display_name="GPT-5 Mini",
+)
+
+GPT41_MINI_MODEL = LLMModel(
+    model_id="gpt-4.1-mini",
+    vendor=Vendor.OPENAI,
+    supports_logprobs=True,
+    supports_reasoning=False,
+    supports_temperature=True,
+    default_max_tokens=4096,
+    display_name="GPT-4.1 Mini",
+)
+
+GEMINI_FLASH_MODEL = LLMModel(
+    model_id="gemini-3-flash-preview",
+    vendor=Vendor.GEMINI,
+    supports_logprobs=False,
+    supports_reasoning=True,
+    supports_temperature=True,
+    default_max_tokens=8192,
+    display_name="Gemini 3.0 Flash",
+)
+
+GEMINI_PRO_MODEL = LLMModel(
+    model_id="gemini-2.5-pro",
+    vendor=Vendor.GEMINI,
+    supports_logprobs=False,
+    supports_reasoning=True,
+    supports_temperature=True,
+    default_max_tokens=8192,
+    display_name="Gemini 2.5 Pro",
+)
+
+MODEL_DICT: Dict[str, LLMModel] = {
+    # Anthropic
+    CLAUDE_OPUS_MODEL.model_id: CLAUDE_OPUS_MODEL,
+    CLAUDE_SONNET_MODEL.model_id: CLAUDE_SONNET_MODEL,
+    CLAUDE_HAIKU_MODEL.model_id: CLAUDE_HAIKU_MODEL,
+    "claude-sonnet-4-20250514": LLMModel(
+        "claude-sonnet-4-20250514",
+        Vendor.ANTHROPIC,
+        False,
+        True,
+        True,
+        16384,
+        "Claude Sonnet 4",
+    ),
+    "claude-sonnet-4": LLMModel(
+        "claude-sonnet-4", Vendor.ANTHROPIC, False, True, True, 16384, "Claude Sonnet 4"
+    ),
+    "claude-opus-4-20250514": LLMModel(
+        "claude-opus-4-20250514",
+        Vendor.ANTHROPIC,
+        False,
+        True,
+        True,
+        16384,
+        "Claude Opus 4",
+    ),
+    "claude-opus-4": LLMModel(
+        "claude-opus-4", Vendor.ANTHROPIC, False, True, True, 16384, "Claude Opus 4"
+    ),
+    "claude-3-5-haiku": LLMModel(
+        "claude-3-5-haiku",
+        Vendor.ANTHROPIC,
+        False,
+        True,
+        True,
+        16384,
+        "Claude 3.5 Haiku",
+    ),
+    # OpenAI
+    GPT5_MINI_MODEL.model_id: GPT5_MINI_MODEL,
+    GPT41_MINI_MODEL.model_id: GPT41_MINI_MODEL,
+    "gpt-5": LLMModel("gpt-5", Vendor.OPENAI, False, True, False, 4096, "GPT-5"),
+    "gpt-5-nano": LLMModel(
+        "gpt-5-nano", Vendor.OPENAI, False, True, False, 4096, "GPT-5 Nano"
+    ),
+    "o3-mini": LLMModel("o3-mini", Vendor.OPENAI, False, True, False, 4096, "O3 Mini"),
+    "o3": LLMModel("o3", Vendor.OPENAI, False, True, False, 4096, "O3"),
+    "o4-mini": LLMModel("o4-mini", Vendor.OPENAI, False, True, False, 4096, "O4 Mini"),
+    "gpt-4o-mini": LLMModel(
+        "gpt-4o-mini", Vendor.OPENAI, True, False, True, 4096, "GPT-4o Mini"
+    ),
+    "gpt-4o-2024-11-20": LLMModel(
+        "gpt-4o-2024-11-20", Vendor.OPENAI, True, False, True, 4096, "GPT-4o"
+    ),
+    "gpt-4.5-preview": LLMModel(
+        "gpt-4.5-preview", Vendor.OPENAI, True, False, True, 4096, "GPT-4.5 Preview"
+    ),
+    "gpt-4.1": LLMModel("gpt-4.1", Vendor.OPENAI, True, False, True, 4096, "GPT-4.1"),
+    "gpt-4.1-nano": LLMModel(
+        "gpt-4.1-nano", Vendor.OPENAI, True, False, True, 4096, "GPT-4.1 Nano"
+    ),
+    # Gemini
+    GEMINI_FLASH_MODEL.model_id: GEMINI_FLASH_MODEL,
+    GEMINI_PRO_MODEL.model_id: GEMINI_PRO_MODEL,
+    "models/gemini-2.0-flash-thinking-exp": LLMModel(
+        "models/gemini-2.0-flash-thinking-exp",
+        Vendor.GEMINI,
+        False,
+        True,
+        True,
+        8192,
+        "Gemini 2.0 Flash Thinking",
+    ),
+    "models/gemini-2.0-pro-exp": LLMModel(
+        "models/gemini-2.0-pro-exp",
+        Vendor.GEMINI,
+        False,
+        True,
+        True,
+        8192,
+        "Gemini 2.0 Pro",
+    ),
+    "models/gemini-2.0-flash": LLMModel(
+        "models/gemini-2.0-flash",
+        Vendor.GEMINI,
+        False,
+        True,
+        True,
+        8192,
+        "Gemini 2.0 Flash",
+    ),
+    "models/gemini-1.5-pro-latest": LLMModel(
+        "models/gemini-1.5-pro-latest",
+        Vendor.GEMINI,
+        False,
+        False,
+        True,
+        8192,
+        "Gemini 1.5 Pro",
+    ),
+    "models/gemini-1.5-pro": LLMModel(
+        "models/gemini-1.5-pro",
+        Vendor.GEMINI,
+        False,
+        False,
+        True,
+        8192,
+        "Gemini 1.5 Pro",
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# Async token-bucket rate limiter (per vendor)
+# ---------------------------------------------------------------------------
+
+
+class AsyncTokenBucketRateLimiter:
+    """Token-bucket rate limiter for async API calls.
+
+    Refills at ``rpm / 60`` tokens per second.  Each ``acquire()`` consumes one
+    token; callers sleep when the bucket is empty.
     """
-    Get or create singleton LangfuseClient.
 
-    Args:
-        logger: Optional logger instance
+    def __init__(self, rpm: int) -> None:
+        self.rpm = rpm
+        self.max_tokens = float(rpm)
+        self._tokens = float(rpm)           # start full
+        self._rate = rpm / 60.0             # tokens per second
+        self._last_refill = time.monotonic()
+        self._lock = asyncio.Lock()
 
-    Returns:
-        Shared LangfuseClient instance
-    """
-    global _global_langfuse_client
-    if _global_langfuse_client is None:
-        _global_langfuse_client = LangfuseClient(logger=logger)
-    return _global_langfuse_client
+    async def acquire(self) -> None:
+        async with self._lock:
+            now = time.monotonic()
+            elapsed = now - self._last_refill
+            self._tokens = min(self.max_tokens, self._tokens + elapsed * self._rate)
+            self._last_refill = now
+
+            if self._tokens < 1.0:
+                wait = (1.0 - self._tokens) / self._rate
+                await asyncio.sleep(wait)
+                self._tokens = 0.0
+                self._last_refill = time.monotonic()
+            else:
+                self._tokens -= 1.0
+
+    async def __aenter__(self):
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, *exc):
+        pass
+
+
+_vendor_rate_limiters: Dict[Vendor, AsyncTokenBucketRateLimiter] = {}
+
+
+def _get_vendor_rate_limiter(vendor: Vendor) -> AsyncTokenBucketRateLimiter:
+    """Return (or create) the singleton rate limiter for *vendor*."""
+    if vendor not in _vendor_rate_limiters:
+        rpm = VENDOR_RPM_LIMITS.get(vendor.value, 1000)
+        _vendor_rate_limiters[vendor] = AsyncTokenBucketRateLimiter(rpm=rpm)
+        _logger.info(
+            "Created rate limiter for %s (%d RPM)", vendor.value, rpm
+        )
+    return _vendor_rate_limiters[vendor]
+
+
+# ---------------------------------------------------------------------------
+# Model string resolution
+# ---------------------------------------------------------------------------
+
+
+def _resolve_model(model_id: str) -> LLMModel:
+    """Resolve a model string to an LLMModel, using heuristics for unknown models."""
+    if model_id in MODEL_DICT:
+        return MODEL_DICT[model_id]
+
+    # Prefix heuristic for unknown models
+    if model_id.startswith("claude-"):
+        vendor = Vendor.ANTHROPIC
+    elif model_id.startswith("gemini-") or model_id.startswith("models/gemini-"):
+        vendor = Vendor.GEMINI
+    else:
+        vendor = Vendor.OPENAI
+
+    _logger.debug(f"Unknown model '{model_id}', inferring vendor={vendor.value}")
+    return LLMModel(
+        model_id=model_id,
+        vendor=vendor,
+        supports_logprobs=False,
+        supports_reasoning=False,
+        supports_temperature=True,
+        default_max_tokens=(
+            8192
+            if vendor == Vendor.OPENAI
+            else 8192 if vendor == Vendor.GEMINI else 16384
+        ),
+        display_name=model_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Reasoning effort mapping (int 0-10 scale used by vendor agents)
+# ---------------------------------------------------------------------------
+
+_ANTHROPIC_THINKING_MAP = {-1: 0, 0: 0, 2: 1024, 4: 2048, 6: 4096, 8: 8192, 10: 16384}
+_OPENAI_REASONING_MAP = {
+    -1: None,
+    0: None,
+    2: "low",
+    4: "low",
+    6: "medium",
+    8: "high",
+    10: "high",
+}
+_GEMINI_THINKING_MAP = {-1: 0, 0: 0, 2: 1024, 4: 2048, 6: 4096, 8: 8192, 10: 16384}
+
+# Bridge between old string API ("low"/"medium"/"high") and new int API (0-10)
+_EFFORT_STR_TO_INT = {"low": 2, "medium": 6, "high": 8}
+_EFFORT_INT_TO_STR = {0: None, 2: "low", 4: "low", 6: "medium", 8: "high", 10: "high"}
+
+
+def _convert_effort(effort) -> int:
+    """Accept None, str, or int. Return int 0-10."""
+    if effort is None:
+        return 0
+    if isinstance(effort, int):
+        return effort
+    return _EFFORT_STR_TO_INT.get(effort, 0)
+
+
+def _validate_effort(effort: int) -> int:
+    if effort == -1:
+        return -1
+    if effort < 0 or effort > 10:
+        raise ValueError(
+            f"reasoning_effort must be 0-10 (or -1 to disable), got {effort}"
+        )
+    return round(effort / 2) * 2
+
+
+def _anthropic_thinking_tokens(effort: int) -> int:
+    return _ANTHROPIC_THINKING_MAP[_validate_effort(effort)]
+
+
+def _openai_reasoning_effort(effort: int) -> Optional[str]:
+    return _OPENAI_REASONING_MAP[_validate_effort(effort)]
+
+
+def _gemini_thinking_tokens(effort: int) -> int:
+    return _GEMINI_THINKING_MAP[_validate_effort(effort)]
+
+
+# ---------------------------------------------------------------------------
+# Vendor agent base class and implementations (private)
+# ---------------------------------------------------------------------------
+
+
+class _VendorAgent(ABC):
+    """Vendor-agnostic async LLM agent with structured output and retry logic."""
+
+    _fatal_exceptions: Tuple[Type[Exception], ...] = ()
+    _temporary_exceptions: Tuple[Type[Exception], ...] = ()
+
+    def __init__(
+        self,
+        model: LLMModel,
+        system_prompt: str,
+        user_prompt: str,
+        output_type: Optional[Type[BaseModel]] = None,
+        reasoning_effort: int = 0,
+        max_concurrency: int = 12,
+        temperature: float = 0.0,
+    ):
+        self.model = model
+        self.system_prompt = system_prompt
+        self.user_prompt = user_prompt
+        self.output_type = output_type
+        self.reasoning_effort = reasoning_effort
+        if reasoning_effort < -1 or reasoning_effort > 10:
+            raise ValueError(
+                f"reasoning_effort must be 0-10 (or -1 to disable), got {reasoning_effort}"
+            )
+        self.max_concurrency = max_concurrency
+        self.temperature = temperature
+        self._semaphore = asyncio.Semaphore(max_concurrency)
+
+    @abstractmethod
+    async def _call_llm(
+        self, system: str, user: str, output_schema: Optional[Dict[str, Any]]
+    ) -> Any: ...
+
+    @abstractmethod
+    async def _parse_structured(
+        self, raw: Any, output_type: Type[BaseModel]
+    ) -> BaseModel: ...
+
+    @abstractmethod
+    async def _parse_logprobs(
+        self, raw: Any, target_tokens: List[str]
+    ) -> Dict[str, float]: ...
+
+    @abstractmethod
+    def _extract_text(self, raw: Any) -> str: ...
+
+    def _format_prompt(self, template: str, variables: Dict[str, Any]) -> str:
+        try:
+            return template.format(**variables)
+        except KeyError as e:
+            raise ValueError(
+                f"Missing prompt variable {e}. "
+                f"Template expects: {[v[1] for v in __import__('string').Formatter().parse(template) if v[1]]}, "
+                f"got: {list(variables.keys())}"
+            ) from None
+
+    _call_timeout: float = 900  # 15 minutes
+
+    async def _call_with_retry(
+        self, system: str, user: str, output_schema: Optional[Dict[str, Any]]
+    ) -> Any:
+        @retry(
+            retry=retry_if_exception_type(
+                (*self._temporary_exceptions, asyncio.TimeoutError)
+            ),
+            stop=stop_after_attempt(5),
+            wait=wait_exponential(multiplier=2, min=2, max=120),
+            reraise=True,
+        )
+        async def _do_call():
+            await _get_vendor_rate_limiter(self.model.vendor).acquire()
+            return await asyncio.wait_for(
+                self._call_llm(system, user, output_schema),
+                timeout=self._call_timeout,
+            )
+
+        return await _do_call()
+
+    async def prompt_dict(self, variables: Optional[Dict[str, Any]] = None) -> Any:
+        user_text = self._format_prompt(self.user_prompt, variables or {})
+        output_schema = None
+        if self.output_type:
+            output_schema = self.output_type.model_json_schema()
+        raw = await self._call_with_retry(self.system_prompt, user_text, output_schema)
+        if self.output_type:
+            return await self._parse_structured(raw, self.output_type)
+        return self._extract_text(raw)
+
+    async def run_prompt_with_probs(
+        self,
+        variables: Optional[Dict[str, Any]] = None,
+        target_tokens: Optional[List[str]] = None,
+    ) -> Dict[str, float]:
+        target_tokens = target_tokens or []
+        user_text = self._format_prompt(self.user_prompt, variables or {})
+        if self.model.supports_logprobs:
+            raw = await self._call_with_retry(self.system_prompt, user_text, None)
+            return await self._parse_logprobs(raw, target_tokens)
+        else:
+            ConfidenceModel = create_model("ConfidenceModel", confidence=(float, ...))
+            schema = ConfidenceModel.model_json_schema()
+            raw = await self._call_with_retry(self.system_prompt, user_text, schema)
+            parsed = await self._parse_structured(raw, ConfidenceModel)
+            confidence = parsed.confidence
+            result = {}
+            if target_tokens:
+                result[target_tokens[0]] = confidence
+            return result
+
+
+class _AnthropicAgent(_VendorAgent):
+    """Anthropic Claude agent using tool_use for structured output."""
+
+    _fatal_exceptions = (anthropic.AuthenticationError, anthropic.BadRequestError)
+    _temporary_exceptions = (
+        anthropic.RateLimitError,
+        anthropic.APIConnectionError,
+        anthropic.InternalServerError,
+    )
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._client = anthropic.AsyncAnthropic()
+
+    async def _call_llm(self, system, user, output_schema):
+        kwargs = {
+            "model": self.model.model_id,
+            "max_tokens": self.model.default_max_tokens,
+            "system": system,
+            "messages": [{"role": "user", "content": user}],
+        }
+        thinking_tokens = _anthropic_thinking_tokens(self.reasoning_effort)
+        if thinking_tokens > 0:
+            kwargs["thinking"] = {"type": "enabled", "budget_tokens": thinking_tokens}
+        else:
+            if self.model.supports_temperature:
+                kwargs["temperature"] = self.temperature
+
+        if output_schema and thinking_tokens <= 0:
+            kwargs["tools"] = [
+                {
+                    "name": "structured_output",
+                    "description": "Return structured data",
+                    "input_schema": output_schema,
+                }
+            ]
+            kwargs["tool_choice"] = {"type": "tool", "name": "structured_output"}
+
+        response = await self._client.messages.create(**kwargs)
+        if response.stop_reason == "max_tokens":
+            raise RuntimeError(
+                f"Anthropic response truncated (stop_reason='max_tokens', "
+                f"max_tokens={self.model.default_max_tokens}). "
+                f"Increase default_max_tokens or reduce input size."
+            )
+        return response
+
+    async def _parse_structured(self, raw, output_type):
+        for block in raw.content:
+            if block.type == "tool_use":
+                return output_type.model_validate(block.input)
+        text = self._extract_text(raw)
+        if text.startswith("```"):
+            text = text.split("\n", 1)[-1]
+        if text.endswith("```"):
+            text = text[:-3].strip()
+        return output_type.model_validate_json(text)
+
+    async def _parse_logprobs(self, raw, target_tokens):
+        return {}
+
+    def _extract_text(self, raw) -> str:
+        for block in raw.content:
+            if block.type == "text":
+                return block.text
+        return ""
+
+
+def _make_openai_strict_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively fix a JSON schema for OpenAI strict mode."""
+    schema = schema.copy()
+    if schema.get("type") == "object" and "properties" in schema:
+        schema["required"] = list(schema["properties"].keys())
+        schema["additionalProperties"] = False
+        schema["properties"] = {
+            k: _make_openai_strict_schema(v) for k, v in schema["properties"].items()
+        }
+    if "items" in schema:
+        schema["items"] = _make_openai_strict_schema(schema["items"])
+    for defs_key in ("$defs", "definitions"):
+        if defs_key in schema:
+            schema[defs_key] = {
+                k: _make_openai_strict_schema(v) for k, v in schema[defs_key].items()
+            }
+    return schema
+
+
+class _OpenAIAgent(_VendorAgent):
+    """OpenAI agent using json_schema for structured output and native logprobs."""
+
+    _fatal_exceptions = (openai.AuthenticationError, openai.BadRequestError)
+    _temporary_exceptions = (
+        openai.RateLimitError,
+        openai.APIConnectionError,
+        openai.InternalServerError,
+    )
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._client = openai.AsyncOpenAI()
+
+    async def _call_llm(self, system, user, output_schema):
+        kwargs = {
+            "model": self.model.model_id,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        }
+        if self.model.supports_temperature:
+            kwargs["temperature"] = self.temperature
+        effort = _openai_reasoning_effort(self.reasoning_effort)
+        if effort and self.model.supports_reasoning:
+            kwargs["reasoning_effort"] = effort
+        if output_schema:
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "structured_output",
+                    "strict": True,
+                    "schema": _make_openai_strict_schema(output_schema),
+                },
+            }
+        return await self._client.chat.completions.create(**kwargs)
+
+    async def _parse_structured(self, raw, output_type):
+        content = raw.choices[0].message.content
+        return output_type.model_validate_json(content)
+
+    async def _parse_logprobs(self, raw, target_tokens):
+        probs = {}
+        logprobs_data = raw.choices[0].logprobs
+        if not logprobs_data or not logprobs_data.content:
+            return probs
+        for item in logprobs_data.content:
+            for top in item.top_logprobs:
+                if top.token in target_tokens:
+                    probs[top.token] = math.exp(top.logprob)
+        return probs
+
+    def _extract_text(self, raw) -> str:
+        return raw.choices[0].message.content
+
+
+class _GeminiAgent(_VendorAgent):
+    """Google Gemini agent using response_schema for structured output."""
+
+    _fatal_exceptions = ()
+    _temporary_exceptions = (genai_errors.ClientError, genai_errors.ServerError)
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._client = genai.Client()
+
+    async def _call_llm(self, system, user, output_schema):
+        config_kwargs = {"system_instruction": system}
+        if self.model.supports_temperature:
+            config_kwargs["temperature"] = self.temperature
+        thinking_tokens = _gemini_thinking_tokens(self.reasoning_effort)
+        if thinking_tokens > 0:
+            config_kwargs["thinking_config"] = genai_types.ThinkingConfig(
+                thinking_budget=thinking_tokens
+            )
+        if output_schema:
+            config_kwargs["response_mime_type"] = "application/json"
+            config_kwargs["response_schema"] = output_schema
+        config = genai_types.GenerateContentConfig(**config_kwargs)
+        return await self._client.aio.models.generate_content(
+            model=self.model.model_id,
+            contents=user,
+            config=config,
+        )
+
+    async def _parse_structured(self, raw, output_type):
+        return output_type.model_validate_json(raw.text)
+
+    async def _parse_logprobs(self, raw, target_tokens):
+        return {}
+
+    def _extract_text(self, raw) -> str:
+        return raw.text
+
+
+def _create_vendor_agent(
+    model: LLMModel,
+    system_prompt: str,
+    user_prompt: str,
+    output_type: Optional[Type[BaseModel]] = None,
+    reasoning_effort: int = 0,
+    max_concurrency: int = 12,
+    temperature: float = 0.0,
+) -> _VendorAgent:
+    """Factory: create the right vendor agent subclass based on model vendor."""
+    kwargs = dict(
+        model=model,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        output_type=output_type,
+        reasoning_effort=reasoning_effort,
+        max_concurrency=max_concurrency,
+        temperature=temperature,
+    )
+    if model.vendor == Vendor.ANTHROPIC:
+        return _AnthropicAgent(**kwargs)
+    elif model.vendor == Vendor.OPENAI:
+        return _OpenAIAgent(**kwargs)
+    elif model.vendor == Vendor.GEMINI:
+        return _GeminiAgent(**kwargs)
+    else:
+        raise ValueError(f"Unsupported vendor: {model.vendor}")
+
+
+# ---------------------------------------------------------------------------
+# Utility functions (public)
+# ---------------------------------------------------------------------------
 
 
 async def paginate_df_async(df: pd.DataFrame, chunk_size: int = 25):
     """Async generator for DataFrame pagination."""
     for i in range(0, len(df), chunk_size):
         yield df.iloc[i : i + chunk_size]
-        await asyncio.sleep(0)  # Allow other tasks to run
+        await asyncio.sleep(0)
 
 
 async def paginate_list_async(lst, chunk_size: int = 25):
     """Async generator for list pagination."""
     for i in range(0, len(lst), chunk_size):
         yield lst[i : i + chunk_size]
-        await asyncio.sleep(0)  # Allow other tasks to run
+        await asyncio.sleep(0)
 
 
 def _introspect_output_type(
     output_type: Type[BaseModel],
 ) -> tuple[Optional[str], Optional[str]]:
-    """
-    Introspect a Pydantic model to find list field and value field.
-
-    Args:
-        output_type: Pydantic BaseModel class
-
-    Returns:
-        Tuple of (item_list_field, value_field)
-        - item_list_field: Name of the field containing List[X]
-        - value_field: Name of the non-id field in the inner model X
-    """
-
+    """Introspect a Pydantic model to find list field and value field."""
     item_list_field = None
     value_field = None
-
-    # Find the list field
     for field_name, field_info in output_type.model_fields.items():
-        # Get the field type annotation
         field_type = field_info.annotation
-
-        # Check if it's a List type
         origin = get_origin(field_type)
         if origin is list or origin is List:
             item_list_field = field_name
-
-            # Get the inner type of the list
             args = get_args(field_type)
             if args and len(args) > 0:
                 inner_type = args[0]
-
-                # If inner type is a BaseModel, find the non-id field
                 if isinstance(inner_type, type) and issubclass(inner_type, BaseModel):
                     inner_fields = inner_type.model_fields
                     non_id_fields = [
@@ -120,110 +761,50 @@ def _introspect_output_type(
                         for name in inner_fields.keys()
                         if name.lower() not in ("id", "index")
                     ]
-
-                    # If exactly one non-id field, use it as value_field
                     if len(non_id_fields) == 1:
                         value_field = non_id_fields[0]
             break
-
     return item_list_field, value_field
+
+
+# ---------------------------------------------------------------------------
+# LangfuseClient — local prompt loader (Langfuse dependency removed)
+# ---------------------------------------------------------------------------
+
+# Global singleton
+_global_langfuse_client: Optional["LangfuseClient"] = None
+
+
+def get_langfuse_client(logger: Optional[logging.Logger] = None) -> "LangfuseClient":
+    """Get or create singleton LangfuseClient (backed by local prompts.py)."""
+    global _global_langfuse_client
+    if _global_langfuse_client is None:
+        _global_langfuse_client = LangfuseClient(logger=logger)
+    return _global_langfuse_client
 
 
 class LangfuseClient:
     """
-    Client for retrieving prompts from Langfuse.
+    Prompt loader. Reads from local prompts.py (Langfuse dependency removed).
 
-    Provides a clean interface to fetch prompts with system/user content and model configuration
-    from Langfuse prompt management.
+    Preserves the same public API so callers don't need changes.
     """
 
     def __init__(self, logger: Optional[logging.Logger] = None):
-        """
-        Initialize the Langfuse client.
-
-        Args:
-            logger: Optional logger instance to use instead of module logger
-
-        Raises:
-            ImportError: If langfuse is not available
-        """
         self.logger = logger or _logger
-        self.client = langfuse.get_client()
-
         if self.logger:
-            self.logger.info("Initialized LangfuseClient")
+            self.logger.info("Initialized LangfuseClient (local prompt loader)")
 
-    @retry(
-        retry=retry_if_exception_type(
-            (Exception,)  # Catch all exceptions for Langfuse API calls
-        ),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=10),
-        before_sleep=before_sleep_log(_logger, logging.WARNING),
-    )
     def get_prompt(self, prompt_name: str) -> tuple[str, str, str, str]:
         """
-        Retrieve a prompt from Langfuse and extract system/user prompts and model configuration.
-
-        Args:
-            prompt_name: Name of the prompt in Langfuse (e.g., 'newsagent/headline_classifier')
+        Load prompt by name. Accepts 'newsagent/foo' or just 'foo'.
 
         Returns:
-            Tuple containing (system_prompt, user_prompt, model, reasoning_effort)
-
-        Raises:
-            ValueError: If prompt format is invalid or missing required content
-            Exception: If prompt retrieval fails
+            Tuple of (system_prompt, user_prompt, model_id, reasoning_effort_str)
         """
-        try:
-            if self.logger:
-                self.logger.debug(
-                    f"Attempting to retrieve prompt '{prompt_name}' from Langfuse"
-                )
+        from prompts import load_prompt
 
-            # Get prompt from Langfuse
-            lf_prompt = self.client.get_prompt(prompt_name)
-
-            if self.logger:
-                self.logger.info(f"Retrieved prompt '{prompt_name}' from Langfuse")
-
-            # Validate prompt structure
-            if not hasattr(lf_prompt, "prompt") or not isinstance(
-                lf_prompt.prompt, list
-            ):
-                raise ValueError(
-                    f"Invalid prompt format for '{prompt_name}': missing or invalid 'prompt' field"
-                )
-
-            if len(lf_prompt.prompt) < 2:
-                raise ValueError(
-                    f"Invalid prompt format for '{prompt_name}': expected at least 2 prompt parts (system, user)"
-                )
-
-            # Extract system and user prompts
-            try:
-                system_prompt = lf_prompt.prompt[0]["content"]
-                user_prompt = lf_prompt.prompt[1]["content"]
-            except (KeyError, IndexError) as e:
-                raise ValueError(f"Invalid prompt structure for '{prompt_name}': {e}")
-
-            # Extract configuration
-            config = lf_prompt.config if hasattr(lf_prompt, "config") else {}
-            model = config.get("model", "gpt-5")
-            reasoning_effort = config.get("reasoning_effort", "medium")
-
-            if self.logger:
-                self.logger.info(
-                    f"Parsed prompt '{prompt_name}': model={model}, reasoning_effort={reasoning_effort}, system_len={len(system_prompt)}, user_len={len(user_prompt)}"
-                )
-
-            return (system_prompt, user_prompt, model, reasoning_effort)
-
-        except Exception as e:
-            error_msg = f"Failed to retrieve prompt '{prompt_name}': {e}"
-            if self.logger:
-                self.logger.error(error_msg)
-            raise Exception(error_msg) from e
+        return load_prompt(prompt_name)
 
     def create_llm_agent(
         self,
@@ -232,20 +813,8 @@ class LangfuseClient:
         verbose: bool = False,
         logger: Optional[logging.Logger] = None,
     ) -> "LLMagent":
-        """
-        Convenience method to create an LLMagent from a Langfuse prompt.
-
-        Args:
-            prompt_name: Name of the prompt in Langfuse
-            output_type: Pydantic model class for structured output
-            verbose: Enable verbose logging
-            logger: Optional logger instance
-
-        Returns:
-            Configured LLMagent instance
-        """
+        """Create an LLMagent from a prompt name."""
         prompt_data = self.get_prompt(prompt_name)
-
         return LLMagent(
             system_prompt=prompt_data[0],
             user_prompt=prompt_data[1],
@@ -257,16 +826,16 @@ class LangfuseClient:
         )
 
 
-class LLMagent(Agent):
+# ---------------------------------------------------------------------------
+# LLMagent — public facade (preserves exact original API)
+# ---------------------------------------------------------------------------
+
+
+class LLMagent:
     """
     General-purpose LLM agent for making structured calls with flexible prompt templating.
 
-    Supports:
-    - Multiple variable substitution in prompt templates
-    - Single prompt calls with keyword arguments or dictionaries
-    - Batch processing with async concurrency control
-    - Retry logic with exponential backoff
-    - Pydantic output validation
+    Supports Anthropic, OpenAI, and Gemini via internal vendor delegation.
     """
 
     def __init__(
@@ -281,34 +850,15 @@ class LLMagent(Agent):
         trace_enable: Optional[bool] = None,
         trace_tag_list: Optional[List[str]] = None,
     ):
-        """
-        Initialize the LLMagent
-
-        Args:
-            system_prompt: The system prompt template with variable placeholders (e.g., "You are a {role} assistant")
-            user_prompt: The user prompt template with variable placeholders (e.g., "Analyze this {content_type}: {input}")
-            output_type: Pydantic model class for structured output
-            model: Model string (e.g., "gpt-4o")
-            verbose: Enable verbose logging
-            logger: Optional logger instance to use instead of module logger
-            reasoning_effort: Optional reasoning effort level for reasoning models ("low", "medium", "high")
-            trace_enable: Enable Langfuse tracing for this agent (overrides LANGFUSE_TRACING_ENABLED env var)
-            trace_tag_list: List of tags for Langfuse traces (e.g., ["step_04_extract_summaries", "summary_agent"])
-        """
-        super().__init__(
-            name="LLMagent",
-            model=model,
-            instructions=system_prompt,
-            output_type=output_type,
-        )
         self.system_prompt = system_prompt
         self.user_prompt = user_prompt
         self.output_type = output_type
-        self.trace_tag = trace_tag_list
+        self.model = model  # Keep as string for backward compat
         self.verbose = verbose
         self.logger = logger or _logger
+        self.trace_tag = trace_tag_list
 
-        # Validate and store reasoning_effort
+        # Validate and store reasoning_effort (as original string/None)
         if reasoning_effort is not None:
             valid_efforts = {"low", "medium", "high"}
             if reasoning_effort not in valid_efforts:
@@ -317,79 +867,41 @@ class LLMagent(Agent):
                 )
         self.reasoning_effort = reasoning_effort
 
-        # Configure Langfuse tracing
-        env_trace_enable = (
-            os.getenv("LANGFUSE_TRACING_ENABLED", "false").lower() == "true"
-        )
-        self.trace_enable = (
-            trace_enable if trace_enable is not None else env_trace_enable
+        # Resolve model and create vendor delegate
+        self._llm_model = _resolve_model(model)
+        effort_int = _convert_effort(reasoning_effort)
+
+        self._delegate = _create_vendor_agent(
+            model=self._llm_model,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            output_type=output_type,
+            reasoning_effort=effort_int,
         )
 
-        # Initialize appropriate OpenAI client
-        if self.trace_enable:
-            try:
-                from langfuse.openai import AsyncOpenAI as LangfuseAsyncOpenAI
-
-                self.openai_client = LangfuseAsyncOpenAI()
-                if self.verbose:
-                    self.logger.info(
-                        f"Initialized with Langfuse tracing enabled (tags: {self.trace_tag})"
-                    )
-            except ImportError:
-                self.logger.warning(
-                    "Langfuse tracing requested but langfuse.openai not available, using standard client"
-                )
-                self.openai_client = AsyncOpenAI()
-                self.trace_enable = False
-        else:
-            self.openai_client = AsyncOpenAI()
+        # Keep an OpenAI client for logprobs calls (backward compat path)
+        self.openai_client = AsyncOpenAI()
 
         if self.verbose:
             self.logger.info(
-                f"""Initialized LLMagent:
-system_prompt: {self.system_prompt}
-user_prompt: {self.user_prompt}
-output_type: {output_type.__name__}
-model: {self.model}
-trace_enable: {self.trace_enable}
-trace_tag: {self.trace_tag}
-schema: {json.dumps(output_type.model_json_schema(), indent=2)}
-"""
+                f"Initialized LLMagent: model={self.model}, vendor={self._llm_model.vendor.value}, "
+                f"output_type={output_type.__name__}, reasoning_effort={reasoning_effort}"
             )
 
     def _build_langfuse_metadata(self) -> Dict[str, Any]:
-        """
-        Build metadata dict for Langfuse tracing with tags.
-
-        Returns:
-            Dictionary with langfuse_tags if trace_tag is populated
-
-        Note: When using langfuse.openai wrapper, tags should be passed as a list.
-        The Langfuse wrapper handles this format specially.
-        """
-        metadata = {}
-        if self.trace_tag:
-            # Langfuse expects tags as a list/array
-            metadata["langfuse_tags"] = self.trace_tag
-        return metadata
+        """No-op (Langfuse removed). Returns empty dict."""
+        return {}
 
     def _format_prompts(self, variables: Dict[str, Any]) -> str:
-        """
-        Format user prompt with variable substitution
-
-        Args:
-            variables: Dictionary of variables to substitute in user prompt template
-
-        Returns:
-            Formatted user prompt
-        """
+        """Format user prompt with variable substitution."""
         try:
-            formatted_user = self.user_prompt.format(**variables)
-            return formatted_user
+            return self.user_prompt.format(**variables)
         except KeyError as e:
             raise ValueError(f"Missing required variable in prompt template: {e}")
         except Exception as e:
             raise ValueError(f"Error formatting prompts: {e}")
+
+    # --- Core prompt methods ---
 
     @retry(
         retry=retry_if_exception_type(
@@ -397,7 +909,6 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                 openai.APIConnectionError,
                 openai.APITimeoutError,
                 openai.InternalServerError,
-                # Retry on Pydantic validation errors (e.g., LLM returned wrong schema)
                 ValidationError,
             )
         ),
@@ -406,38 +917,22 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         before_sleep=before_sleep_log(_logger, logging.WARNING),
     )
     async def prompt_dict(self, variables: Dict[str, Any]) -> Any:
-        """
-        Make a single LLM call with dictionary-based variable substitution
-
-        Args:
-            variables: Dictionary of variables to substitute in prompt templates
-
-        Returns:
-            Single result of the specified output type
-        """
-        user_message = self._format_prompts(variables)
-        user_message = user_message.strip()
-
+        """Make a single LLM call with dictionary-based variable substitution."""
+        user_message = self._format_prompts(variables).strip()
         if self.verbose:
             self.logger.info(f"User message: {user_message}")
 
         try:
-            results = await Runner.run(self, user_message)
+            result = await self._delegate.prompt_dict(variables)
         except ValidationError as e:
-            # Log detailed information about validation failure
             self.logger.error(
-                f"Pydantic validation error for {self.output_type.__name__}: {e}"
+                f"Pydantic validation failed (model={self.model}): {e}"
             )
-            self.logger.error(
-                f"Expected schema: {self.output_type.model_json_schema()}"
-            )
-            # Re-raise to trigger tenacity retry
             raise
 
         if self.verbose:
-            self.logger.info(f"Result: {results}")
-
-        return results.final_output if hasattr(results, "final_output") else results
+            self.logger.info(f"Result: {result}")
+        return result
 
     @retry(
         retry=retry_if_exception_type(
@@ -445,7 +940,6 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                 openai.APIConnectionError,
                 openai.APITimeoutError,
                 openai.InternalServerError,
-                # Retry on Pydantic validation errors (e.g., LLM returned wrong schema)
                 ValidationError,
             )
         ),
@@ -456,30 +950,16 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
     async def prompt_dict_chat(
         self, variables: Dict[str, Any], reasoning_effort: Optional[str] = None
     ) -> Any:
-        """
-        Make a single LLM call using OpenAI chat completions API directly
-
-        Args:
-            variables: Dictionary of variables to substitute in prompt templates
-            reasoning_effort: Optional reasoning effort level ("low", "medium", "high").
-                            Only applies to reasoning models (o1, o3-mini, gpt-5).
-                            Overrides instance-level reasoning_effort if provided.
-
-        Returns:
-            Single result of the specified output type
-        """
-        user_message = self._format_prompts(variables)
-        user_message = user_message.strip()
-
+        """Make a single LLM call using the vendor-appropriate API."""
+        user_message = self._format_prompts(variables).strip()
         if self.verbose:
             self.logger.info(f"User message: {user_message}")
 
-        # Determine reasoning_effort to use (parameter overrides instance attribute)
+        # Handle per-call reasoning effort override
         effective_reasoning_effort = (
             reasoning_effort if reasoning_effort is not None else self.reasoning_effort
         )
 
-        # Check if reasoning_effort is requested but not supported
         if (
             effective_reasoning_effort is not None
             and not self._supports_reasoning_effort()
@@ -490,177 +970,67 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
             )
             effective_reasoning_effort = None
 
-        # Use instance OpenAI client (Langfuse-wrapped if tracing enabled)
-        client = self.openai_client
-
-        # Prepare messages for chat completion
-        messages = [
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": user_message},
-        ]
-
-        # Note: Langfuse tracing is handled automatically by langfuse.openai.AsyncOpenAI wrapper
-        # The wrapper captures model, messages, and response data without needing explicit metadata updates
+        # Temporarily adjust delegate's reasoning effort if overridden
+        original_effort = self._delegate.reasoning_effort
+        if effective_reasoning_effort is not None:
+            self._delegate.reasoning_effort = _convert_effort(
+                effective_reasoning_effort
+            )
+            if self.verbose:
+                self.logger.info(
+                    f"Using reasoning_effort: {effective_reasoning_effort}"
+                )
 
         try:
-            # Prepare API call parameters
-            api_params = {
-                "model": self.model,
-                "messages": messages,
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "structured_response",
-                        "schema": self.output_type.model_json_schema(),
-                    },
-                },
-                "safety_identifier": "news_agent",
-            }
-
-            # Only add metadata when Langfuse tracing is enabled
-            # (standard OpenAI API doesn't accept metadata without store=True)
-            if self.trace_enable:
-                api_params["metadata"] = self._build_langfuse_metadata()
-
-            # Add reasoning_effort if supported
-            if effective_reasoning_effort is not None:
-                api_params["reasoning_effort"] = effective_reasoning_effort
-                if self.verbose:
-                    self.logger.info(
-                        f"Using reasoning_effort: {effective_reasoning_effort}"
-                    )
-
-            # Make the chat completion call with structured output
-            response = await client.chat.completions.create(**api_params)
-
-            # Check for refusal
-            message = response.choices[0].message
-            if hasattr(message, "refusal") and message.refusal:
-                self.logger.error(f"LLM refused request. User message: {user_message}")
-                self.logger.error(f"Refusal reason: {message.refusal}")
-                raise ValueError(f"LLM refused the request: {message.refusal}")
-
-            # Parse the JSON response into the Pydantic model
-            response_text = message.content
-            response_json = json.loads(response_text)
-
-            try:
-                result = self.output_type.model_validate(response_json)
-            except ValidationError as e:
-                # Log detailed information about validation failure
-                self.logger.error(
-                    f"Pydantic validation error for {self.output_type.__name__}: {e}"
-                )
-                self.logger.error(f"Response JSON: {response_json}")
-                self.logger.error(
-                    f"Expected schema: {self.output_type.model_json_schema()}"
-                )
-                # Re-raise to trigger tenacity retry
-                raise
-
-        except BadRequestError as e:
-            self.logger.error(f"BadRequestError: {e}")
-            self.logger.error(f"User message that caused error: {user_message}")
+            result = await self._delegate.prompt_dict(variables)
+        except ValidationError as e:
+            self.logger.error(
+                f"Pydantic validation failed (model={self.model}): {e}"
+            )
             raise
+        finally:
+            self._delegate.reasoning_effort = original_effort
 
         if self.verbose:
             self.logger.info(f"Result: {result}")
-
         return result
 
+    async def run_prompt(self, reasoning_effort: Optional[str] = None, **kwargs) -> Any:
+        """Make a single LLM call with keyword argument variable substitution."""
+        return await self.prompt_dict_chat(kwargs, reasoning_effort=reasoning_effort)
+
+    # --- Logprobs methods ---
+
     def _supports_logprobs(self) -> bool:
-        """
-        Check if the current model supports logprobs functionality.
-
-        Returns:
-            bool: True if model supports logprobs, False otherwise
-        """
-        # Models that support logprobs
-        logprobs_supported_models = {
-            "gpt-4.1-mini",
-            "gpt-4o-mini",
-            "gpt-4.1",
-            "gpt-4.1-nano",
-            "gpt-4o",
-            "gpt-4-turbo",
-            "gpt-4",
-            "gpt-3.5-turbo",
-        }
-
-        # Check exact match or partial match for versioned models
-        model_name = self.model.lower()
-        if model_name in logprobs_supported_models:
-            return True
-
-        # Check for partial matches (e.g., gpt-4.1-mini-2024-07-18)
-        for supported_model in logprobs_supported_models:
-            if model_name.startswith(supported_model):
-                return True
-
-        return False
+        """Check if the current model supports logprobs."""
+        return self._llm_model.supports_logprobs
 
     def _supports_reasoning_effort(self) -> bool:
-        """
-        Check if the current model supports reasoning_effort parameter.
-
-        Returns:
-            bool: True if model supports reasoning_effort, False otherwise
-        """
-        # Models that support reasoning_effort (reasoning models only)
-        reasoning_models = {"o1", "o1-preview", "o3-mini", "gpt-5"}
-
-        # Check exact match or partial match for versioned models
-        model_name = self.model.lower()
-        if model_name in reasoning_models:
-            return True
-
-        # Check for partial matches (e.g., o3-mini-2025-01-31)
-        for reasoning_model in reasoning_models:
-            if model_name.startswith(reasoning_model):
-                return True
-
-        return False
+        """Check if the current model supports reasoning_effort."""
+        return self._llm_model.supports_reasoning
 
     def _extract_token_probabilities(
         self, logprobs_data: Dict, target_tokens: List[str]
     ) -> Dict[str, float]:
-        """
-        Extract probabilities for specific target tokens from OpenAI logprobs response.
-
-        Args:
-            logprobs_data: Raw logprobs data from OpenAI API response
-            target_tokens: List of tokens to extract probabilities for (e.g., ["1", "0"])
-
-        Returns:
-            Dict mapping token to probability (e.g., {"1": 0.85, "0": 0.15})
-        """
+        """Extract probabilities for specific target tokens from OpenAI logprobs response."""
         if not logprobs_data or getattr(logprobs_data, "content", None) is None:
             raise ValueError(
                 "Invalid logprobs_data. Must contain 'content' key with non-None value."
             )
-
-        # Look at the first token's logprobs (for binary classification, answer should be first token)
         first_token_logprobs = logprobs_data.content[0]
-
         if not hasattr(first_token_logprobs, "top_logprobs"):
             raise ValueError(
                 "Invalid first_token_logprobs. Could not find 'top_logprobs' key or 'top_logprobs' is empty."
             )
-
-        # Extract probabilities for target tokens
         result = {}
         top_logprobs = first_token_logprobs.top_logprobs
-
         for target_token in target_tokens:
-            # Find matching token in top_logprobs
             found_prob = 0.0
             for token_info in top_logprobs:
                 if token_info.token == target_token:
-                    # Convert log probability to probability: p = e^(logprob)
                     found_prob = math.exp(token_info.logprob)
                     break
             result[target_token] = found_prob
-
         return result
 
     @retry(
@@ -678,85 +1048,41 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
     async def prompt_dict_chat_probs(
         self, variables: Dict[str, Any], top_logprobs: int = 5
     ) -> Tuple[str, Dict]:
-        """
-        Make a single LLM call with logprobs enabled (no structured output).
-
-        This method skips structured output (json_schema) to enable logprobs functionality,
-        since OpenAI's structured outputs are incompatible with logprobs.
-
-        Args:
-            variables: Dictionary of variables to substitute in prompt templates
-            top_logprobs: Number of top tokens to return probabilities for (0-5)
-
-        Returns:
-            Tuple of (response_text, logprobs_data)
-
-        Raises:
-            ValueError: If model doesn't support logprobs
-        """
+        """Make a single LLM call with logprobs enabled (no structured output)."""
         if not self._supports_logprobs():
-            supported_models = [
-                "gpt-4.1-mini",
-                "gpt-4o-mini",
-                "gpt-4.1",
-                "gpt-4o",
-                "gpt-4-turbo",
-            ]
             raise ValueError(
                 f"Model '{self.model}' does not support logprobs. "
-                f"Supported models: {supported_models}"
+                f"Use an OpenAI model like gpt-4.1-mini."
             )
 
-        user_message = self._format_prompts(variables)
-        user_message = user_message.strip()
-
+        user_message = self._format_prompts(variables).strip()
         if self.verbose:
             self.logger.info(f"User message (with logprobs): {user_message}")
 
-        # Use instance OpenAI client (Langfuse-wrapped if tracing enabled)
+        # Logprobs only supported natively on OpenAI, so use direct OpenAI client
         client = self.openai_client
-
-        # Prepare messages for chat completion
         messages = [
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": user_message},
         ]
 
-        # Note: Langfuse tracing is handled automatically by langfuse.openai.AsyncOpenAI wrapper
-        # The wrapper captures model, messages, logprobs, and response data automatically
-
         try:
-            # Prepare API call parameters
+            await _get_vendor_rate_limiter(Vendor.OPENAI).acquire()
             api_params = {
                 "model": self.model,
                 "messages": messages,
                 "logprobs": True,
                 "top_logprobs": top_logprobs,
-                "safety_identifier": "news_agent",
             }
-
-            # Only add metadata when Langfuse tracing is enabled
-            # (standard OpenAI API doesn't accept metadata without store=True)
-            if self.trace_enable:
-                api_params["metadata"] = self._build_langfuse_metadata()
-
-            # Make the chat completion call with logprobs (NO structured output)
             response = await client.chat.completions.create(**api_params)
-
-            # Check for refusal
             message = response.choices[0].message
             if hasattr(message, "refusal") and message.refusal:
                 self.logger.error(f"LLM refused request. User message: {user_message}")
-                self.logger.error(f"Refusal reason: {message.refusal}")
                 raise ValueError(f"LLM refused the request: {message.refusal}")
-
-            # Extract response text and logprobs
             response_text = message.content
             logprobs_data = response.choices[0].logprobs
-
         except BadRequestError as e:
             self.logger.error(f"BadRequestError: {e}")
-            self.logger.error(f"User message that caused error: {user_message}")
             raise
 
         if self.verbose:
@@ -765,64 +1091,26 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
 
         return response_text, logprobs_data
 
-    async def run_prompt(self, reasoning_effort: Optional[str] = None, **kwargs) -> Any:
-        """
-        Make a single LLM call with keyword argument variable substitution
-        (don't use prompt to name it since the base class has a prompt method)
-
-        Args:
-            reasoning_effort: Optional reasoning effort level ("low", "medium", "high").
-                            Only applies to reasoning models (o1, o3-mini, gpt-5).
-                            Overrides instance-level reasoning_effort if provided.
-            **kwargs: Keyword arguments to substitute in prompt templates
-
-        Returns:
-            Single result of the specified output type
-        """
-        # Repackage kwargs into a dictionary and call prompt_dict_chat
-        return await self.prompt_dict_chat(kwargs, reasoning_effort=reasoning_effort)
-
     async def run_prompt_with_probs(
         self, target_tokens: List[str] = ["1"], **kwargs
     ) -> Dict[str, float]:
-        """
-        Make a single LLM call and return probabilities for specific target tokens.
-
-        This method is designed for binary classification tasks where you want to get
-        the probability of specific tokens (e.g., "1" for spam classification).
-
-        Args:
-            target_tokens: List of tokens to get probabilities for (default: ["1"])
-            **kwargs: Keyword arguments to substitute in prompt templates
-
-        Returns:
-            Dict mapping each target token to its probability (e.g., {"1": 0.85})
-
-        Example:
-            # For spam classification
-            agent = LLMagent(
-                system_prompt="Classify as spam or not spam",
-                user_prompt="Text: {text}\\nReturn only 1 for spam, 0 for not spam",
-                output_type=str,  # Not used for logprobs
-                model="gpt-4.1-mini"
+        """Make a single LLM call and return probabilities for specific target tokens."""
+        if self._supports_logprobs():
+            # Native logprobs path (OpenAI)
+            response_text, logprobs_data = await self.prompt_dict_chat_probs(kwargs)
+            probabilities = self._extract_token_probabilities(
+                logprobs_data, target_tokens
             )
-
-            probs = await agent.run_prompt_with_probs(
-                target_tokens=["1"],
-                text="Buy now limited time offer!!!"
+        else:
+            # Confidence fallback path (Anthropic/Gemini)
+            probabilities = await self._delegate.run_prompt_with_probs(
+                variables=kwargs, target_tokens=target_tokens
             )
-            spam_probability = probs["1"]  # e.g., 0.89
-        """
-        # Get raw response and logprobs
-        response_text, logprobs_data = await self.prompt_dict_chat_probs(kwargs)
-
-        # Extract probabilities for target tokens
-        probabilities = self._extract_token_probabilities(logprobs_data, target_tokens)
-
         if self.verbose:
             self.logger.info(f"Token probabilities: {probabilities}")
-
         return probabilities
+
+    # --- Batch processing methods ---
 
     async def prompt_batch(
         self,
@@ -834,28 +1122,10 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         item_id_field: str = "",
         chat: bool = True,
     ) -> List[Any]:
-        """
-        Process a list of variable dictionaries using true batch calls.
-
-        Note: This method assumes the prompt template expects a single 'input_str' parameter.
-        All items from each batch will be converted to string and processed in a single API call
-        per batch, dramatically reducing cost and improving performance.
-
-        Args:
-            variables_list: List of variable dictionaries for prompt substitution
-            batch_size: Number of items to process in each batch
-            max_concurrency: Maximum number of concurrent requests
-            retries: Number of retry attempts for failed requests
-            item_id_field: Optional ID field name for validation. If provided, validates that each sent ID matches a received ID
-            chat: If True (default), use prompt_dict_chat; if False, use prompt_dict
-
-        Returns:
-            List of results maintaining original input order
-        """
+        """Process a list of variable dictionaries using true batch calls."""
         if not variables_list:
             return []
 
-        # Split into batches
         batches = [
             variables_list[i : i + batch_size]
             for i in range(0, len(variables_list), batch_size)
@@ -870,13 +1140,10 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         async def _process_batch(
             batch_idx: int, batch_variables: List[Dict[str, Any]]
         ) -> tuple[int, List[Any]]:
-            """Process a single batch with retry logic"""
             last_exc = None
-
             for attempt in range(retries):
                 try:
                     async with sem:
-                        # Process the entire batch in a single API call
                         if chat:
                             result = await self.prompt_dict_chat(
                                 {"input_str": str(batch_variables)}
@@ -886,14 +1153,11 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                                 {"input_str": str(batch_variables)}
                             )
                         batch_results = result
-
-                        # Validate IDs if item_id_field is specified
                         if item_id_field:
                             sent_ids = [
                                 var.get(item_id_field) for var in batch_variables
                             ]
                             received_ids = []
-
                             for result in batch_results:
                                 if hasattr(result, item_id_field):
                                     received_ids.append(getattr(result, item_id_field))
@@ -905,11 +1169,8 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                                     raise ValueError(
                                         f"Result missing required ID field '{item_id_field}': {result}"
                                     )
-
-                            # Check if all sent IDs have corresponding received IDs
                             sent_set = set(sent_ids)
                             received_set = set(received_ids)
-
                             if sent_set != received_set:
                                 missing_ids = sent_set - received_set
                                 extra_ids = received_set - sent_set
@@ -919,34 +1180,25 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                                 if extra_ids:
                                     error_msg += f" Extra IDs: {extra_ids}"
                                 raise ValueError(error_msg)
-
                         return batch_idx, batch_results
-
                 except Exception as e:
                     last_exc = e
                     self.logger.warning(
                         f"Batch {batch_idx} attempt {attempt + 1}/{retries} failed: {e}"
                     )
                     if attempt < retries - 1:
-                        # Exponential backoff
                         await asyncio.sleep(2**attempt)
-
-            # If all retries failed, raise the last exception
             raise last_exc or RuntimeError(
                 f"Unknown error processing batch {batch_idx}"
             )
 
-        # Create tasks for all batches
         tasks = [
             asyncio.create_task(_process_batch(i, batch))
             for i, batch in enumerate(batches)
         ]
-
-        # Wait for all batches to complete
         batch_results = await asyncio.gather(*tasks)
 
         if item_list_field:
-            # Reassemble results in original order
             flattened_results = []
             flattened_success = False
             for batch_idx, results in sorted(batch_results, key=lambda x: x[0]):
@@ -955,18 +1207,16 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                 else:
                     break
                 flattened_success = True
-
             if flattened_success:
-                # Validate final result count
                 if len(flattened_results) != len(variables_list):
                     raise ValueError(
                         f"Result count mismatch: expected {len(variables_list)}, got {len(flattened_results)}"
                     )
                 else:
                     return flattened_results
-            else:  # return unflattened results
+            else:
                 return batch_results
-        else:  # return unflattened results
+        else:
             return batch_results
 
     async def filter_dataframe_chunk(
@@ -978,45 +1228,26 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         retries: int = 3,
         chat: bool = True,
     ) -> Any:
-        """
-        Process a single DataFrame asynchronously using Agent SDK.
-
-        Applies the configured system and user prompts to a DataFrame converted to JSON,
-        with configurable delimiters and additional input variables.
-
-        Note: This method expects the user_prompt template to contain an {input_text} placeholder
-        where the DataFrame JSON will be substituted.
-
-        Args:
-            input_df: The DataFrame to process
-            input_vars: Optional additional variables for prompt substitution
-            item_list_field: Name of the field in the response that contains the list of results
-            item_id_field: Name of the ID field to validate matches between sent and received data
-            retries: Number of retry attempts for validation failures
-            chat: If True (default), use prompt_dict_chat; if False, use prompt_dict
-
-        Returns:
-            Single result of the configured output_type (structured Pydantic object)
-        """
+        """Process a single DataFrame chunk asynchronously."""
         expected_count = len(input_df)
         last_exc = None
 
         for attempt in range(retries):
             try:
-                # Convert DataFrame to JSON
                 input_text = input_df.to_json(orient="records", indent=2)
-
-                # Prepare the input dictionary
                 input_dict = {"input_text": input_text}
-                # add input_vars if provided
                 if input_vars is not None:
                     input_dict.update(input_vars)
-                # Use prompt_dict_chat or prompt_dict based on chat parameter
+
+                self.logger.info(
+                    f"Sending chunk of {expected_count} items to {self.model}"
+                )
+
                 if chat:
                     result = await self.prompt_dict_chat(input_dict)
                 else:
                     result = await self.prompt_dict(input_dict)
-                # Validate item count and IDs if item_list_field is specified
+
                 if item_list_field:
                     if hasattr(result, item_list_field):
                         result_list = getattr(result, item_list_field)
@@ -1028,17 +1259,14 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                                     f"Attempt {attempt + 1}/{retries}: {error_msg}"
                                 )
                                 if attempt < retries - 1:
-                                    # Exponential backoff
                                     await asyncio.sleep(2**attempt)
                                     continue
                                 else:
                                     raise ValueError(error_msg)
 
-                            # Validate IDs if item_id_field is specified and exists in DataFrame
                             if item_id_field and item_id_field in input_df.columns:
                                 sent_ids = input_df[item_id_field].tolist()
                                 received_ids = []
-
                                 for item in result_list:
                                     if hasattr(item, item_id_field):
                                         received_ids.append(
@@ -1059,14 +1287,11 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                                         else:
                                             raise ValueError(error_msg)
 
-                                # Validate ID order - sent and received must match exactly (order + presence)
                                 if sent_ids != received_ids:
-                                    # Provide detailed error information
                                     sent_set = set(sent_ids)
                                     received_set = set(received_ids)
                                     missing_ids = sent_set - received_set
                                     extra_ids = received_set - sent_set
-
                                     if missing_ids or extra_ids:
                                         error_msg = "ID presence mismatch:"
                                         if missing_ids:
@@ -1075,17 +1300,14 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                                             error_msg += f" Extra IDs: {extra_ids}"
                                     else:
                                         error_msg = f"ID order mismatch: sent {sent_ids} != received {received_ids}"
-
                                     self.logger.warning(
                                         f"Attempt {attempt + 1}/{retries}: {error_msg}"
                                     )
                                     if attempt < retries - 1:
-                                        # Exponential backoff
                                         await asyncio.sleep(2**attempt)
                                         continue
                                     else:
                                         raise ValueError(error_msg)
-
                         else:
                             raise ValueError(
                                 f"Field '{item_list_field}' is not a list: {type(result_list)}"
@@ -1095,8 +1317,25 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                             f"Result missing required field '{item_list_field}': {result}"
                         )
 
+                received_count = "?"
+                if item_list_field and hasattr(result, item_list_field):
+                    result_list = getattr(result, item_list_field)
+                    if isinstance(result_list, list):
+                        received_count = len(result_list)
+                self.logger.info(
+                    f"Received chunk: {received_count} items returned, validation passed"
+                )
                 return result
 
+            except ValidationError as e:
+                last_exc = e
+                self.logger.error(
+                    f"Pydantic validation failed in filter_dataframe_chunk: {e}"
+                )
+                if attempt < retries - 1:
+                    await asyncio.sleep(2**attempt)
+                    continue
+                raise
             except asyncio.TimeoutError as e:
                 last_exc = e
                 self.logger.error(f"Timeout error in filter_dataframe_chunk: {str(e)}")
@@ -1130,7 +1369,6 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                     continue
                 raise
 
-        # If we get here, all retries failed
         raise last_exc or RuntimeError(f"Unknown error after {retries} attempts")
 
     async def _process_indexed_chunk(
@@ -1144,22 +1382,7 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         retries: int = 3,
         chat: bool = True,
     ) -> tuple[int, Any]:
-        """
-        Process a single chunk and return with its index for order preservation.
-
-        Args:
-            chunk_idx: Index of this chunk in the original chunk list
-            chunk_df: DataFrame chunk to process
-            sem: Semaphore for concurrency control
-            input_vars: Optional additional variables for prompt substitution
-            item_list_field: Name of the field in response containing results list
-            item_id_field: Name of the ID field to validate matches
-            retries: Number of retry attempts for validation failures
-            chat: If True (default), use prompt_dict_chat; if False, use prompt_dict
-
-        Returns:
-            Tuple of (chunk_index, result) for order preservation
-        """
+        """Process a single chunk and return with its index for order preservation."""
         async with sem:
             result = await self.filter_dataframe_chunk(
                 chunk_df,
@@ -1187,37 +1410,10 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         max_concurrency: int = DEFAULT_CONCURRENCY,
         **kwargs,
     ) -> Any:
-        """
-        Process a DataFrame in chunks asynchronously using concurrent calls to filter_dataframe_chunk.
-
-        Chunks the input DataFrame using paginate_df_async and processes each chunk
-        simultaneously with filter_dataframe_chunk. Chunks are processed with index tracking to
-        guarantee correct ordering regardless of async completion timing.
-
-        Args:
-            input_df: The DataFrame to process
-            input_vars: Optional additional variables for prompt substitution
-            item_list_field: Name of the field in the response that contains the list of results
-            item_id_field: Name of the ID field to validate matches between sent and received data
-            retries: Number of retry attempts for validation failures per chunk
-            chunk_size: Number of rows per chunk (default: 25)
-            return_series: If True, return pandas Series for direct DataFrame assignment
-            value_field: Field name to extract values from when return_series=True
-            chat: If True (default), use prompt_dict_chat; if False, use prompt_dict
-            return_probabilities: If True, return token probabilities instead of structured output
-            target_tokens: List of tokens to extract probabilities for (default: ["1"])
-            max_concurrency: Maximum number of concurrent chunk processing tasks (default: DEFAULT_CONCURRENCY)
-
-        Returns:
-            If return_probabilities=True: pandas Series with probabilities for target tokens
-            If return_series=True: pandas Series with values for DataFrame column assignment
-            Otherwise: Single concatenated result object (if item_list_field specified) or list of results
-        """
-        # print("concurrency: ", max_concurrency)
+        """Process a DataFrame in chunks asynchronously with concurrent calls."""
         if input_df.empty:
             return []
 
-        # Use semaphore for concurrency control
         sem = asyncio.Semaphore(max_concurrency)
 
         # Handle probability extraction mode
@@ -1230,32 +1426,31 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                     f"Model '{self.model}' does not support logprobs required for probability extraction"
                 )
 
-            # For probabilities, we process each row individually using run_prompt_with_probs
+            self.logger.info(
+                f"Processing {len(input_df)} probability requests "
+                f"(model={self.model}, concurrency={max_concurrency})"
+            )
 
             async def _process_row_with_sem(row):
                 async with sem:
-                    # Convert row to dict and merge with input_vars
                     row_vars = row.to_dict()
                     if input_vars:
                         row_vars.update(input_vars)
-                    # Get probabilities for this row
                     return await self.run_prompt_with_probs(
                         target_tokens=target_tokens, **row_vars
                     )
 
-            # Process all rows asynchronously with concurrency control
             tasks = [_process_row_with_sem(row) for _, row in input_df.iterrows()]
             prob_dicts = await asyncio.gather(*tasks)
-
-            # Extract probability for first target token from each dict
             probabilities = [
                 prob_dict.get(target_tokens[0], 0.0) for prob_dict in prob_dicts
             ]
-
-            # Return as Series indexed to match input DataFrame
+            self.logger.info(
+                f"Completed {len(probabilities)} probability requests"
+            )
             return pd.Series(probabilities, index=input_df.index)
 
-        # Create chunks using the async generator
+        # Create chunks
         chunks = []
         async for chunk in paginate_df_async(input_df, chunk_size):
             chunks.append(chunk)
@@ -1263,12 +1458,11 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
         if not chunks:
             return []
 
-        if self.verbose:
-            self.logger.info(
-                f"Processing {len(chunks)} chunks with concurrency {max_concurrency}"
-            )
+        self.logger.info(
+            f"Processing {len(input_df)} items in {len(chunks)} chunks "
+            f"(chunk_size={chunk_size}, model={self.model}, concurrency={max_concurrency})"
+        )
 
-        # Process all chunks concurrently with index tracking and semaphore control
         tasks = [
             self._process_indexed_chunk(
                 i,
@@ -1286,16 +1480,17 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
 
         try:
             indexed_results = await asyncio.gather(*tasks)
-            # Sort by chunk index to guarantee order
             sorted_results = sorted(indexed_results, key=lambda x: x[0])
         except Exception as e:
             self.logger.error(f"Error in filter_dataframe_batch: {e}")
             raise
 
-        # If item_list_field is specified, concatenate all result lists in order
+        self.logger.info(
+            f"All {len(chunks)} chunks completed for {len(input_df)} items"
+        )
+
         if item_list_field:
             try:
-                # Extract results in correct chunk order
                 all_items = []
                 for chunk_idx, chunk_result in sorted_results:
                     if hasattr(chunk_result, item_list_field):
@@ -1306,25 +1501,19 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                             self.logger.error(
                                 f"Field '{item_list_field}' is not a list: {type(result_list)}"
                             )
-                            # Fall back to returning raw results
                             return [result for _, result in sorted_results]
                     else:
                         self.logger.error(
                             f"Result missing field '{item_list_field}': {chunk_result}"
                         )
-                        # Fall back to returning raw results
                         return [result for _, result in sorted_results]
 
-                # Check if we should return Series for DataFrame assignment
                 if return_series:
                     values = [getattr(item, value_field) for item in all_items]
                     return pd.Series(values, index=input_df.index)
 
-                # Create a new result object with concatenated items
-                # Use the structure of the first result as template
                 if sorted_results and hasattr(sorted_results[0][1], item_list_field):
                     first_result = sorted_results[0][1]
-                    # Create a copy of the first result and replace the list field
                     concatenated_result = first_result.__class__(
                         **{
                             **{
@@ -1337,15 +1526,12 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
                     )
                     return concatenated_result
                 else:
-                    # If we can't create proper structure, return the items directly
                     return all_items
 
             except Exception as e:
                 self.logger.error(f"Error concatenating results: {e}")
-                # Fall back to returning raw results
                 return [result for _, result in sorted_results]
         else:
-            # No item_list_field specified, return list of results
             if return_series:
                 self.logger.warning(
                     "return_series=True but no item_list_field specified, returning raw results"
@@ -1355,73 +1541,32 @@ schema: {json.dumps(output_type.model_json_schema(), indent=2)}
     async def filter_dataframe(
         self, input_df: pd.DataFrame, value_field: str = "output", **kwargs
     ) -> pd.Series:
-        """
-        Process DataFrame and return values as Series for direct column assignment.
-
-        This is a convenience method that wraps filter_dataframe_batch and extracts
-        the specified field values as a pandas Series for direct DataFrame assignment.
-        All chunk ordering and ID validation guarantees from filter_dataframe_batch apply.
-
-        Args:
-            input_df: DataFrame to process
-            value_field: Field name to extract from results (default: 'output')
-            **kwargs: All other arguments passed to filter_dataframe_batch
-                     (item_list_field, item_id_field, retries, chunk_size, chat, etc.)
-
-        Returns:
-            pandas Series with extracted values, indexed to match input_df
-
-        Examples:
-            # Basic classification
-            df["ai_related"] = await agent.filter_dataframe(df[['headline']])
-
-            # Extract different field
-            df["confidence"] = await agent.filter_dataframe(
-                df[['text']],
-                value_field='confidence'
-            )
-
-            # Get probabilities for binary classification
-            df["spam_probability"] = await agent.filter_dataframe(
-                df[['text']],
-                return_probabilities=True,
-                target_tokens=["1"]
-            )
-
-            # With ID validation
-            df["sentiment"] = await agent.filter_dataframe(
-                df[['text', 'id']],
-                item_id_field='id',
-                value_field='sentiment'
-            )
-        """
-        # Call filter_dataframe_batch with all provided arguments
+        """Process DataFrame and return values as Series for direct column assignment."""
         result = await self.filter_dataframe_batch(input_df, **kwargs)
 
-        # If result is already a Series (from probability extraction), return it directly
         if isinstance(result, pd.Series):
             return result
 
-        # Extract values from the structured result
         if hasattr(result, "results_list"):
-            # Standard case: structured object with results_list
             values = [getattr(item, value_field) for item in result.results_list]
         elif isinstance(result, list):
-            # Fallback case: result is already a list of items
             values = [getattr(item, value_field) for item in result]
         else:
-            # Unexpected result format
             raise ValueError(
                 f"Unexpected result format from filter_dataframe_batch: {type(result)}"
             )
 
-        # Validate that we have the right number of values
         if len(values) != len(input_df):
             raise ValueError(
                 f"Value count mismatch: expected {len(input_df)}, got {len(values)}"
             )
 
         return pd.Series(values, index=input_df.index)
+
+
+# ---------------------------------------------------------------------------
+# Convenience function
+# ---------------------------------------------------------------------------
 
 
 async def run_prompt_on_dataframe(
@@ -1440,69 +1585,30 @@ async def run_prompt_on_dataframe(
     **kwargs,
 ) -> pd.Series:
     """
-    Convenience function to run a Langfuse prompt on a DataFrame.
+    Convenience function to run a prompt on a DataFrame.
 
-    Automatically:
-    - Fetches prompt from Langfuse using singleton client
-    - Creates LLMagent with prompt configuration
-    - Introspects output_type to determine field names (if not provided)
-    - Runs inference and returns pandas Series
-
-    Args:
-        input_df: DataFrame to process
-        prompt_name: Name of prompt in Langfuse (e.g., 'newsagent/rate_quality')
-        output_type: Pydantic model class for structured output
-        value_field: Field to extract from results (auto-detected if None)
-        item_list_field: List field name in output (auto-detected if None)
-        item_id_field: ID field name for validation (default: 'id')
-        chunk_size: Rows per batch (default: 25)
-        max_concurrency: Max concurrent requests (default: DEFAULT_CONCURRENCY)
-        return_probabilities: Return token probabilities instead of structured output
-        target_tokens: Tokens to extract probabilities for (default: ["1"])
-        verbose: Enable verbose logging
-        logger: Optional logger instance
-        **kwargs: Additional arguments passed to filter_dataframe
-
-    Returns:
-        pandas Series with results, indexed to match input_df
-
-    Example:
-        # Single line replaces 10+ lines of boilerplate
-        rating_df['low_quality'] = await run_prompt_on_dataframe(
-            rating_df[['id', 'input_text']],
-            "newsagent/rate_quality",
-            StoryRatings,
-            return_probabilities=True,
-            logger=logger
-        )
+    Automatically fetches prompt from local prompts.py, creates LLMagent,
+    introspects output_type, runs inference, and returns pandas Series.
     """
     logger = logger or _logger
 
-    # Get singleton Langfuse client
     lf_client = get_langfuse_client(logger=logger)
-
-    # Fetch prompt from Langfuse
     system_prompt, user_prompt, model, reasoning_effort = lf_client.get_prompt(
         prompt_name
     )
 
-    # Auto-detect fields if not provided
     if item_list_field is None or value_field is None:
         detected_list_field, detected_value_field = _introspect_output_type(output_type)
-
         if item_list_field is None:
             item_list_field = detected_list_field or "results_list"
         if value_field is None:
             value_field = detected_value_field
-
-            # If still None and not using probabilities, raise error
             if value_field is None and not return_probabilities:
                 raise ValueError(
                     f"Could not auto-detect value_field for {output_type.__name__}. "
                     f"Please specify explicitly."
                 )
 
-    # Create LLM agent
     agent = LLMagent(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
@@ -1513,7 +1619,6 @@ async def run_prompt_on_dataframe(
         logger=logger,
     )
 
-    # Run inference
     result_series = await agent.filter_dataframe(
         input_df,
         value_field=value_field,

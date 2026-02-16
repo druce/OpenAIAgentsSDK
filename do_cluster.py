@@ -18,7 +18,8 @@ import umap
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
-from llm import paginate_df_async, LLMagent, get_langfuse_client
+from llm import paginate_df_async, LLMagent
+from prompts import load_prompt
 
 
 class TopicText(BaseModel):
@@ -570,9 +571,8 @@ async def name_clusters(
                   Individual cluster naming failures are logged but don't stop processing.
     """
 
-    system_prompt, user_prompt, model, reasoning_effort = get_langfuse_client(
-        logger=logger
-    ).get_prompt("newsagent/topic_writer")
+    system_prompt, user_prompt, model, reasoning_effort = load_prompt(
+        "newsagent/topic_writer")
 
     topic_writer = LLMagent(
         system_prompt=system_prompt,
