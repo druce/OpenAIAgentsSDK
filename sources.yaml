@@ -153,7 +153,7 @@ The Verge:
   url: https://www.theverge.com/ai-artificial-intelligence
   filename: The_Verge
   include:
-  - ^https://www.theverge.com/news
+  - ^https://www.theverge.com/
   rss: https://www.theverge.com/rss/ai-artificial-intelligence/index.xml
 
 # 400 error for rss from feedparser

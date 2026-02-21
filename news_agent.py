@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import dotenv
-import markdown
 
 # import pickle
 import numpy as np
@@ -69,7 +68,7 @@ from prompts import load_prompt
 from log_handler import SQLiteLogHandler
 from newsletter_state import NewsletterAgentState
 from scrape import normalize_html, scrape_urls_concurrent
-from utilities import send_gmail
+from utilities import format_newsletter_email, send_email, send_gmail
 
 # from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
 # import hdbscan
@@ -133,7 +132,6 @@ class ArticleSummaryList(BaseModel):
 class AIClassification(BaseModel):
     """A single headline classification result"""
     id: int = Field("The news item id")
-    input_str: str = Field(description="The original headline title")
     output: bool = Field(
         description="Whether the headline title is AI-related")
 
@@ -2693,6 +2691,8 @@ class SelectSectionsTool:
 
             # concatenate deduped_dfs into a single df
             deduped_df = pd.concat(deduped_dfs)
+            # Guard: LLM may return the same id multiple times; keep first to avoid row multiplication in merge
+            deduped_df = deduped_df.drop_duplicates(subset=['id'], keep='first')
             headline_df = pd.merge(
                 headline_df, deduped_df[["id", "dupe_id"]], on="id", how="left")
             headline_df["dupe_id"] = headline_df["dupe_id"].fillna(
@@ -3087,7 +3087,13 @@ class DraftSectionsTool:
                     'links': links_md
                 })
 
-        return pd.DataFrame(section_list)
+        df = pd.DataFrame(section_list)
+        # LLM may return duplicate stories within a section; keep first occurrence
+        if not df.empty and df['id'].duplicated().any():
+            self.logger.warning(
+                f"Removed {df['id'].duplicated().sum()} duplicate story IDs from section drafts")
+            df = df.drop_duplicates(subset=['id'], keep='first')
+        return df
 
     async def _critique_and_optimize_sections(
         self,
@@ -3344,9 +3350,9 @@ class DraftSectionsTool:
             else:
                 tier2_selected = pd.DataFrame()
 
-            # Combine tiers
+            # Combine tiers and deduplicate by id
             selected_df = pd.concat(
-                [must_include, tier2_selected])
+                [must_include, tier2_selected]).drop_duplicates(subset=['id'], keep='first')
             self.logger.info(
                 f"Total selected stories: {len(selected_df)} (target: 100)")
 
@@ -3488,6 +3494,10 @@ class FinalizeNewsletterTool:
             # Get newsletter section DataFrame from state (already critiqued in Step 8b)
             newsletter_section_df = state.newsletter_section_df.sort_values(
                 ['sort_order', 'rating'], ascending=[True, False])
+
+            # Deduplicate by id before rendering
+            newsletter_section_df = newsletter_section_df.drop_duplicates(
+                subset=['id'], keep='first')
 
             # Build markdown sections (include all categories)
             draft_newsletter = ""
@@ -3634,33 +3644,18 @@ class FinalizeNewsletterTool:
 
             # Send email with styled newsletter
             try:
-
                 today = datetime.now().strftime("%B %d, %Y")
                 subject = f"AI News for {today} - {state.newsletter_title}"
 
-                # Convert markdown to HTML
-                newsletter_html = markdown.markdown(
-                    state.final_newsletter,
-                    extensions=['extra', 'codehilite']
+                # Format email using structured data from newsletter_section_df
+                html_content = format_newsletter_email(
+                    title=state.newsletter_title,
+                    date_str=today,
+                    newsletter_section_df=newsletter_section_df,
                 )
 
-                # Apply HTML styling
-                html_content = f"""
-                <div style="max-width: 800px; margin: 0 auto; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
-                    <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 40px 20px; text-align: center; border-radius: 8px 8px 0 0;">
-                        <h1 style="color: white; margin: 0; font-size: 32px;">AI News Digest</h1>
-                        <p style="color: rgba(255,255,255,0.9); margin: 10px 0 0 0; font-size: 16px;">{today}</p>
-                    </div>
-                    <div style="background: #ffffff; padding: 30px; border-radius: 0 0 8px 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); line-height: 1.6; color: #333;">
-                        {newsletter_html}
-                    </div>
-                    <div style="text-align: center; padding: 20px; color: #666; font-size: 14px;">
-                        <p>Generated on {today} by AI Newsletter Agent</p>
-                    </div>
-                </div>
-                """
-
-                send_gmail(subject, html_content)
+                email_address = os.getenv("GMAIL_USER")
+                send_email([email_address], subject, html_content)
                 self.logger.info(
                     f"✅ Sent newsletter email with subject: {subject}")
             except Exception as e:

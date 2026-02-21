@@ -27,6 +27,7 @@ from google.genai import types as genai_types
 from openai import AsyncOpenAI, BadRequestError
 from pydantic import BaseModel, ValidationError, create_model
 from tenacity import (
+    RetryError,
     before_sleep_log,
     retry,
     retry_if_exception_type,
@@ -79,13 +80,13 @@ CLAUDE_OPUS_MODEL = LLMModel(
 )
 
 CLAUDE_SONNET_MODEL = LLMModel(
-    model_id="claude-sonnet-4-5-20250929",
+    model_id="claude-sonnet-4-6",
     vendor=Vendor.ANTHROPIC,
     supports_logprobs=False,
     supports_reasoning=True,
     supports_temperature=True,
     default_max_tokens=16384,
-    display_name="Claude Sonnet 4.5",
+    display_name="Claude Sonnet 4.6",
 )
 
 CLAUDE_HAIKU_MODEL = LLMModel(
@@ -129,13 +130,13 @@ GEMINI_FLASH_MODEL = LLMModel(
 )
 
 GEMINI_PRO_MODEL = LLMModel(
-    model_id="gemini-3-pro-preview",
+    model_id="gemini-3.1-pro-preview",
     vendor=Vendor.GEMINI,
     supports_logprobs=False,
     supports_reasoning=True,
     supports_temperature=True,
-    default_max_tokens=16384,
-    display_name="Gemini 3 Pro",
+    default_max_tokens=32768,
+    display_name="Gemini 3.1 Pro",
 )
 
 MODEL_DICT: Dict[str, LLMModel] = {
@@ -557,7 +558,25 @@ class _AnthropicAgent(_VendorAgent):
     async def _parse_structured(self, raw, output_type):
         for block in raw.content:
             if block.type == "tool_use":
-                return output_type.model_validate(block.input)
+                inp = block.input
+                # Claude occasionally serializes array fields as JSON strings;
+                # coerce any top-level string values that look like JSON.
+                _logger.debug(
+                    f"tool_use input keys={list(inp.keys())}, "
+                    f"results_list type={type(inp.get('results_list', None)).__name__}"
+                )
+                coerced = {}
+                for k, v in inp.items():
+                    if isinstance(v, str) and v[:1] in ("[", "{"):
+                        try:
+                            v = json.loads(v)
+                        except Exception as e:
+                            _logger.warning(
+                                f"json.loads failed for field '{k}': {e}. "
+                                f"Full string value:\n{v}"
+                            )
+                    coerced[k] = v
+                return output_type.model_validate(coerced)
         text = self._extract_text(raw)
         if text.startswith("```"):
             text = text.split("\n", 1)[-1]
@@ -690,6 +709,22 @@ class _GeminiAgent(_VendorAgent):
                 f"Gemini response truncated (finish_reason='MAX_TOKENS', "
                 f"max_output_tokens={self.model.default_max_tokens}). "
                 f"Increase default_max_tokens or reduce input size."
+            )
+        if raw.text is None:
+            # Diagnose why Gemini returned no text
+            details = []
+            if hasattr(raw, "candidates") and raw.candidates:
+                c = raw.candidates[0]
+                details.append(f"finish_reason={c.finish_reason}")
+                if hasattr(c, "safety_ratings") and c.safety_ratings:
+                    details.append(f"safety_ratings={c.safety_ratings}")
+            elif hasattr(raw, "candidates"):
+                details.append("candidates=[]")
+            if hasattr(raw, "prompt_feedback") and raw.prompt_feedback:
+                details.append(f"prompt_feedback={raw.prompt_feedback}")
+            detail_str = "; ".join(details) or "no diagnostic info available"
+            raise RuntimeError(
+                f"Gemini returned empty response (text=None). {detail_str}"
             )
         return output_type.model_validate_json(raw.text)
 
@@ -1339,7 +1374,7 @@ class LLMagent:
                 )
                 return result
 
-            except ValidationError as e:
+            except (ValidationError, RetryError) as e:
                 last_exc = e
                 self.logger.error(
                     f"Pydantic validation failed in filter_dataframe_chunk: {e}"
