@@ -15,6 +15,7 @@ VENDOR_RPM_LIMITS = {
     "anthropic": 1000,
     "openai": 1000,
     "gemini": 1000,
+    "openrouter": 200,
 }
 FIREFOX_PROFILE_PATH = os.getenv('FIREFOX_PROFILE_PATH')
 if not FIREFOX_PROFILE_PATH:

@@ -11,7 +11,6 @@ import asyncio
 import json
 import logging
 import math
-import os
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -52,6 +51,7 @@ class Vendor(str, Enum):
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
     GEMINI = "gemini"
+    OPENROUTER = "openrouter"
 
 
 @dataclass(frozen=True)
@@ -99,24 +99,44 @@ CLAUDE_HAIKU_MODEL = LLMModel(
     display_name="Claude Haiku 4.5",
 )
 
+GPT5_MODEL = LLMModel(
+    model_id="gpt-5",
+    vendor=Vendor.OPENAI,
+    supports_logprobs=False,
+    supports_reasoning=True,
+    supports_temperature=False,
+    default_max_tokens=16384,
+    display_name="GPT-5",
+)
+
 GPT5_MINI_MODEL = LLMModel(
     model_id="gpt-5-mini",
     vendor=Vendor.OPENAI,
     supports_logprobs=False,
     supports_reasoning=True,
     supports_temperature=False,
-    default_max_tokens=4096,
+    default_max_tokens=16384,
     display_name="GPT-5 Mini",
 )
 
-GPT41_MINI_MODEL = LLMModel(
-    model_id="gpt-4.1-mini",
+GPT5_NANO_MODEL = LLMModel(
+    model_id="gpt-5-nano",
+    vendor=Vendor.OPENAI,
+    supports_logprobs=False,
+    supports_reasoning=True,
+    supports_temperature=False,
+    default_max_tokens=16384,
+    display_name="GPT-5 Nano",
+)
+
+GPT41_MODEL = LLMModel(
+    model_id="gpt-4.1",
     vendor=Vendor.OPENAI,
     supports_logprobs=True,
     supports_reasoning=False,
     supports_temperature=True,
     default_max_tokens=4096,
-    display_name="GPT-4.1 Mini",
+    display_name="GPT-4.1",
 )
 
 GEMINI_FLASH_MODEL = LLMModel(
@@ -139,115 +159,32 @@ GEMINI_PRO_MODEL = LLMModel(
     display_name="Gemini 3.1 Pro",
 )
 
+GLM5_MODEL = LLMModel(
+    model_id="z-ai/glm-5",
+    vendor=Vendor.OPENROUTER,
+    supports_logprobs=False,
+    supports_reasoning=True,
+    supports_temperature=False,
+    default_max_tokens=32768,
+    display_name="GLM-5",
+)
+
+
 MODEL_DICT: Dict[str, LLMModel] = {
     # Anthropic
     CLAUDE_OPUS_MODEL.model_id: CLAUDE_OPUS_MODEL,
     CLAUDE_SONNET_MODEL.model_id: CLAUDE_SONNET_MODEL,
     CLAUDE_HAIKU_MODEL.model_id: CLAUDE_HAIKU_MODEL,
-    "claude-sonnet-4-20250514": LLMModel(
-        "claude-sonnet-4-20250514",
-        Vendor.ANTHROPIC,
-        False,
-        True,
-        True,
-        16384,
-        "Claude Sonnet 4",
-    ),
-    "claude-sonnet-4": LLMModel(
-        "claude-sonnet-4", Vendor.ANTHROPIC, False, True, True, 16384, "Claude Sonnet 4"
-    ),
-    "claude-opus-4-20250514": LLMModel(
-        "claude-opus-4-20250514",
-        Vendor.ANTHROPIC,
-        False,
-        True,
-        True,
-        16384,
-        "Claude Opus 4",
-    ),
-    "claude-opus-4": LLMModel(
-        "claude-opus-4", Vendor.ANTHROPIC, False, True, True, 16384, "Claude Opus 4"
-    ),
-    "claude-3-5-haiku": LLMModel(
-        "claude-3-5-haiku",
-        Vendor.ANTHROPIC,
-        False,
-        True,
-        True,
-        16384,
-        "Claude 3.5 Haiku",
-    ),
     # OpenAI
+    GPT5_MODEL.model_id: GPT5_MODEL,
     GPT5_MINI_MODEL.model_id: GPT5_MINI_MODEL,
-    GPT41_MINI_MODEL.model_id: GPT41_MINI_MODEL,
-    "gpt-5": LLMModel("gpt-5", Vendor.OPENAI, False, True, False, 4096, "GPT-5"),
-    "gpt-5-nano": LLMModel(
-        "gpt-5-nano", Vendor.OPENAI, False, True, False, 4096, "GPT-5 Nano"
-    ),
-    "o3-mini": LLMModel("o3-mini", Vendor.OPENAI, False, True, False, 4096, "O3 Mini"),
-    "o3": LLMModel("o3", Vendor.OPENAI, False, True, False, 4096, "O3"),
-    "o4-mini": LLMModel("o4-mini", Vendor.OPENAI, False, True, False, 4096, "O4 Mini"),
-    "gpt-4o-mini": LLMModel(
-        "gpt-4o-mini", Vendor.OPENAI, True, False, True, 4096, "GPT-4o Mini"
-    ),
-    "gpt-4o-2024-11-20": LLMModel(
-        "gpt-4o-2024-11-20", Vendor.OPENAI, True, False, True, 4096, "GPT-4o"
-    ),
-    "gpt-4.5-preview": LLMModel(
-        "gpt-4.5-preview", Vendor.OPENAI, True, False, True, 4096, "GPT-4.5 Preview"
-    ),
-    "gpt-4.1": LLMModel("gpt-4.1", Vendor.OPENAI, True, False, True, 4096, "GPT-4.1"),
-    "gpt-4.1-nano": LLMModel(
-        "gpt-4.1-nano", Vendor.OPENAI, True, False, True, 4096, "GPT-4.1 Nano"
-    ),
+    GPT41_MODEL.model_id: GPT41_MODEL,
+    GPT5_NANO_MODEL.model_id: GPT5_NANO_MODEL,
     # Gemini
     GEMINI_FLASH_MODEL.model_id: GEMINI_FLASH_MODEL,
     GEMINI_PRO_MODEL.model_id: GEMINI_PRO_MODEL,
-    "models/gemini-2.0-flash-thinking-exp": LLMModel(
-        "models/gemini-2.0-flash-thinking-exp",
-        Vendor.GEMINI,
-        False,
-        True,
-        True,
-        8192,
-        "Gemini 2.0 Flash Thinking",
-    ),
-    "models/gemini-2.0-pro-exp": LLMModel(
-        "models/gemini-2.0-pro-exp",
-        Vendor.GEMINI,
-        False,
-        True,
-        True,
-        8192,
-        "Gemini 2.0 Pro",
-    ),
-    "models/gemini-2.0-flash": LLMModel(
-        "models/gemini-2.0-flash",
-        Vendor.GEMINI,
-        False,
-        True,
-        True,
-        8192,
-        "Gemini 2.0 Flash",
-    ),
-    "models/gemini-1.5-pro-latest": LLMModel(
-        "models/gemini-1.5-pro-latest",
-        Vendor.GEMINI,
-        False,
-        False,
-        True,
-        8192,
-        "Gemini 1.5 Pro",
-    ),
-    "models/gemini-1.5-pro": LLMModel(
-        "models/gemini-1.5-pro",
-        Vendor.GEMINI,
-        False,
-        False,
-        True,
-        8192,
-        "Gemini 1.5 Pro",
-    ),
+    # OpenRouter
+    GLM5_MODEL.model_id: GLM5_MODEL,
 }
 
 
@@ -670,6 +607,44 @@ class _OpenAIAgent(_VendorAgent):
         return raw.choices[0].message.content
 
 
+class _OpenRouterAgent(_OpenAIAgent):
+    """OpenRouter agent — OpenAI-compatible API with a different base URL and reasoning mechanism."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        import os
+
+        self._client = openai.AsyncOpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=os.environ["OPENROUTER_API_KEY"],
+        )
+
+    async def _call_llm(self, system, user, output_schema):
+        kwargs = {
+            "model": self.model.model_id,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        }
+        if self.model.supports_temperature:
+            kwargs["temperature"] = self.temperature
+        # OpenRouter uses extra_body for reasoning effort instead of reasoning_effort param
+        effort_str = _EFFORT_INT_TO_STR.get(_validate_effort(self.reasoning_effort))
+        if effort_str and self.model.supports_reasoning:
+            kwargs["extra_body"] = {"reasoning": {"effort": effort_str}}
+        if output_schema:
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "structured_output",
+                    "strict": True,
+                    "schema": _make_openai_strict_schema(output_schema),
+                },
+            }
+        return await self._client.chat.completions.create(**kwargs)
+
+
 class _GeminiAgent(_VendorAgent):
     """Google Gemini agent using response_schema for structured output."""
 
@@ -760,6 +735,8 @@ def _create_vendor_agent(
         return _OpenAIAgent(**kwargs)
     elif model.vendor == Vendor.GEMINI:
         return _GeminiAgent(**kwargs)
+    elif model.vendor == Vendor.OPENROUTER:
+        return _OpenRouterAgent(**kwargs)
     else:
         raise ValueError(f"Unsupported vendor: {model.vendor}")
 

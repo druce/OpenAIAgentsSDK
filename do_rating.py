@@ -45,6 +45,17 @@ class StoryRatings(BaseModel):
     items: List[StoryRating] = Field(description="List of StoryRating")
 
 
+class StoryConfidence(BaseModel):
+    """StoryConfidence class for structured output confidence scoring"""
+    id: int = Field(description="The id of the story")
+    confidence: float = Field(description="Confidence score 0.0 to 1.0")
+
+
+class StoryConfidenceList(BaseModel):
+    """List of StoryConfidence for structured output"""
+    results_list: list[StoryConfidence]
+
+
 class StoryOrder(BaseModel):
     """StoryOrder class for generic structured output rating"""
     id: int = Field(description="The id of the story")
@@ -411,34 +422,31 @@ async def fn_rate_articles(headline_df: pd.DataFrame, logger: Optional[logging.L
     lq_task = run_prompt_on_dataframe(
         input_df=rating_df[['id', 'input_text']],
         prompt_name="newsagent/rate_quality",
-        output_type=StoryRatings,
-        value_field='low_quality',
+        output_type=StoryConfidenceList,
+        value_field='confidence',
         item_list_field='results_list',
         item_id_field='id',
         chunk_size=25,
-        return_probabilities=True,
         logger=logger
     )
     ot_task = run_prompt_on_dataframe(
         input_df=rating_df[['id', 'input_text']],
         prompt_name="newsagent/rate_on_topic",
-        output_type=StoryRatings,
-        value_field='on_topic',
+        output_type=StoryConfidenceList,
+        value_field='confidence',
         item_list_field='results_list',
         item_id_field='id',
         chunk_size=25,
-        return_probabilities=True,
         logger=logger
     )
     imp_task = run_prompt_on_dataframe(
         input_df=rating_df[['id', 'input_text']],
         prompt_name="newsagent/rate_importance",
-        output_type=StoryRatings,
-        value_field='important',
+        output_type=StoryConfidenceList,
+        value_field='confidence',
         item_list_field='results_list',
         item_id_field='id',
         chunk_size=25,
-        return_probabilities=True,
         logger=logger
     )
 

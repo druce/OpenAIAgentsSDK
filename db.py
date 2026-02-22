@@ -124,8 +124,46 @@ class Url:
         # If not found by URL, try by source and title
         return cls.get_by_source_and_title(conn, source, title)
 
+    @classmethod
+    def get_by_final_url(cls, conn: sqlite3.Connection, url: str) -> Optional['Url']:
+        """Find a URL record whose stored final_url matches the given URL (non-empty only)."""
+        if not url:
+            return None
+        cursor = conn.execute("""
+            SELECT id, initial_url, final_url, title, source, isAI, created_at
+            FROM urls WHERE final_url = ? AND final_url != ''
+        """, (url,))
+        row = cursor.fetchone()
+        if row:
+            return cls(
+                initial_url=row[1], final_url=row[2], title=row[3],
+                source=row[4], isAI=bool(row[5]),
+                created_at=datetime.fromisoformat(row[6]) if row[6] else None, id=row[0]
+            )
+        return None
+
+    @classmethod
+    def get_by_domain_and_title(cls, conn: sqlite3.Connection, domain: str, title: str) -> Optional['Url']:
+        """Find a URL record matching on domain (within final_url or initial_url) and exact title."""
+        if not domain or not title:
+            return None
+        pattern = f'%{domain}%'
+        cursor = conn.execute("""
+            SELECT id, initial_url, final_url, title, source, isAI, created_at
+            FROM urls WHERE title = ?
+              AND ((final_url LIKE ? AND final_url != '') OR initial_url LIKE ?)
+        """, (title, pattern, pattern))
+        row = cursor.fetchone()
+        if row:
+            return cls(
+                initial_url=row[1], final_url=row[2], title=row[3],
+                source=row[4], isAI=bool(row[5]),
+                created_at=datetime.fromisoformat(row[6]) if row[6] else None, id=row[0]
+            )
+        return None
+
     def upsert(self, conn: sqlite3.Connection):
-        """Insert or update this URL record"""
+        """Insert or update this URL record. Preserves created_at for existing records."""
         conn.execute("""
             INSERT INTO urls (initial_url, final_url, title, source, isAI, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -133,8 +171,7 @@ class Url:
                 final_url = excluded.final_url,
                 title = excluded.title,
                 source = excluded.source,
-                isAI = excluded.isAI,
-                created_at = excluded.created_at
+                isAI = excluded.isAI
         """, (self.initial_url, self.final_url, self.title, self.source, self.isAI,
               self.created_at.isoformat() if self.created_at else None))
         conn.commit()
