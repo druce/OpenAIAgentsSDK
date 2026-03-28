@@ -1,4 +1,5 @@
 import choix
+import math
 from typing import List, Tuple, Optional
 import numpy as np
 import pandas as pd
@@ -136,6 +137,13 @@ async def swiss_batching(headline_df: pd.DataFrame, battle_history: set,
         if b not in all_ids:
             all_ids.append(b)
 
+    # Ensure unpaired items still participate in battles
+    all_paired = set(all_ids)
+    unpaired_ids = [int(row["id"]) for _, row in headline_df.iterrows()
+                    if int(row["id"]) not in all_paired]
+    np.random.shuffle(unpaired_ids)
+    all_ids.extend(unpaired_ids)
+
     # Build lookup of article data
     id_to_row = {}
     for _, row in headline_df.iterrows():
@@ -241,7 +249,7 @@ async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFra
     # Initial rating by position
     bt_df['bradley_terry'] = np.linspace(1.0, 0.0, n)
 
-    max_rounds = 8
+    max_rounds = math.ceil((n - 1) / (BT_BATCH - 1))
     logger.info(f"Max {max_rounds} rounds")
 
     battle_history: set = set()

@@ -145,7 +145,7 @@ GEMINI_FLASH_MODEL = LLMModel(
     supports_logprobs=False,
     supports_reasoning=True,
     supports_temperature=True,
-    default_max_tokens=16384,
+    default_max_tokens=65536,
     display_name="Gemini 3.0 Flash",
 )
 
@@ -155,7 +155,7 @@ GEMINI_PRO_MODEL = LLMModel(
     supports_logprobs=False,
     supports_reasoning=True,
     supports_temperature=True,
-    default_max_tokens=32768,
+    default_max_tokens=65536,
     display_name="Gemini 3.1 Pro",
 )
 
@@ -167,6 +167,46 @@ GLM5_MODEL = LLMModel(
     supports_temperature=False,
     default_max_tokens=32768,
     display_name="GLM-5",
+)
+
+SEED_MINI_MODEL = LLMModel(
+    model_id="bytedance-seed/seed-2.0-mini",
+    vendor=Vendor.OPENROUTER,
+    supports_logprobs=False,
+    supports_reasoning=True,
+    supports_temperature=True,
+    default_max_tokens=16384,
+    display_name="Seed 2.0 Mini",
+)
+
+KIMI_K25_MODEL = LLMModel(
+    model_id="moonshotai/kimi-k2.5",
+    vendor=Vendor.OPENROUTER,
+    supports_logprobs=False,
+    supports_reasoning=True,
+    supports_temperature=True,
+    default_max_tokens=32768,
+    display_name="Kimi K2.5",
+)
+
+HUNTER_ALPHA_MODEL = LLMModel(
+    model_id="openrouter/hunter-alpha",
+    vendor=Vendor.OPENROUTER,
+    supports_logprobs=False,
+    supports_reasoning=True,
+    supports_temperature=True,
+    default_max_tokens=32000,
+    display_name="Hunter Alpha",
+)
+
+MINIMAX_M27_MODEL = LLMModel(
+    model_id="minimax/minimax-m2.7",
+    vendor=Vendor.OPENROUTER,
+    supports_logprobs=False,
+    supports_reasoning=True,
+    supports_temperature=True,
+    default_max_tokens=32000,
+    display_name="MiniMax M2.7",
 )
 
 
@@ -185,6 +225,10 @@ MODEL_DICT: Dict[str, LLMModel] = {
     GEMINI_PRO_MODEL.model_id: GEMINI_PRO_MODEL,
     # OpenRouter
     GLM5_MODEL.model_id: GLM5_MODEL,
+    SEED_MINI_MODEL.model_id: SEED_MINI_MODEL,
+    KIMI_K25_MODEL.model_id: KIMI_K25_MODEL,
+    HUNTER_ALPHA_MODEL.model_id: HUNTER_ALPHA_MODEL,
+    MINIMAX_M27_MODEL.model_id: MINIMAX_M27_MODEL,
 }
 
 
@@ -608,7 +652,12 @@ class _OpenAIAgent(_VendorAgent):
 
 
 class _OpenRouterAgent(_OpenAIAgent):
-    """OpenRouter agent — OpenAI-compatible API with a different base URL and reasoning mechanism."""
+    """OpenRouter agent — OpenAI-compatible API with a different base URL and reasoning mechanism.
+
+    Uses json_object response format (not json_schema strict) since many OpenRouter
+    models don't fully support strict JSON schema mode.  The schema is embedded in the
+    system prompt so the model knows what structure to produce.
+    """
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -620,6 +669,17 @@ class _OpenRouterAgent(_OpenAIAgent):
         )
 
     async def _call_llm(self, system, user, output_schema):
+        # Embed schema in system prompt since many OpenRouter models
+        # don't support json_schema strict mode (e.g. GLM-5 returns empty strings).
+        if output_schema:
+            schema_str = json.dumps(output_schema, indent=2)
+            system = (
+                f"{system}\n\n"
+                f"You MUST respond with valid JSON matching this exact schema:\n"
+                f"```json\n{schema_str}\n```\n"
+                f"Output ONLY the JSON object, no other text."
+            )
+
         kwargs = {
             "model": self.model.model_id,
             "messages": [
@@ -634,15 +694,42 @@ class _OpenRouterAgent(_OpenAIAgent):
         if effort_str and self.model.supports_reasoning:
             kwargs["extra_body"] = {"reasoning": {"effort": effort_str}}
         if output_schema:
-            kwargs["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "structured_output",
-                    "strict": True,
-                    "schema": _make_openai_strict_schema(output_schema),
-                },
-            }
+            kwargs["response_format"] = {"type": "json_object"}
         return await self._client.chat.completions.create(**kwargs)
+
+    async def _parse_structured(self, raw, output_type):
+        content = raw.choices[0].message.content
+        if not content or not content.strip():
+            finish = raw.choices[0].finish_reason if raw.choices else "unknown"
+            raise RuntimeError(
+                f"OpenRouter returned empty response (finish_reason={finish}). "
+                f"Model may not support structured output for this request."
+            )
+        # Strip markdown fences if present
+        text = content.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[-1]
+        if text.endswith("```"):
+            text = text[:-3].strip()
+        # Happy path
+        try:
+            return output_type.model_validate_json(text)
+        except Exception as original_err:
+            # Handle schema-echo pattern: model prepends the JSON schema then appends actual data
+            import json
+            try:
+                decoder = json.JSONDecoder()
+                first_obj, end_idx = decoder.raw_decode(text)
+                # Check if the first object looks like a schema echo
+                if isinstance(first_obj, dict) and (
+                    "$defs" in first_obj or "properties" in first_obj
+                ):
+                    remainder = text[end_idx:].strip()
+                    if remainder:
+                        return output_type.model_validate_json(remainder)
+            except (json.JSONDecodeError, Exception):
+                pass
+            raise original_err
 
 
 class _GeminiAgent(_VendorAgent):
@@ -905,7 +992,7 @@ class LLMagent:
         if self.verbose:
             self.logger.info(
                 f"Initialized LLMagent: model={self.model}, vendor={self._llm_model.vendor.value}, "
-                f"output_type={output_type.__name__}, reasoning_effort={reasoning_effort}"
+                f"output_type={output_type.__name__ if output_type else None}, reasoning_effort={reasoning_effort}"
             )
 
     def _build_langfuse_metadata(self) -> Dict[str, Any]:
@@ -930,6 +1017,7 @@ class LLMagent:
                 openai.APITimeoutError,
                 openai.InternalServerError,
                 ValidationError,
+                RuntimeError,
             )
         ),
         stop=stop_after_attempt(5),
@@ -963,6 +1051,7 @@ class LLMagent:
                 openai.APITimeoutError,
                 openai.InternalServerError,
                 ValidationError,
+                RuntimeError,
             )
         ),
         stop=stop_after_attempt(5),
