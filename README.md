@@ -82,8 +82,16 @@ cp dot-env.txt .env
 
 ```bash
 # Generate a complete newsletter
-python news_agent.py
+python run_agent.py
 
+# Resume a previous session from where it left off
+python run_agent.py --resume SESSION_ID
+
+# Run a single step
+python run_agent.py -s filter_urls
+
+# Skip fetching (use cached sources)
+python run_agent.py -n
 ```
 
 ## 📋 Complete 9-Step Workflow
@@ -162,71 +170,67 @@ The newsletter generation follows a structured 9-step process with persistent st
 
 ### Core Components
 
-#### Main Agent (`news_agent.py`)
+#### Main Agent (`news_agent.py` + `run_agent.py`)
 
-- `NewsletterAgent`: Primary orchestration class implementing the 9-step workflow
-- `NewsletterAgentState`: Pydantic model for persistent state management
-- Tool-based architecture using OpenAI function calling
+- `NewsletterAgent`: orchestration class implementing the 9-step workflow as OpenAI Agents SDK tools.
+- `NewsletterAgentState` (in `newsletter_state.py`): Pydantic state model with SQLite persistence.
+- `run_agent.py` is the CLI entry point — handles session creation, resume, single-step invocation, and graceful shutdown.
 
 #### Source Management
 
-- `sources.yaml`: Configuration for 17+ news sources
-- `fetch.py`: Async fetching system with concurrency control
-- `scrape.py`: Web scraping with Playwright using stealth features
-- `llm.py`: Functions to apply prompts to pandas dataframes, sending batches of rows async with retry.
+- `sources.yaml`: configuration for 17+ news sources (RSS, HTML scrape, REST APIs).
+- `fetch.py`: async fetching with semaphore concurrency control and per-domain rate limiting.
+- `scrape.py`: Playwright-based web scraping with stealth features and infinite-scroll support.
+- `utilities.py`: source validation, HTML email formatting, file output, run summaries.
 
 #### Agent State Logic
 
-- Top-level agent has a state and a set of tools
-- Each node is a tool with 1 or more agent objects which are initialized with prompts from Langfuse
-- Each node serializes the state to SQLite when it is complete and returns a string reprsentation of its status.
-- The global state has a string representation, e.g. results from all nodes, and tools can inspect the state
-- We can prompt the top level agent with, "run all steps in sequence", and it will iteratively inspect the current state and run the next logical step until flow is compete
-- If there are errors we can fix them or reload previous states and resume from any step.
+- Top-level agent owns the state and a set of tools (one per workflow step).
+- Each tool runs its step, serializes the resulting state to SQLite, and returns a status string.
+- The global state has a string representation summarizing every step's results — tools can read it to make decisions.
+- Prompting the agent with "run all steps in sequence" lets it iteratively inspect state and run the next logical step until done.
+- If a step fails, you can fix the underlying issue and resume the same session from the failed step (`--resume SESSION_ID`) or re-run any single step (`-s STEP_NAME`).
 
-#### RSS Source Processing
+#### RSS / HTML Source Processing
 
-- 24-hour article filtering
-- Title enhancement with metadata
-- Robust date parsing with timezone awareness
-
-#### HTML Source Processing
-
-- Playwright-based browser automation
-- Configurable include/exclude URL patterns
-- Support for infinite scroll and dynamic content
+- 24-hour article filtering with robust date parsing (timezone-aware).
+- Title enhancement with metadata.
+- Configurable include/exclude URL regex patterns per source.
+- Infinite-scroll page-down counts and post-load delays per source.
 
 #### Concurrent Architecture
 
-- Worker pool-based URL processing
-- Per-domain rate limiting 
+- Worker-pool-based URL processing across all sources.
+- Per-domain rate limiting in scraping.
+- Per-vendor async token-bucket rate limiting on LLM calls (`config.VENDOR_RPM_LIMITS`).
+- Configurable concurrency from CLI (`-c N`).
 
-#### AI Integration
+#### LLM Integration (`llm.py` + `prompts.py`)
 
-- Prompts are stored in Langfuse with model and reasoning effort level, enabling evals to select most efficient model.
-- Structured output with Pydantic validation
-- GPT-5-nano for simplest tasks like headline classification
-- Typically GPT-5-mini for most tasks requiring more intelligence
-- Could use GPT-5.2 for final section writing and polish, but takes longer and more expensive.
-- GPT-4o where we want legacy logprobs
-- Critic-optimizer loops with quality scoring and iterative refinement
+- All prompts defined in `prompts.py` as `PromptConfig` objects pinning a model and reasoning-effort level — individual steps can be retargeted by editing one line.
+- **Multi-vendor support** with a unified `LLMagent` facade:
+  - **OpenAI** — GPT-5 family (nano/mini/full), GPT-4.1 / GPT-4.1-mini
+  - **Anthropic** — Claude Opus / Sonnet / Haiku 4.x (direct API)
+  - **Google Gemini** — 3.0 Flash, 3.1 Pro, 3.1 Flash Lite
+  - **OpenRouter** — Kimi K2.6, MiniMax M2.7, GLM-5.1, Grok 4.1 Fast, MiMo, Hunter Alpha, etc.
+  - **Claude CLI** — invokes the local `claude -p` subprocess so the heavy editorial steps (newsletter writing, full-newsletter critique) run on your **Max-plan OAuth subscription instead of API credits**, which dramatically reduces cost
+- Async token-bucket rate limiting per vendor, automatic retries with exponential backoff via `tenacity`.
+- Structured output enforced by Pydantic + tool-use / JSON-schema response formats per vendor.
+- **Tiered model assignment** — cheap/fast models (GPT-5-nano, Gemini Flash) for classification and extraction; mid-tier (GPT-5-mini, GPT-4.1-mini) for ratings; MiniMax / Kimi for cross-source synthesis; Claude Opus / Sonnet via CLI for the section drafting, critique, and improve loops.
 
-### Usage Examples
+#### Critic-Optimizer Loops
 
-```python
-# Initialize agent with persistent state
-agent = NewsletterAgent(session_id="test_session", verbose=True)
+The pipeline uses two critic-optimizer loops to drive output quality:
 
-# Run individual steps
-await agent.gather_urls()
-await agent.filter_urls()
-await agent.download_articles()
+- **Per-section loop** (Step 8): each section is critiqued for thematic coherence, headline quality, ordering; up to 3 iterations.
+- **Whole-newsletter loop** (Step 9): full draft is scored on `title_quality`, `structure_quality`, `section_quality`, `headline_quality`, `overall_score` (0-10). Stops when overall ≥ 8.0 or after 3 iterations. Critic and optimizer run on different models (Claude Sonnet vs Claude Opus via CLI) so the optimizer doesn't just confirm its own bias.
 
-# Inspect results
-print(f"Articles found: {len(agent.state.headline_data)}")
-ai_articles = [a for a in agent.state.headline_data if a.get('isAI')]
-print(f"AI-related: {len(ai_articles)}")
-```
+#### Output Delivery
+
+- Newsletter HTML is saved to `out/YYYY-MM-DD.html` (with `out/latest.html` symlinked to today's file).
+- Optional Gmail SMTP delivery via `utilities.send_email`.
+- Each headline in the rendered HTML includes a `⎘` copy-to-clipboard button (works in browser; Gmail strips JS).
+- Email footer includes a `file://` link back to the local HTML so you can open the fully-interactive version in a browser when reading the email.
 
 The notebook is used for:
 
@@ -241,19 +245,24 @@ The notebook is used for:
 OpenAIAgentsSDK/
 ├── Basic OpenAI Agents SDK.ipynb  # Introduction to OpenAI Agents SDK
 ├── Run Agent.ipynb                # Newsletter workflow notebook ⭐
-├── news_agent.py                  # Main agent implementation
+├── run_agent.py                   # CLI entry point ⭐
+├── news_agent.py                  # NewsletterAgent orchestration class
+├── newsletter_state.py            # Pydantic state model + SQLite persistence
+├── prompts.py                     # All LLM prompt templates ⭐
 ├── sources.yaml                   # News source configurations
-├── config.py                      # System configuration
-├── db.py                          # Database utilities
+├── config.py                      # Constants, model registry, canonical topics
+├── db.py                          # Database schema (URLs, Articles, Newsletters)
 ├── do_cluster.py                  # Topic clustering via HDBSCAN
 ├── do_dedupe.py                   # Deduplication logic
 ├── do_rating.py                   # Article rating with Bradley-Terry
 ├── fetch.py                       # Multi-source content fetching
-├── llm.py                         # LLM integration with Langfuse
-├── scrape.py                      # Web scraping utilities
+├── scrape.py                      # Playwright-based web scraping
+├── llm.py                         # Multi-vendor LLM integration (OpenAI, Anthropic, Gemini, OpenRouter, Claude CLI)
+├── utilities.py                   # Email delivery, HTML formatting, source validation
+├── log_handler.py                 # SQLite logging with API key sanitization
+├── mcptool.py                     # MCP (Model Context Protocol) integration
 ├── dot-env.txt                    # Environment variables template
 ├── headline_classifier_ground_truth.csv  # Evaluation data
-├── list_langfuse_prompts.py       # Export Langfuse prompts
 ├── prompts.md                     # Prompt documentation
 ├── requirements.txt               # Python dependencies
 ├── promptfoo/                     # Prompt evaluation framework
@@ -279,34 +288,19 @@ Source Name:
 ### Environment Variables
 
 ```bash
-OPENAI_API_KEY=sk-...        # OpenAI API key for LLM operations
-NEWSAPI_KEY=...              # NewsAPI key for REST sources
-```
+# Required for core functionality
+OPENAI_API_KEY=sk-...           # OpenAI (GPT-5 family, GPT-4.1, embeddings)
+NEWSAPI_API_KEY=...             # NewsAPI for REST sources
+FIREFOX_PROFILE_PATH=...        # Firefox profile for Playwright scraping
 
-## 🧪 Testing
+# Vendor keys (optional but referenced by various prompts in prompts.py)
+ANTHROPIC_API_KEY=sk-ant-...    # Anthropic Claude (direct API)
+GOOGLE_API_KEY=...              # Google Gemini
+OPENROUTER_API_KEY=sk-or-...    # OpenRouter (Kimi, MiniMax, GLM, Grok)
 
-```bash
-# Run fast tests (no network requests)
-pytest tests/
-
-# Run all tests including slow network tests
-pytest tests/ --run-slow
-
-# Run with coverage reporting
-pytest tests/ --cov=. --cov-report=term-missing
-
-# Test specific functionality
-pytest tests/test_sources.py::TestRSSSourceFetching -v
-```
-
-### Test Individual Sources
-
-```bash
-# Test single source
-python tests/run_tests.py "Hacker News"
-
-# Demo 24-hour filtering
-python tests/demo_24h_filtering.py
+# Claude CLI (alternative to ANTHROPIC_API_KEY for *-cli model variants)
+# Uses your local `claude` CLI's OAuth (Max-plan subscription) instead of API.
+# No env var needed; just have `claude` on $PATH and logged in.
 ```
 
 ## 🚀 Production Deployment
@@ -314,12 +308,14 @@ python tests/demo_24h_filtering.py
 ### Workflow Execution
 
 ```bash
-# Complete workflow with monitoring
-python news_agent.py
+# Complete workflow
+python run_agent.py
 
-# Resume from specific step
-python check_status.py
-python news_agent.py  # Automatically resumes from last step
+# Resume an interrupted run from where it left off
+python run_agent.py --resume SESSION_ID
+
+# Re-run a single step on a previous session (e.g. regenerate the newsletter)
+python run_agent.py --resume SESSION_ID -s finalize_newsletter --notify
 ```
 
 ### Performance Characteristics
@@ -357,6 +353,6 @@ python news_agent.py  # Automatically resumes from last step
 
 This project is licensed under the MIT License - see the LICENSE file for details.
 
-### Built with ❤️ using OpenAI Agents SDK, Claude Code, Windsurf, Python, Pandas, Jupyter, Langfuse, Playwright and other great tools!
+### Built with ❤️ using OpenAI Agents SDK, Claude Code, Windsurf, Python, Pandas, Jupyter, Playwright and other great tools!
 
 ---

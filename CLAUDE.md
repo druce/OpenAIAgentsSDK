@@ -95,8 +95,9 @@ Source Name:
 - `newsletter_agent.db` - Agent state and workflow persistence
 - `newsagent_logs.db` - Structured logs
 - `download/` - Cached source HTML and extracted text
-- `data/chromadb/` - Embedding vectors for clustering
+- `data/chromadb/` - Configured in `config.py` but currently unused; embeddings live in `umap_reducer.pkl` for clustering. Slated to be replaced (see in-flight KG+RAG plan).
 - `out/` - Generated newsletter output
+- `umap_reducer.pkl` - Pretrained UMAP reducer required by `do_cluster.py`. Not in git (414 MB). Run `Tune HDBSCAN.ipynb` to regenerate if missing.
 
 ### Environment
 

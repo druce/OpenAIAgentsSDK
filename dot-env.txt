@@ -35,6 +35,9 @@ ANTHROPIC_API_KEY=""
 
 GOOGLE_API_KEY=""
 
+# Required for OpenRouter-routed models (Kimi, MiniMax, GLM, Grok, etc. in prompts.py)
+OPENROUTER_API_KEY=""
+
 ELEVENLABS_API_KEY=""
 
 TAVILY_API_KEY=""
