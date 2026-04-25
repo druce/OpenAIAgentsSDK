@@ -1,14 +1,16 @@
-import choix
+import asyncio
+import logging
 import math
-from typing import List, Tuple, Optional
+from datetime import datetime, timedelta, timezone
+from typing import List, Optional, Tuple
+
+import choix
 import numpy as np
 import pandas as pd
-from datetime import datetime, timezone, timedelta
-import logging
-import asyncio
-from pydantic import BaseModel, Field
 from IPython.display import display
+from pydantic import BaseModel, Field
 from scipy.stats import zscore
+
 from llm import LLMagent, run_prompt_on_dataframe
 from prompts import load_prompt
 
@@ -253,7 +255,8 @@ async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFra
     logger.info(f"Max {max_rounds} rounds")
 
     battle_history: set = set()
-    all_battles: List[Tuple[int, int]] = []  # (winner_idx, loser_idx) for choix
+    # (winner_idx, loser_idx) for choix
+    all_battles: List[Tuple[int, int]] = []
 
     # Setup battle agent
     system, user, model, reasoning_effort = load_prompt(
@@ -340,7 +343,8 @@ async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFra
             "bradley_terry", ascending=False)["id"].values
         ranking_change_sum = np.abs(
             np.array([np.where(new_rankings == pid)[0][0] for pid in ids])
-            - np.array([np.where(previous_rankings == pid)[0][0] for pid in ids])
+            - np.array([np.where(previous_rankings == pid)[0][0]
+                       for pid in ids])
         ).sum()
         avg_change = ranking_change_sum / n
         previous_rankings = new_rankings.copy()
@@ -359,7 +363,8 @@ async def bradley_terry(headline_df: pd.DataFrame, logger=_logger) -> pd.DataFra
                 break
             if len(all_results) >= 4:
                 prev_two = (all_results[-3] + all_results[-4]) / 2
-                logger.info(f"last_two: {last_two:.2f}, prev_two: {prev_two:.2f}")
+                logger.info(
+                    f"last_two: {last_two:.2f}, prev_two: {prev_two:.2f}")
                 if last_two < n / 5 and last_two > prev_two:
                     logger.info("Increase in avg rank change, stopping")
                     break
@@ -425,7 +430,8 @@ async def fn_rate_articles(headline_df: pd.DataFrame, logger: Optional[logging.L
 
     # Run LLM assessments concurrently
     if logger:
-        logger.info("Rating quality, topic relevance, and importance concurrently")
+        logger.info(
+            "Rating quality, topic relevance, and importance concurrently")
 
     lq_task = run_prompt_on_dataframe(
         input_df=rating_df[['id', 'input_text']],
@@ -469,34 +475,31 @@ async def fn_rate_articles(headline_df: pd.DataFrame, logger: Optional[logging.L
 
     if isinstance(results[1], Exception):
         if logger:
-            logger.warning(f"Failed to get topic relevance assessment: {results[1]}")
+            logger.warning(
+                f"Failed to get topic relevance assessment: {results[1]}")
         rating_df['on_topic'] = 1
     else:
         rating_df['on_topic'] = results[1]
 
     if isinstance(results[2], Exception):
         if logger:
-            logger.warning(f"Failed to get importance assessment: {results[2]}")
+            logger.warning(
+                f"Failed to get importance assessment: {results[2]}")
         rating_df['important'] = 1
     else:
         rating_df['important'] = results[2]
 
     if logger:
-        logger.info(f"low quality: {rating_df['low_quality'].value_counts().to_dict()}")
-        logger.info(f"on topic: {rating_df['on_topic'].value_counts().to_dict()}")
-        logger.info(f"important: {rating_df['important'].value_counts().to_dict()}")
-
-    # AI is good at yes or no questions, not at converting understanding to a numerical rating.
-    # Use Bradley-Terry to rate articles based on a series of pairwise comparisons
-    # Note: Bradley-Terry rating is commented out for now due to complexity and cost
-    # if logger:
-    #     logger.info("running Bradley-Terry rating using head-to-head prompt comparisons")
-    # aidf = await bradley_terry(aidf, model=model_medium)
+        logger.info(
+            f"low quality: {rating_df['low_quality'].value_counts().to_dict()}")
+        logger.info(
+            f"on topic: {rating_df['on_topic'].value_counts().to_dict()}")
+        logger.info(
+            f"important: {rating_df['important'].value_counts().to_dict()}")
 
     # For now, set bt_z to 0 as placeholder
     rating_df['bt_z'] = 0.0
 
-    # could test if the prompts bias for/against certain types of stories, adjust the prompts, or boost ratings if they match those topics
     # bonus for longer articles
     # len < 1000 -> 0
     # len > 10000 -> 1

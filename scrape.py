@@ -20,6 +20,7 @@ import logging
 import os
 import random
 import re
+import sqlite3
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -412,6 +413,84 @@ async def get_browser(p: Any, reuse: bool = True) -> BrowserContext:
     return _browser_context_cache
 
 
+_bundled_firefox_version_cache: Optional[str] = None
+
+
+def _get_bundled_firefox_version(p: Any) -> Optional[str]:
+    """Return the version string (e.g. "146.0.1") of the Firefox build that
+    Playwright is currently using, by reading ``application.ini`` from inside
+    its bundled binary directory.
+
+    Returns None if it can't be determined; the caller should fall back to a
+    sensible hardcoded default in that case.
+
+    Note: Playwright ships Firefox **Nightly**, which is ahead of the public
+    stable release. Reporting the true version keeps the UA consistent with
+    JS-side fingerprintable internals (rendering engine quirks, etc.) at the
+    cost of advertising a version that very few real users run. That's the
+    right tradeoff against fingerprinters that cross-check UA vs. JS, but if
+    a specific site starts blocking on "rare version", consider clamping.
+    """
+    global _bundled_firefox_version_cache
+    if _bundled_firefox_version_cache is not None:
+        return _bundled_firefox_version_cache
+
+    try:
+        exe = Path(p.firefox.executable_path)
+    except Exception as exc:  # pragma: no cover - defensive
+        _logger.debug("Could not get firefox executable_path: %s", exc)
+        return None
+
+    # Candidate locations for application.ini relative to the binary:
+    #   macOS:   <...>/Nightly.app/Contents/MacOS/firefox
+    #            -> <...>/Nightly.app/Contents/Resources/application.ini
+    #   Linux:   <...>/firefox/firefox -> <...>/firefox/application.ini
+    candidates = [
+        exe.parent.parent / "Resources" / "application.ini",  # macOS .app
+        exe.parent / "application.ini",                       # Linux/Windows
+    ]
+    ini_path = next((c for c in candidates if c.exists()), None)
+    if ini_path is None:
+        _logger.debug("application.ini not found near %s", exe)
+        return None
+
+    try:
+        for line in ini_path.read_text().splitlines():
+            if line.startswith("Version="):
+                version = line.split("=", 1)[1].strip()
+                _bundled_firefox_version_cache = version
+                return version
+    except OSError as exc:
+        _logger.debug("Failed reading %s: %s", ini_path, exc)
+
+    return None
+
+
+def _build_firefox_user_agent(p: Any, fallback: str = "141.0") -> str:
+    """Build a realistic Firefox-on-macOS User-Agent that matches the actual
+    bundled binary version, falling back to ``fallback`` if detection fails.
+
+    Firefox deliberately freezes the Mac platform token to
+    ``Macintosh; Intel Mac OS X 10.15`` regardless of CPU architecture or OS
+    version (fingerprint resistance), so we hardcode that part.
+    """
+    detected = _get_bundled_firefox_version(p)
+    version = detected or fallback
+    # The UA only carries MAJOR.0, never the patch (e.g. 146.0.1 -> 146.0).
+    major = version.split(".")[0]
+    rv = f"{major}.0"
+    if detected is None:
+        _logger.warning(
+            "Could not detect bundled Firefox version; falling back to %s", rv
+        )
+    else:
+        _logger.debug("Using bundled Firefox version %s for User-Agent", version)
+    return (
+        f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:{rv}) "
+        f"Gecko/20100101 Firefox/{rv}"
+    )
+
+
 async def _create_browser_context(p: Any) -> BrowserContext:
     """
     Internal function to create a new browser context with full configuration.
@@ -455,6 +534,35 @@ async def _create_browser_context(p: Any) -> BrowserContext:
         "DNT": "1" if random.choice([True, False]) else "0"
     }
 
+    # Remove compatibility.ini to prevent "newer profile" errors when
+    # Playwright's bundled Firefox version changes between runs.
+    compat_ini = os.path.join(FIREFOX_PROFILE_PATH, "compatibility.ini")
+    if os.path.exists(compat_ini):
+        os.remove(compat_ini)
+
+    # Purge any DataDome anti-bot cookies from the profile before launch.
+    # WSJ (and other DataDome-protected sites) issue a long-lived "blocked"
+    # datadome cookie when they flag a session; that cookie then causes every
+    # subsequent fetch to 401 until it is removed. Must run before Playwright
+    # opens the profile, since the SQLite DB is locked while the browser is up.
+    cookies_db = os.path.join(FIREFOX_PROFILE_PATH, "cookies.sqlite")
+    if os.path.exists(cookies_db):
+        try:
+            conn = sqlite3.connect(cookies_db, timeout=5)
+            try:
+                deleted = conn.execute(
+                    "DELETE FROM moz_cookies WHERE name = 'datadome'"
+                ).rowcount
+                conn.commit()
+                if deleted:
+                    _logger.info(
+                        "Purged %d datadome cookie(s) from Firefox profile", deleted
+                    )
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            _logger.warning("Could not purge datadome cookies: %s", exc)
+
     b = await p.firefox.launch_persistent_context(
         user_data_dir=FIREFOX_PROFILE_PATH,
         headless=True,  # run without GUI
@@ -475,9 +583,10 @@ async def _create_browser_context(p: Any) -> BrowserContext:
             "browser.link.open_newwindow.restriction": 0,  # Allow all redirections to tabs
             "browser.tabs.loadInBackground": False,  # Focus new tabs immediately
         },
-        # provide a valid realistic User-Agent string for the latest Firefox on Apple Silicon
-        # match OS / browser build
-        user_agent="Mozilla/5.0 (Macintosh; ARM Mac OS X 14.4; rv:125.0) Gecko/20100101 Firefox/125.0",
+        # User-Agent built dynamically from the bundled Firefox version so it
+        # always matches the binary Playwright actually launches. See
+        # _build_firefox_user_agent() above for the fingerprinting tradeoffs.
+        user_agent=_build_firefox_user_agent(p),
         accept_downloads=True,
     )
     await apply_stealth_script(b)

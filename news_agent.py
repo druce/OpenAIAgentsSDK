@@ -64,7 +64,7 @@ from do_dedupe import process_dataframe_with_filtering
 from do_rating import bradley_terry, fn_rate_articles
 from fetch import Fetcher
 from llm import LLMagent, paginate_df_async
-from log_handler import SQLiteLogHandler
+from log_handler import SQLiteLogHandler, setup_sqlite_logging
 from newsletter_state import NewsletterAgentState
 from prompts import load_prompt
 from scrape import normalize_html, scrape_urls_concurrent
@@ -457,38 +457,7 @@ def mmr_selection(
 
 def setup_logging(session_id: str = "default", db_path: str = LOGDB) -> logging.Logger:
     """Set up logging to console and SQLite database."""
-
-    # Create logger
-    logging.basicConfig(level=logging.INFO)
-
-    logger = logging.getLogger(f"NewsletterAgent.{session_id}")
-    logger.setLevel(logging.INFO)
-
-    # Clear any existing handlers
-    logger.handlers.clear()
-
-    # Console handler
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-    console_formatter = logging.Formatter(
-        "%(asctime)s | %(name)s | %(levelname)s | %(message)s", datefmt="%H:%M:%S"
-    )
-    console_handler.setFormatter(console_formatter)
-
-    # SQLite handler
-    sqlite_handler = SQLiteLogHandler(db_path)
-    sqlite_handler.setLevel(logging.INFO)
-    sqlite_formatter = logging.Formatter("%(message)s")
-    sqlite_handler.setFormatter(sqlite_formatter)
-
-    # Add handlers to logger
-    logger.addHandler(console_handler)
-    logger.addHandler(sqlite_handler)
-
-    # Prevent propagation to root logger
-    logger.propagate = False
-
-    return logger
+    return setup_sqlite_logging(f"NewsletterAgent.{session_id}", db_path=db_path)
 
 
 async def mycreate_task(delay_index: int, coro, delay_seconds: float = 0.1):
@@ -3649,6 +3618,19 @@ class DraftSectionsTool:
                         [newsletter_section_df, new_section_df], ignore_index=True
                     )
 
+                # Deduplicate by story id across the full DataFrame.
+                # Stories moved to other categories by critique may also appear
+                # in the re-drafted section (since re-draft uses headline_df which
+                # has the original category assignments). Keep the re-drafted version.
+                if newsletter_section_df["id"].duplicated().any():
+                    n_dupes = newsletter_section_df["id"].duplicated().sum()
+                    self.logger.warning(
+                        f"Removed {n_dupes} cross-section duplicate story IDs after re-drafting"
+                    )
+                    newsletter_section_df = newsletter_section_df.drop_duplicates(
+                        subset=["id"], keep="last"
+                    )
+
                 self.logger.info(
                     f"Re-drafted {len(sections_to_redraft)} sections")
 
@@ -3958,7 +3940,11 @@ class FinalizeNewsletterTool:
                 trace_tag_list=[step_name, "title_agent"],
             )
             response = await title_agent.run_prompt(input_text=draft_newsletter)
-            title = response.strip()
+            # Take only the first non-empty line and strip markdown bold markers
+            title = next(
+                (line.strip().strip("*") for line in response.splitlines() if line.strip()),
+                response.strip()
+            )
             self.logger.info(f"Generated title: {title}")
 
             # Store title in state
@@ -4068,11 +4054,24 @@ class FinalizeNewsletterTool:
                 self.logger.info(
                     f"Step 9b: Iteration {iteration} - Running optimizer to improve draft"
                 )
-                optimizer_response = await improve_newsletter_agent.run_prompt(
-                    newsletter=current_draft, critique=critique_response.critique_text
-                )
+                try:
+                    optimizer_response = await improve_newsletter_agent.run_prompt(
+                        newsletter=current_draft, critique=critique_response.critique_text
+                    )
+                except Exception as e:
+                    self.logger.warning(
+                        f"Iteration {iteration}: Optimizer failed ({e}); "
+                        f"keeping prior draft and ending loop"
+                    )
+                    break
 
-                # Get improved newsletter from optimizer's newsletter_md field
+                if not optimizer_response or not optimizer_response.strip():
+                    self.logger.warning(
+                        f"Iteration {iteration}: Optimizer returned empty; "
+                        f"keeping prior draft and ending loop"
+                    )
+                    break
+
                 current_draft = optimizer_response
                 self.logger.info(
                     f"Iteration {iteration}: Optimizer completed, draft updated"

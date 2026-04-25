@@ -294,13 +294,22 @@ def setup_sqlite_logging(logger_name: str,
     # Clear existing handlers
     logger.handlers.clear()
 
-    # Add SQLite handler
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(level)
+    console_formatter = logging.Formatter(
+        "%(asctime)s | %(name)s | %(levelname)s | %(message)s", datefmt="%H:%M:%S"
+    )
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+
+    # SQLite handler
     sqlite_handler = SQLiteLogHandler(db_path)
     sqlite_handler.setLevel(level)
     sqlite_formatter = logging.Formatter('%(message)s')
     sqlite_handler.setFormatter(sqlite_formatter)
-
     logger.addHandler(sqlite_handler)
+
     logger.propagate = False
 
     return logger

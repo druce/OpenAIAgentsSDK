@@ -51,3 +51,18 @@ atproto
 # MCP (Model Context Protocol) dependencies
 mcp
 
+# Direct API SDKs (used in llm.py)
+anthropic
+google-genai
+
+# Retry / async / parsing
+tenacity
+nest-asyncio
+python-dateutil
+pyyaml
+beautifulsoup4
+
+# ML / display
+scikit-learn
+tabulate
+

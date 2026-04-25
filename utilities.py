@@ -2,6 +2,7 @@ from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import html
+import json
 import os
 from pathlib import Path
 import re
@@ -30,14 +31,32 @@ def _parse_markdown_links(links_md: str) -> list:
     return re.findall(r'\[([^\]]+)\]\(([^)]+)\)', links_md)
 
 
-def _make_pill(site_name: str) -> str:
-    """Generate an inline source pill span."""
+def _make_pill(site_name: str, url: Optional[str] = None) -> str:
+    """Generate an inline source pill, optionally linked."""
     escaped = html.escape(site_name)
-    return (
-        f'<span style="display:inline-block; padding:1px 6px; '
+    pill_style = (
+        f'display:inline-block; padding:1px 6px; '
         f'border:1px solid {_BORDER_GRAY}; border-radius:4px; '
-        f'font-size:11px; color:{_GRAY}; vertical-align:middle;">'
-        f'{escaped}</span>'
+        f'font-size:11px; color:{_GRAY}; vertical-align:middle; '
+        f'text-decoration:none;'
+    )
+    if url:
+        return (
+            f'<a href="{html.escape(url)}" style="{pill_style}">'
+            f'{escaped}</a>'
+        )
+    return f'<span style="{pill_style}">{escaped}</span>'
+
+
+def _make_copy_button(headline: str) -> str:
+    """Return a ⎘ link that copies headline text to the clipboard via JS."""
+    # json.dumps produces a properly escaped JS string literal;
+    # html.escape then makes it safe inside a double-quoted HTML attribute.
+    js_text = html.escape(json.dumps(headline))
+    return (
+        f'<a href="#" onclick="navigator.clipboard.writeText({js_text}); return false;" '
+        f'style="text-decoration:none; color:#aaaaaa; margin-left:6px; font-size:12px;" '
+        f'title="Copy headline">&#x2398;</a>'
     )
 
 
@@ -51,7 +70,9 @@ def _make_story_row(headline: str, links_md: str, url: Optional[str] = None) -> 
         url = links[0][1]
 
     # Build pills
-    pills = " ".join(_make_pill(name) for name, _ in links)
+    pills = " ".join(_make_pill(name, link_url) for name, link_url in links)
+
+    copy_btn = _make_copy_button(headline)
 
     # Build headline (linked or plain)
     if url:
@@ -65,7 +86,7 @@ def _make_story_row(headline: str, links_md: str, url: Optional[str] = None) -> 
     return f"""<tr><td style="padding:0 0 10px 0;">
   <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-left:4px solid {_AMBER}; background-color:{_CARD_BG};">
   <tr><td style="padding:10px 14px 10px 20px; font-size:14px; line-height:1.5; font-family:{_FONT};">
-    {headline_html}<br>{pills}
+    {headline_html}{copy_btn}<br>{pills}
   </td></tr>
   </table>
 </td></tr>"""
@@ -171,6 +192,15 @@ def format_newsletter_email(
     if last_cat:
         sections_html += "</table>\n"
 
+    # Build local file path for footer (files are saved as YYYY-MM-DD.html)
+    try:
+        from pathlib import Path
+        iso_date = datetime.now().strftime("%Y-%m-%d")
+        local_file = Path("out") / f"{iso_date}.html"
+        local_url = local_file.resolve().as_uri()  # file:///...
+    except Exception:
+        local_url = None
+
     # Assemble full email
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -231,6 +261,10 @@ def format_newsletter_email(
     <a href="{html.escape(site_url)}" style="font-size:14px; font-weight:600; color:{_NAVY}; text-decoration:none; font-family:{_FONT};">{html.escape(site_url.replace('https://', ''))}</a>
   </td></tr>
   <tr><td style="padding:8px 0 0 0; font-size:12px; color:{_GRAY}; text-align:center; font-family:{_FONT};">Generated on {escaped_date} by AI Newsletter Agent</td></tr>
+  {''.join([
+    f'<tr><td style="padding:12px 0 0 0; text-align:center;"><a href="{html.escape(local_url)}" style="font-size:12px; font-weight:600; color:{_NAVY}; text-decoration:none; font-family:{_FONT};">&#x2398;&nbsp;Open local copy with interactive features</a></td></tr>',
+    f'<tr><td style="padding:3px 0 0 0; font-size:11px; color:{_GRAY}; text-align:center; font-family:{_FONT}; word-break:break-all;">{html.escape(local_url)}</td></tr>',
+  ]) if local_url else ''}
   </table>
 </td>
 </tr>

@@ -4,7 +4,7 @@
 Each PromptConfig holds the system/user templates, model, and reasoning effort
 for a single LLM task. Templates use {variable} placeholders for str.format().
 
-All prompts use CLAUDE_SONNET_MODEL. Reasoning effort (0-10 scale):
+Reasoning effort (0-10 scale):
     0  -- trivial lookup
     2  -- simple binary classification
     4  -- moderate analysis
@@ -16,7 +16,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict
 
-from llm import MODEL_DICT, LLMModel
+from llm import (
+    CLAUDE_OPUS_CLI_MODEL,
+    CLAUDE_SONNET_CLI_MODEL,
+    GEMINI_FLASH_LITE_MODEL,
+    MINIMAX_M27_MODEL,
+    MODEL_DICT,
+    LLMModel,
+)
 
 
 @dataclass(frozen=True)
@@ -69,7 +76,7 @@ Input:
 
 HEADLINE_CLASSIFIER = PromptConfig(
     name="headline_classifier",
-    model=MODEL_DICT["gpt-5-mini"],
+    model=MODEL_DICT["gpt-5-nano"],
     # model=MODEL_DICT["gemini-3-flash-preview"],
     reasoning_effort=4,
     system_prompt="""\
@@ -275,8 +282,9 @@ Classify each article. Return only topics from the list above, exactly as writte
 
 EXTRACT_SUMMARIES = PromptConfig(
     name="extract_summaries",
-    model=MODEL_DICT["gpt-5-mini"],
+    # model=MODEL_DICT["gpt-5-mini"],
     # model=MODEL_DICT["gemini-3-flash-preview"],
+    model=MINIMAX_M27_MODEL,
     reasoning_effort=6,
     system_prompt="""\
 You are an expert AI news analyst. Your task is to create concise, informative bullet-point summaries of AI and technology articles for a professional newsletter audience.
@@ -424,7 +432,8 @@ Deduplicate the following news articles:
 
 RATE_QUALITY = PromptConfig(
     name="rate_quality",
-    model=MODEL_DICT["gpt-5-nano"],
+    model=MODEL_DICT["gpt-4.1-mini"],
+    # model=MODEL_DICT["gemini-3-flash-preview"],
     reasoning_effort=4,
     system_prompt="""\
 # ROLE AND OBJECTIVE
@@ -443,7 +452,8 @@ Return a confidence score 0.0–1.0 representing the probability the story is lo
 
 Rate a story as high confidence (near 1.0) if **any** of the following conditions is true:
 - Summary **CONTAINS** sensational language, hype or clickbait and **DOES NOT CONTAIN** concrete facts such as newsworthy events, announcements, actions, direct quotes from news-worthy organizations and leaders. Example: "2 magnificent AI stocks to hold forever"
-- Summary **ONLY** contains information about a prediction, a pundit's buy/sell recommendation, or someone's buy or sell of a stock, without underlying news or substantive analysis. Example: "AI predictions for NFL against the spread"
+- The **primary purpose** of the story is to recommend buying, selling, or holding an individual stock, to compare which ticker to own, to assign or discuss price targets, or to cover an analyst upgrade/downgrade or rating action. This applies **even when the story cites real financial data** (revenue, margins, growth rates, market cap) as support for the recommendation — the financial facts are scaffolding for the pick, not a discrete news event. Examples: "The Best AI Stock to Buy Now: Micron vs. Nvidia", "Credo Technology: Hypergrowth Leader (NASDAQ:CRDO)", "Stifel Chooses the Better AI Chip Stock", "AI predictions for NFL against the spread"
+- Summary is an analyst, pundit, or contributor opinion / thesis piece (e.g., Motley Fool "best stock to buy", Seeking Alpha bullish/bearish thesis, TipRanks analyst call) without a discrete underlying news event such as a product launch, announcement, filing, partnership, earnings release, executive action, regulatory action, or research paper.
 - Summary is **ONLY** speculative opinion without analysis or basis in fact. Example: "Grok AI predicts top memecoin for huge returns"
 
 Rate a story as low confidence (near 0.0) if:
@@ -456,7 +466,8 @@ Rate each news story's probability of being low quality:
 
 RATE_ON_TOPIC = PromptConfig(
     name="rate_on_topic",
-    model=MODEL_DICT["gpt-5-nano"],
+    model=MODEL_DICT["gpt-4.1-mini"],
+    # model=MODEL_DICT["gemini-3-flash-preview"],
     reasoning_effort=4,
     system_prompt="""\
 # ROLE AND OBJECTIVE
@@ -492,7 +503,8 @@ Rate each news story's probability of being on topic for an AI newsletter:
 
 RATE_IMPORTANCE = PromptConfig(
     name="rate_importance",
-    model=MODEL_DICT["gpt-5-nano"],
+    # model=MODEL_DICT["gemini-3-flash-preview"],
+    model=MODEL_DICT["gpt-4.1-mini"],
     reasoning_effort=4,
     system_prompt="""\
 # ROLE AND OBJECTIVE
@@ -525,7 +537,15 @@ Score higher if the story strongly satisfies 2 or more of the **IMPORTANCE FACTO
 11. **Actionability** : Enables concrete decisions for investors, policymakers, or practitioners.
 12. **Longevity** : Lasting repercussions over weeks, months, or years.
 13. **Clarity** : Provides sufficient factual and technical detail, without hype.
-14. **Human Interest** : Otherwise of high entertainment value and human interest.""",
+14. **Human Interest** : Otherwise of high entertainment value and human interest.
+
+## DOWNWEIGHT
+Regardless of how many importance factors appear to apply, score the story **low** (near 0.0) when its primary framing is any of the following — do **not** let factors #8 (Financial Materiality) or #11 (Actionability) pull the score up just because a ticker or financial number is mentioned:
+- A buy / sell / hold recommendation, "best stock to buy", or which-ticker-to-prefer comparison on individual public equities
+- An analyst rating action (upgrade, downgrade, initiation, price target change) on an individual stock
+- An investor-contributor thesis piece (Motley Fool, Seeking Alpha, TipRanks, etc.) without a discrete underlying news event
+
+A story being *about* a financially material company is not the same as the story itself being financially material news. Real financial materiality requires a discrete event — a launch, filing, partnership, earnings release, executive move, regulatory action, or research result — not just an opinion on whether to own the stock.""",
     user_prompt="""\
 Rate each news story's probability of being important for an AI newsletter:
 {input_text}""",
@@ -533,9 +553,10 @@ Rate each news story's probability of being important for an AI newsletter:
 
 BATTLE_PROMPT = PromptConfig(
     name="battle_prompt",
-    model=MODEL_DICT["gpt-5-mini"],
+    # model=MODEL_DICT["gpt-5-mini"],
     # model=MODEL_DICT["gemini-3-flash-preview"],
-    reasoning_effort=6,
+    model=GEMINI_FLASH_LITE_MODEL,
+    reasoning_effort=2,  # 6=medium, 4=low
     system_prompt="""\
 # ROLE AND OBJECTIVE
 You are an ** AI-newsletter editorial relevance judge**.
@@ -557,12 +578,13 @@ The id of each story in order of importance, from most important to least import
 5. ** Verifiability **: References publicly available code, data, benchmarks, products or other hard evidence.
 6. ** Timeliness **: Demonstrates a recent change in direction or velocity.
 7. ** Breadth **: Cross-industry, multidisciplinary, or international repercussions.
-8. ** Financial Materiality **: Significant revenue, valuation, or growth implications.
+8. ** Financial Materiality **: News with significant revenue, valuation, or growth implications (but not primarily a stock recommendation merely mentioning these numbers).
 9. ** Strategic Consequence **: Shifts competitive, power, or policy dynamics.
 10. ** Risk & Safety **: Raises or mitigates major alignment, security, or ethical risk.
-11. ** Actionability **: Enables concrete decisions for investors, policymakers, or practitioners.
+11. ** Actionability **: News or deep analysis enabling concrete decisions for investors, policymakers, or practitioners (not merely a stock recommendation).
 12. ** Longevity **: Lasting repercussions over weeks, months, or years.
 13. ** Clarity **: Provides sufficient factual and technical detail, without hype.
+14. ** News vs. Punditry **: The item reports a new development or surfaces deep analysis (not primarily a stock-picking opinion without an underlying news event).
 
 # SCORING METHODOLOGY (Private)
 For each factor, think carefully about how well it applies to each story. Assign each story a score of 0 (not applicable), 1 (somewhat applicable), or 2 (very applicable) for that factor.
@@ -785,44 +807,15 @@ Think careful and output the cleaned list for these topics:
 {input_text}""",
 )
 
-SYNTHESIZE_SECTION = PromptConfig(
-    name="synthesize_section",
-    model=MODEL_DICT["moonshotai/kimi-k2.5"],
-    reasoning_effort=8,
-    system_prompt="""\
-You are a senior technology journalist writing a short narrative paragraph for a newsletter section.
-
-# TASK
-Given a section title and its bullet-point headlines with source links, write a concise narrative paragraph (3-6 sentences) that synthesizes the section's stories into a coherent briefing a busy reader can absorb in 15 seconds.
-
-# INPUT
-- section_title: the section heading
-- stories: list of {headline, links, summary} objects (headlines are the edited newsletter bullets, summaries are the detailed article summaries for context)
-
-# RULES
-1. **Synthesize across stories**: Weave the most important facts from multiple stories into a flowing narrative. Don't just list them sequentially.
-2. **Lead with the biggest story**: Open with the highest-impact development.
-3. **Connect the dots**: Show how stories relate — cause/effect, contrast, or trend.
-4. **Cite sources inline**: Use (Source Name) when attributing specific facts, especially when sources disagree or add unique detail.
-5. **Include key numbers**: Dollar amounts, percentages, dates — the concrete facts that make it memorable.
-6. **Keep it tight**: 3-6 sentences max. Every sentence should earn its place.
-7. **No new information**: Only use facts from the provided headlines and summaries.
-8. **Tone**: Authoritative, clear, slightly conversational. Like a knowledgeable colleague briefing you.
-
-# OUTPUT
-Return a JSON object matching the provided schema with a single "value" field containing the narrative paragraph as a string. No markdown formatting, no bullet points — just flowing prose.""",
-    user_prompt="""\
-SECTION: {section_title}
-
-STORIES:
-{input_text}""",
-)
+# SYNTHESIZE_SECTION not used
 
 WRITE_SECTION = PromptConfig(
     name="write_section",
     # model=MODEL_DICT["gpt-5-mini"],
-    model=MODEL_DICT["moonshotai/kimi-k2.5"],
+    # model=MODEL_DICT["z-ai/glm-5.1"],
+    # model=MODEL_DICT["moonshotai/kimi-k2.6"],
     # model=MODEL_DICT["gemini-3-flash-preview"],
+    model=CLAUDE_OPUS_CLI_MODEL,
     reasoning_effort=8,
     system_prompt="""\
 You are a newsletter editor transforming a collection of raw news stories into a compelling, coherent topic summary.
@@ -851,6 +844,7 @@ Transform the list of news stories into a well-structured newsletter section wit
 
 3. **Write headlines**: For each story, write a crisp headline-style headline derived from the short summary or summaries
 - Make each headlines <= 25 words: crystal clear, punchy, informative, specific, factual, active voice.
+- Use sentence case (capitalize only the first word and proper nouns). Do NOT capitalize every word or use all-uppercase headlines.
 - No clickbait, hype words ("groundbreaking," "revolutionary"), or jargon; neutral tone throughout.
 - include key numbers/dates/entities if present
 
@@ -871,8 +865,10 @@ STORIES:
 CRITIQUE_NEWSLETTER = PromptConfig(
     name="critique_newsletter",
     # model=MODEL_DICT["gpt-5-mini"],
-    model=MODEL_DICT["moonshotai/kimi-k2.5"],
+    # model=MODEL_DICT["z-ai/glm-5.1"],
+    # model=MODEL_DICT["moonshotai/kimi-k2.6"],
     # model=MODEL_DICT["gemini-3.1-pro-preview"],
+    model=CLAUDE_OPUS_CLI_MODEL,
     reasoning_effort=8,
     system_prompt="""\
 You are an expert newsletter editor with 15+ years of experience critiquing technology publications. Your role is to analyze a newsletter's quality and provide scoring and comprehensive, actionable feedbacks and instructions to edit for structure, format, clarity (without changing meaning or adding new information).
@@ -908,6 +904,7 @@ Evaluate the newsletter across the dimensions provided, return a JSON object in 
 **headline_quality: (0-10)**
 - Each headline is 25 words or less.
 - All headlines are AI/tech relevant.
+- Headlines use sentence case (capitalize only the first word and proper nouns). No title case (every word capitalized) or all-uppercase headlines.
 - High-value stories: No clickbait or pure speculative opinion.
 - Biggest/most consequential stories toward top of section, forward-looking or lighter items last.
 - No redundant headlines or URLs across sections or within sections.
@@ -956,9 +953,10 @@ Provide:
 CRITIQUE_SECTION = PromptConfig(
     name="critique_section",
     # model=MODEL_DICT["gpt-5-mini"],
-    # model=MODEL_DICT["z-ai/glm-5"],
-    model=MODEL_DICT["moonshotai/kimi-k2.5"],
+    # model=MODEL_DICT["z-ai/glm-5.1"],
+    # model=MODEL_DICT["moonshotai/kimi-k2.6"],
     # model=MODEL_DICT["gemini-3-flash-preview"],
+    model=CLAUDE_OPUS_CLI_MODEL,
     reasoning_effort=8,
     system_prompt="""\
 You are an expert newsletter editor specializing in technology news curation. Your task is to critique individual newsletter sections and provide actionable recommendations to copy edit for clarity, quality, and structure.
@@ -972,6 +970,7 @@ For the section, you WILL:
 
 Quality Guidelines:
     - Headlines should be <= 25 words, active voice, specific and concrete, no clickbait, hype or jargon
+    - Headlines must use sentence case (capitalize only the first word and proper nouns). Flag any title-case or all-uppercase headlines.
     - Section titles should be <= 7 words, creative/punny but clear
     - Each section should have 2-7 stories (except "Other News" which has no limit)
     - Stories should share a common theme or narrative arc
@@ -997,7 +996,7 @@ Return a structured critique with specific actions for each story by ID in the s
 # DRAFT_NEWSLETTER = PromptConfig(
 #     name="draft_newsletter",
 #     # model=MODEL_DICT["gpt-5-mini"],
-#     model=MODEL_DICT["moonshotai/kimi-k2.5"],
+#     model=MODEL_DICT["moonshotai/kimi-k2.6"],
 #     # model=MODEL_DICT["gemini-3.1-pro-preview"],
 #     reasoning_effort=8,
 #     system_prompt="""\
@@ -1106,9 +1105,12 @@ Return a structured critique with specific actions for each story by ID in the s
 IMPROVE_NEWSLETTER = PromptConfig(
     name="improve_newsletter",
     # model=MODEL_DICT["gpt-5-mini"],
-    model=MODEL_DICT["moonshotai/kimi-k2.5"],
+    # model=MODEL_DICT["z-ai/glm-5.1"],
+    # model=MODEL_DICT["moonshotai/kimi-k2.6"],
     # model=MODEL_DICT["gemini-3.1-pro-preview"],
-    reasoning_effort=8,
+    # model=MODEL_DICT["gemini-3-flash-preview"],
+    model=CLAUDE_OPUS_CLI_MODEL,
+    reasoning_effort=6,
     system_prompt="""\
 You are an expert newsletter editor tasked with implementing specific edits for format, clarity and structure to a technology newsletter draft.
 
@@ -1124,6 +1126,7 @@ You will receive:
 **What you will fix, paying attention to critique recommendations:**
 - Edit for format, clarity, and structure
 - Improve headlines to be concise, clear, and <= 25 words
+- Ensure headlines use sentence case (capitalize only the first word and proper nouns). Fix any title-case or all-uppercase headlines.
 - Improve section titles to be both creative/punny AND clear, <= 7 words
 - Remove duplicate and nonessential headlines
 - Order headlines: biggest/most consequential first, forward-looking or lighter items last
@@ -1158,8 +1161,10 @@ Return the complete rewritten newsletter in markdown.""",
 GENERATE_NEWSLETTER_TITLE = PromptConfig(
     name="generate_newsletter_title",
     # model=MODEL_DICT["gpt-5-mini"],
-    model=MODEL_DICT["moonshotai/kimi-k2.5"],
+    # model=MODEL_DICT["z-ai/glm-5.1"],
+    # model=MODEL_DICT["moonshotai/kimi-k2.6"],
     # model=MODEL_DICT["gemini-3-flash-preview"],
+    model=MINIMAX_M27_MODEL,
     reasoning_effort=8,
     system_prompt="""\
 You are an expert newsletter editor specializing in crafting compelling titles for technology newsletters.
@@ -1221,7 +1226,6 @@ ALL_PROMPTS: Dict[str, PromptConfig] = {
         CAT_PROPOSAL,
         CAT_ASSIGNMENT,
         CAT_CLEANUP,
-        SYNTHESIZE_SECTION,
         WRITE_SECTION,
         CRITIQUE_NEWSLETTER,
         CRITIQUE_SECTION,
@@ -1260,7 +1264,7 @@ def load_prompt(name: str) -> tuple[str, str, str, str | None]:
     if pc is None:
         raise KeyError(f"Prompt '{name}' not found")
     # Convert int effort to string for LLMagent compat
-    if pc.reasoning_effort == -1 or pc.reasoning_effort == 0:
+    if pc.reasoning_effort == -1 or pc.reasoning_effort == 0 or not pc.model.supports_reasoning:
         effort_str = None
     else:
         rounded = round(pc.reasoning_effort / 2) * 2

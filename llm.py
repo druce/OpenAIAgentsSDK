@@ -52,6 +52,7 @@ class Vendor(str, Enum):
     OPENAI = "openai"
     GEMINI = "gemini"
     OPENROUTER = "openrouter"
+    CLAUDE_CLI = "claude_cli"
 
 
 @dataclass(frozen=True)
@@ -139,6 +140,16 @@ GPT41_MODEL = LLMModel(
     display_name="GPT-4.1",
 )
 
+GPT41_MINI_MODEL = LLMModel(
+    model_id="gpt-4.1-mini",
+    vendor=Vendor.OPENAI,
+    supports_logprobs=True,
+    supports_reasoning=False,
+    supports_temperature=True,
+    default_max_tokens=4096,
+    display_name="GPT-4.1 Mini",
+)
+
 GEMINI_FLASH_MODEL = LLMModel(
     model_id="gemini-3-flash-preview",
     vendor=Vendor.GEMINI,
@@ -159,14 +170,24 @@ GEMINI_PRO_MODEL = LLMModel(
     display_name="Gemini 3.1 Pro",
 )
 
+GEMINI_FLASH_LITE_MODEL = LLMModel(
+    model_id="gemini-3.1-flash-lite-preview",
+    vendor=Vendor.GEMINI,
+    supports_logprobs=False,
+    supports_reasoning=False,
+    supports_temperature=True,
+    default_max_tokens=65536,
+    display_name="Gemini 3.1 Flash Lite",
+)
+
 GLM5_MODEL = LLMModel(
-    model_id="z-ai/glm-5",
+    model_id="z-ai/glm-5.1",
     vendor=Vendor.OPENROUTER,
     supports_logprobs=False,
     supports_reasoning=True,
     supports_temperature=False,
     default_max_tokens=32768,
-    display_name="GLM-5",
+    display_name="GLM-5.1",
 )
 
 SEED_MINI_MODEL = LLMModel(
@@ -179,14 +200,14 @@ SEED_MINI_MODEL = LLMModel(
     display_name="Seed 2.0 Mini",
 )
 
-KIMI_K25_MODEL = LLMModel(
-    model_id="moonshotai/kimi-k2.5",
+KIMI_K26_MODEL = LLMModel(
+    model_id="moonshotai/kimi-k2.6",
     vendor=Vendor.OPENROUTER,
     supports_logprobs=False,
     supports_reasoning=True,
     supports_temperature=True,
     default_max_tokens=32768,
-    display_name="Kimi K2.5",
+    display_name="Kimi K2.6",
 )
 
 HUNTER_ALPHA_MODEL = LLMModel(
@@ -209,6 +230,56 @@ MINIMAX_M27_MODEL = LLMModel(
     display_name="MiniMax M2.7",
 )
 
+GROK_41_FAST_MODEL = LLMModel(
+    model_id="x-ai/grok-4.1-fast",
+    vendor=Vendor.OPENROUTER,
+    supports_logprobs=False,
+    supports_reasoning=True,
+    supports_temperature=True,
+    default_max_tokens=32000,
+    display_name="Grok 4.1 Fast",
+)
+
+MIMO_V2_PRO_MODEL = LLMModel(
+    model_id="xiaomi/mimo-v2-pro",
+    vendor=Vendor.OPENROUTER,
+    supports_logprobs=False,
+    supports_reasoning=True,
+    supports_temperature=True,
+    default_max_tokens=32000,
+    display_name="MiMo v2 Pro",
+)
+
+CLAUDE_OPUS_CLI_MODEL = LLMModel(
+    model_id="claude-opus-4-7-cli",
+    vendor=Vendor.CLAUDE_CLI,
+    supports_logprobs=False,
+    supports_reasoning=False,
+    supports_temperature=False,
+    default_max_tokens=16384,
+    display_name="Claude Opus 4.7 (CLI)",
+)
+
+CLAUDE_SONNET_CLI_MODEL = LLMModel(
+    model_id="claude-sonnet-4-6-cli",
+    vendor=Vendor.CLAUDE_CLI,
+    supports_logprobs=False,
+    supports_reasoning=False,
+    supports_temperature=False,
+    default_max_tokens=16384,
+    display_name="Claude Sonnet 4.6 (CLI)",
+)
+
+CLAUDE_HAIKU_CLI_MODEL = LLMModel(
+    model_id="claude-haiku-4-5-20251001-cli",
+    vendor=Vendor.CLAUDE_CLI,
+    supports_logprobs=False,
+    supports_reasoning=False,
+    supports_temperature=False,
+    default_max_tokens=16384,
+    display_name="Claude Haiku 4.5 (CLI)",
+)
+
 
 MODEL_DICT: Dict[str, LLMModel] = {
     # Anthropic
@@ -219,16 +290,24 @@ MODEL_DICT: Dict[str, LLMModel] = {
     GPT5_MODEL.model_id: GPT5_MODEL,
     GPT5_MINI_MODEL.model_id: GPT5_MINI_MODEL,
     GPT41_MODEL.model_id: GPT41_MODEL,
+    GPT41_MINI_MODEL.model_id: GPT41_MINI_MODEL,
     GPT5_NANO_MODEL.model_id: GPT5_NANO_MODEL,
     # Gemini
     GEMINI_FLASH_MODEL.model_id: GEMINI_FLASH_MODEL,
     GEMINI_PRO_MODEL.model_id: GEMINI_PRO_MODEL,
+    GEMINI_FLASH_LITE_MODEL.model_id: GEMINI_FLASH_LITE_MODEL,
     # OpenRouter
     GLM5_MODEL.model_id: GLM5_MODEL,
     SEED_MINI_MODEL.model_id: SEED_MINI_MODEL,
-    KIMI_K25_MODEL.model_id: KIMI_K25_MODEL,
+    KIMI_K26_MODEL.model_id: KIMI_K26_MODEL,
     HUNTER_ALPHA_MODEL.model_id: HUNTER_ALPHA_MODEL,
     MINIMAX_M27_MODEL.model_id: MINIMAX_M27_MODEL,
+    GROK_41_FAST_MODEL.model_id: GROK_41_FAST_MODEL,
+    MIMO_V2_PRO_MODEL.model_id: MIMO_V2_PRO_MODEL,
+    # Claude CLI (OAuth / Max subscription)
+    CLAUDE_OPUS_CLI_MODEL.model_id: CLAUDE_OPUS_CLI_MODEL,
+    CLAUDE_SONNET_CLI_MODEL.model_id: CLAUDE_SONNET_CLI_MODEL,
+    CLAUDE_HAIKU_CLI_MODEL.model_id: CLAUDE_HAIKU_CLI_MODEL,
 }
 
 
@@ -256,7 +335,8 @@ class AsyncTokenBucketRateLimiter:
         async with self._lock:
             now = time.monotonic()
             elapsed = now - self._last_refill
-            self._tokens = min(self.max_tokens, self._tokens + elapsed * self._rate)
+            self._tokens = min(
+                self.max_tokens, self._tokens + elapsed * self._rate)
             self._last_refill = now
 
             if self._tokens < 1.0:
@@ -305,7 +385,8 @@ def _resolve_model(model_id: str) -> LLMModel:
     else:
         vendor = Vendor.OPENAI
 
-    _logger.debug(f"Unknown model '{model_id}', inferring vendor={vendor.value}")
+    _logger.debug(
+        f"Unknown model '{model_id}', inferring vendor={vendor.value}")
     return LLMModel(
         model_id=model_id,
         vendor=vendor,
@@ -325,7 +406,8 @@ def _resolve_model(model_id: str) -> LLMModel:
 # Reasoning effort mapping (int 0-10 scale used by vendor agents)
 # ---------------------------------------------------------------------------
 
-_ANTHROPIC_THINKING_MAP = {-1: 0, 0: 0, 2: 1024, 4: 2048, 6: 4096, 8: 8192, 10: 16384}
+_ANTHROPIC_THINKING_MAP = {-1: 0, 0: 0, 2: 1024,
+                           4: 2048, 6: 4096, 8: 8192, 10: 16384}
 _OPENAI_REASONING_MAP = {
     -1: None,
     0: None,
@@ -335,11 +417,13 @@ _OPENAI_REASONING_MAP = {
     8: "high",
     10: "high",
 }
-_GEMINI_THINKING_MAP = {-1: 0, 0: 0, 2: 1024, 4: 2048, 6: 4096, 8: 8192, 10: 16384}
+_GEMINI_THINKING_MAP = {-1: 0, 0: 0, 2: 1024,
+                        4: 2048, 6: 4096, 8: 8192, 10: 16384}
 
 # Bridge between old string API ("low"/"medium"/"high") and new int API (0-10)
 _EFFORT_STR_TO_INT = {"low": 2, "medium": 6, "high": 8}
-_EFFORT_INT_TO_STR = {0: None, 2: "low", 4: "low", 6: "medium", 8: "high", 10: "high"}
+_EFFORT_INT_TO_STR = {0: None, 2: "low",
+                      4: "low", 6: "medium", 8: "high", 10: "high"}
 
 
 def _convert_effort(effort) -> int:
@@ -478,7 +562,8 @@ class _VendorAgent(ABC):
             raw = await self._call_with_retry(self.system_prompt, user_text, None)
             return await self._parse_logprobs(raw, target_tokens)
         else:
-            ConfidenceModel = create_model("ConfidenceModel", confidence=(float, ...))
+            ConfidenceModel = create_model(
+                "ConfidenceModel", confidence=(float, ...))
             schema = ConfidenceModel.model_json_schema()
             raw = await self._call_with_retry(self.system_prompt, user_text, schema)
             parsed = await self._parse_structured(raw, ConfidenceModel)
@@ -492,7 +577,8 @@ class _VendorAgent(ABC):
 class _AnthropicAgent(_VendorAgent):
     """Anthropic Claude agent using tool_use for structured output."""
 
-    _fatal_exceptions = (anthropic.AuthenticationError, anthropic.BadRequestError)
+    _fatal_exceptions = (anthropic.AuthenticationError,
+                         anthropic.BadRequestError)
     _temporary_exceptions = (
         anthropic.RateLimitError,
         anthropic.APIConnectionError,
@@ -512,7 +598,8 @@ class _AnthropicAgent(_VendorAgent):
         }
         thinking_tokens = _anthropic_thinking_tokens(self.reasoning_effort)
         if thinking_tokens > 0:
-            kwargs["thinking"] = {"type": "enabled", "budget_tokens": thinking_tokens}
+            kwargs["thinking"] = {"type": "enabled",
+                                  "budget_tokens": thinking_tokens}
         else:
             if self.model.supports_temperature:
                 kwargs["temperature"] = self.temperature
@@ -525,7 +612,8 @@ class _AnthropicAgent(_VendorAgent):
                     "input_schema": output_schema,
                 }
             ]
-            kwargs["tool_choice"] = {"type": "tool", "name": "structured_output"}
+            kwargs["tool_choice"] = {
+                "type": "tool", "name": "structured_output"}
 
         response = await self._client.messages.create(**kwargs)
         if response.stop_reason == "max_tokens":
@@ -570,9 +658,16 @@ class _AnthropicAgent(_VendorAgent):
 
     def _extract_text(self, raw) -> str:
         for block in raw.content:
-            if block.type == "text":
+            if block.type == "text" and block.text and block.text.strip():
                 return block.text
-        return ""
+        stop = getattr(raw, "stop_reason", "unknown")
+        _logger.error(
+            f"Anthropic empty response: stop_reason={stop}, "
+            f"model={self.model.model_id}, raw={raw!r}"
+        )
+        raise RuntimeError(
+            f"Anthropic returned no text block (stop_reason={stop})."
+        )
 
 
 def _make_openai_strict_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
@@ -648,7 +743,18 @@ class _OpenAIAgent(_VendorAgent):
         return probs
 
     def _extract_text(self, raw) -> str:
-        return raw.choices[0].message.content
+        content = raw.choices[0].message.content if raw.choices else None
+        if not content or not content.strip():
+            finish = raw.choices[0].finish_reason if raw.choices else "unknown"
+            _logger.error(
+                f"{type(self).__name__} empty response: finish_reason={finish}, "
+                f"model={self.model.model_id}, raw={raw!r}"
+            )
+            raise RuntimeError(
+                f"{type(self).__name__} returned empty response "
+                f"(finish_reason={finish})."
+            )
+        return content
 
 
 class _OpenRouterAgent(_OpenAIAgent):
@@ -670,7 +776,7 @@ class _OpenRouterAgent(_OpenAIAgent):
 
     async def _call_llm(self, system, user, output_schema):
         # Embed schema in system prompt since many OpenRouter models
-        # don't support json_schema strict mode (e.g. GLM-5 returns empty strings).
+        # don't support json_schema strict mode (e.g. GLM-5.1 returns empty strings).
         if output_schema:
             schema_str = json.dumps(output_schema, indent=2)
             system = (
@@ -690,7 +796,8 @@ class _OpenRouterAgent(_OpenAIAgent):
         if self.model.supports_temperature:
             kwargs["temperature"] = self.temperature
         # OpenRouter uses extra_body for reasoning effort instead of reasoning_effort param
-        effort_str = _EFFORT_INT_TO_STR.get(_validate_effort(self.reasoning_effort))
+        effort_str = _EFFORT_INT_TO_STR.get(
+            _validate_effort(self.reasoning_effort))
         if effort_str and self.model.supports_reasoning:
             kwargs["extra_body"] = {"reasoning": {"effort": effort_str}}
         if output_schema:
@@ -732,11 +839,106 @@ class _OpenRouterAgent(_OpenAIAgent):
             raise original_err
 
 
+class _ClaudeCliAgent(_VendorAgent):
+    """Claude CLI agent — spawns `claude -p` subprocess with OAuth (Max subscription) auth.
+
+    Structured output is handled by embedding the JSON schema in the combined
+    system+user prompt, then parsing the text response as JSON — same pattern
+    as _OpenRouterAgent.  The '-cli' suffix in model_id is stripped when
+    constructing the --model flag (e.g. 'claude-sonnet-4-6-cli' → 'claude-sonnet-4-6').
+    """
+
+    _fatal_exceptions = ()
+    _temporary_exceptions = (RuntimeError,)
+
+    def _cli_model_id(self) -> str:
+        return self.model.model_id.removesuffix("-cli")
+
+    async def _call_llm(self, system: str, user: str, output_schema) -> str:
+        if output_schema:
+            schema_str = json.dumps(output_schema, indent=2)
+            system = (
+                f"{system}\n\n"
+                f"You MUST respond with valid JSON matching this exact schema:\n"
+                f"```json\n{schema_str}\n```\n"
+                f"Output ONLY the JSON object, no other text."
+            )
+
+        combined = f"[INSTRUCTIONS]\n{system}\n\n[TASK]\n{user}"
+
+        cmd = [
+            "claude",
+            "--output-format", "json",
+            "-p", combined,
+            "--model", self._cli_model_id(),
+        ]
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=self._call_timeout
+        )
+
+        if proc.returncode != 0:
+            err = stderr.decode().strip()
+            raise RuntimeError(
+                f"claude CLI exited {proc.returncode}: {err[:400]}"
+            )
+
+        try:
+            payload = json.loads(stdout.decode())
+        except json.JSONDecodeError as e:
+            raise RuntimeError(
+                f"claude CLI returned non-JSON: {stdout.decode()[:200]}"
+            ) from e
+
+        if payload.get("is_error"):
+            raise RuntimeError(
+                f"claude CLI error response: {payload.get('result', 'unknown')[:400]}"
+            )
+
+        return payload["result"]
+
+    async def _parse_structured(self, raw: str, output_type: Type[BaseModel]) -> BaseModel:
+        text = raw.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[-1]
+        if text.endswith("```"):
+            text = text[:-3].strip()
+        try:
+            return output_type.model_validate_json(text)
+        except Exception as original_err:
+            try:
+                decoder = json.JSONDecoder()
+                first_obj, end_idx = decoder.raw_decode(text)
+                if isinstance(first_obj, dict) and (
+                    "$defs" in first_obj or "properties" in first_obj
+                ):
+                    remainder = text[end_idx:].strip()
+                    if remainder:
+                        return output_type.model_validate_json(remainder)
+            except Exception:
+                pass
+            raise original_err
+
+    async def _parse_logprobs(self, raw, target_tokens):
+        return {}
+
+    def _extract_text(self, raw: str) -> str:
+        if not raw or not raw.strip():
+            raise RuntimeError("claude CLI returned empty text response")
+        return raw
+
+
 class _GeminiAgent(_VendorAgent):
     """Google Gemini agent using response_schema for structured output."""
 
     _fatal_exceptions = ()
-    _temporary_exceptions = (genai_errors.ClientError, genai_errors.ServerError)
+    _temporary_exceptions = (genai_errors.ClientError,
+                             genai_errors.ServerError)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -794,7 +996,21 @@ class _GeminiAgent(_VendorAgent):
         return {}
 
     def _extract_text(self, raw) -> str:
-        return raw.text
+        text = getattr(raw, "text", None)
+        if text is None or not text.strip():
+            finish = (
+                raw.candidates[0].finish_reason
+                if getattr(raw, "candidates", None)
+                else "unknown"
+            )
+            _logger.error(
+                f"Gemini empty response: finish_reason={finish}, "
+                f"model={self.model.model_id}, raw={raw!r}"
+            )
+            raise RuntimeError(
+                f"Gemini returned empty response (finish_reason={finish})."
+            )
+        return text
 
 
 def _create_vendor_agent(
@@ -824,6 +1040,8 @@ def _create_vendor_agent(
         return _GeminiAgent(**kwargs)
     elif model.vendor == Vendor.OPENROUTER:
         return _OpenRouterAgent(**kwargs)
+    elif model.vendor == Vendor.CLAUDE_CLI:
+        return _ClaudeCliAgent(**kwargs)
     else:
         raise ValueError(f"Unsupported vendor: {model.vendor}")
 
@@ -836,14 +1054,14 @@ def _create_vendor_agent(
 async def paginate_df_async(df: pd.DataFrame, chunk_size: int = 25):
     """Async generator for DataFrame pagination."""
     for i in range(0, len(df), chunk_size):
-        yield df.iloc[i : i + chunk_size]
+        yield df.iloc[i: i + chunk_size]
         await asyncio.sleep(0)
 
 
 async def paginate_list_async(lst, chunk_size: int = 25):
     """Async generator for list pagination."""
     for i in range(0, len(lst), chunk_size):
-        yield lst[i : i + chunk_size]
+        yield lst[i: i + chunk_size]
         await asyncio.sleep(0)
 
 
@@ -900,7 +1118,8 @@ class LangfuseClient:
     def __init__(self, logger: Optional[logging.Logger] = None):
         self.logger = logger or _logger
         if self.logger:
-            self.logger.info("Initialized LangfuseClient (local prompt loader)")
+            self.logger.info(
+                "Initialized LangfuseClient (local prompt loader)")
 
     def get_prompt(self, prompt_name: str) -> tuple[str, str, str, str]:
         """
@@ -1004,7 +1223,8 @@ class LLMagent:
         try:
             return self.user_prompt.format(**variables)
         except KeyError as e:
-            raise ValueError(f"Missing required variable in prompt template: {e}")
+            raise ValueError(
+                f"Missing required variable in prompt template: {e}")
         except Exception as e:
             raise ValueError(f"Error formatting prompts: {e}")
 
@@ -1190,7 +1410,8 @@ class LLMagent:
             response = await client.chat.completions.create(**api_params)
             message = response.choices[0].message
             if hasattr(message, "refusal") and message.refusal:
-                self.logger.error(f"LLM refused request. User message: {user_message}")
+                self.logger.error(
+                    f"LLM refused request. User message: {user_message}")
                 raise ValueError(f"LLM refused the request: {message.refusal}")
             response_text = message.content
             logprobs_data = response.choices[0].logprobs
@@ -1200,7 +1421,8 @@ class LLMagent:
 
         if self.verbose:
             self.logger.info(f"Response text: {response_text}")
-            self.logger.info(f"Logprobs available: {logprobs_data is not None}")
+            self.logger.info(
+                f"Logprobs available: {logprobs_data is not None}")
 
         return response_text, logprobs_data
 
@@ -1240,7 +1462,7 @@ class LLMagent:
             return []
 
         batches = [
-            variables_list[i : i + batch_size]
+            variables_list[i: i + batch_size]
             for i in range(0, len(variables_list), batch_size)
         ]
 
@@ -1273,9 +1495,11 @@ class LLMagent:
                             received_ids = []
                             for result in batch_results:
                                 if hasattr(result, item_id_field):
-                                    received_ids.append(getattr(result, item_id_field))
+                                    received_ids.append(
+                                        getattr(result, item_id_field))
                                 elif (
-                                    isinstance(result, dict) and item_id_field in result
+                                    isinstance(
+                                        result, dict) and item_id_field in result
                                 ):
                                     received_ids.append(result[item_id_field])
                                 else:
@@ -1386,9 +1610,11 @@ class LLMagent:
                                             getattr(item, item_id_field)
                                         )
                                     elif (
-                                        isinstance(item, dict) and item_id_field in item
+                                        isinstance(
+                                            item, dict) and item_id_field in item
                                     ):
-                                        received_ids.append(item[item_id_field])
+                                        received_ids.append(
+                                            item[item_id_field])
                                     else:
                                         error_msg = f"Result item missing required ID field '{item_id_field}': {item}"
                                         self.logger.warning(
@@ -1451,7 +1677,8 @@ class LLMagent:
                 raise
             except asyncio.TimeoutError as e:
                 last_exc = e
-                self.logger.error(f"Timeout error in filter_dataframe_chunk: {str(e)}")
+                self.logger.error(
+                    f"Timeout error in filter_dataframe_chunk: {str(e)}")
                 if attempt < retries - 1:
                     await asyncio.sleep(2**attempt)
                     continue
@@ -1467,7 +1694,8 @@ class LLMagent:
                 raise
             except ValueError as e:
                 last_exc = e
-                self.logger.error(f"Invalid data in filter_dataframe_chunk: {str(e)}")
+                self.logger.error(
+                    f"Invalid data in filter_dataframe_chunk: {str(e)}")
                 if attempt < retries - 1:
                     await asyncio.sleep(2**attempt)
                     continue
@@ -1482,7 +1710,8 @@ class LLMagent:
                     continue
                 raise
 
-        raise last_exc or RuntimeError(f"Unknown error after {retries} attempts")
+        raise last_exc or RuntimeError(
+            f"Unknown error after {retries} attempts")
 
     async def _process_indexed_chunk(
         self,
@@ -1553,12 +1782,14 @@ class LLMagent:
                         target_tokens=target_tokens, **row_vars
                     )
 
-            tasks = [_process_row_with_sem(row) for _, row in input_df.iterrows()]
+            tasks = [_process_row_with_sem(row)
+                     for _, row in input_df.iterrows()]
             prob_dicts = await asyncio.gather(*tasks)
             probabilities = [
                 prob_dict.get(target_tokens[0], 0.0) for prob_dict in prob_dicts
             ]
-            self.logger.info(f"Completed {len(probabilities)} probability requests")
+            self.logger.info(
+                f"Completed {len(probabilities)} probability requests")
             return pd.Series(probabilities, index=input_df.index)
 
         # Create chunks
@@ -1659,7 +1890,8 @@ class LLMagent:
             return result
 
         if hasattr(result, "results_list"):
-            values = [getattr(item, value_field) for item in result.results_list]
+            values = [getattr(item, value_field)
+                      for item in result.results_list]
         elif isinstance(result, list):
             values = [getattr(item, value_field) for item in result]
         else:
@@ -1709,7 +1941,8 @@ async def run_prompt_on_dataframe(
     )
 
     if item_list_field is None or value_field is None:
-        detected_list_field, detected_value_field = _introspect_output_type(output_type)
+        detected_list_field, detected_value_field = _introspect_output_type(
+            output_type)
         if item_list_field is None:
             item_list_field = detected_list_field or "results_list"
         if value_field is None:

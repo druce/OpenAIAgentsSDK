@@ -16,6 +16,7 @@ VENDOR_RPM_LIMITS = {
     "openai": 1000,
     "gemini": 1000,
     "openrouter": 200,
+    "claude_cli": 20,
 }
 FIREFOX_PROFILE_PATH = os.getenv('FIREFOX_PROFILE_PATH')
 if not FIREFOX_PROFILE_PATH:
